@@ -75,5 +75,7 @@ def git_branch_info(root: Path) -> dict:
 
 
 def slugify(text: str, max_len: int = 40) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    """Filename slug for generated SSOT sections. Keeps Hangul (Korean headings stay
+    readable); task IDs are NOT slugified with this — their grammar stays ASCII."""
+    slug = re.sub(r"[^a-z0-9가-힣]+", "-", text.lower()).strip("-")
     return slug[:max_len].rstrip("-") or "section"

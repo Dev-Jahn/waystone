@@ -21,5 +21,8 @@ in the user's configured language only when something needs flagging: blocked ta
 dependencies are all done (stale `blocked` status), projects with `✗ path missing`, or
 pending `decision/...` tasks awaiting the user. Otherwise add nothing.
 
-Projects appear here after `/jahns-workflow:init` registers them. Each project's visual
-dependency graph is its `ROADMAP.md` (rendered by GitHub as Mermaid).
+Projects appear here after `/jahns-workflow:init` registers them. Projects without a local
+clone on this machine can be tracked remotely: add `{ "name": "...", "repo": "owner/name" }`
+to `~/.claude/jahns-workflow/projects.json` and the dashboard fetches their `tasks.yaml` via
+`gh api` (default branch). Each project's visual dependency graph is its `ROADMAP.md`
+(rendered by GitHub as Mermaid).
