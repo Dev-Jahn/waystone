@@ -56,8 +56,12 @@ PROGRESS.md with the current month + the header pointers.
 ## Step 5 — Review packet
 
 Generate `<reviews_dir>/<round-id>-request.md` from `<plugin-root>/templates/review-request.md`.
-Fill it for a reviewer who cannot browse the repo: include the key diffs/pseudocode inline,
-state every load-bearing claim falsifiably, and list the test ladder's known blind spots.
+External reviewers typically browse the repo directly (e.g. ChatGPT's GitHub connector), so:
+record the pushed HEAD hash in the packet (verify the round's commits are actually pushed —
+`git status -sb`; if not, note that the user must push before requesting review), and prefer
+pointers (file paths, §-anchors, commit hashes) over inlined diffs — inline only small
+load-bearing snippets, or full diffs/pseudocode if the reviewer has no repo access. State
+every load-bearing claim falsifiably and list the test ladder's known blind spots.
 
 ## Step 6 — Report
 

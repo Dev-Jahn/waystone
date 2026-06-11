@@ -5,16 +5,19 @@
 
 ## Scope
 
-- Project: {project} @ {branch}, commits {first}..{last} ({n} commits, {diffstat})
+- Repo: {owner/name}, branch {branch}, **HEAD {pushed commit hash}** — review the code at this exact commit
+- Commits this round: {first}..{last} ({n} commits, {diffstat})
 - Round goal: {one paragraph}
 - Tasks shipped: {id — title, one per line}
 - SSOT sections touched: {§-anchors, or "none"}
 
 ## What changed
 
-{Concise narrative of the changes, written for a reviewer who has not seen the repo today.
-Include key diffs/pseudocode inline where the reviewer needs them — the reviewer cannot
-browse the repo.}
+{Concise narrative with pointers the reviewer can follow directly in the repo: file paths,
+SSOT §-anchors, commit hashes. Reviewers with repo access (e.g. a GitHub connector) should
+read the actual code at the HEAD above rather than trusting this summary. Inline only small
+load-bearing snippets where reading them in place saves a lookup; if the reviewer has NO repo
+access, inline the key diffs/pseudocode instead.}
 
 ## Claims to verify (please attack these)
 
