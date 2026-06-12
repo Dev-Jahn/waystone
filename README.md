@@ -23,7 +23,7 @@ Full convention: [references/conventions.md](references/conventions.md).
 | `/jahns-workflow:init` | One-click setup; non-destructive retrofit for in-progress projects (incl. agent-memory cleanup, project registration) |
 | `/jahns-workflow:round` | Close a work round: sync registry → PROGRESS entry + archive → refresh views → review-request packet |
 | `/jahns-workflow:review` | Ingest an external review reply: preserve verbatim → verify each finding → register as tasks |
-| `/jahns-workflow:audit` | Scoped, tiered SSOT audit (consistency / independent re-derivation / cheap-oracle checks). Never runs production suites or GPU builds |
+| `/jahns-workflow:audit` | Scoped, tiered SSOT audit (consistency / independent re-derivation / cheap-oracle checks). Cost cap is wall-clock, not hardware — never runs production suites or expensive builds |
 | `/jahns-workflow:status` | Cross-project terminal dashboard (branches, rounds, active/blocked tasks). Registry entries can be local (`path`) or remote (`repo: owner/name`, fetched via `gh api` — for projects not cloned on this machine) |
 | `spec-auditor` agent | Independent verifier fanned out by the audit skill |
 | SessionStart hook | Injects digest + active tasks on startup/resume/clear/**compact** (capped ~8KB; no-ops in ~30ms in non-initialized projects) |

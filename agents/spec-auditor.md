@@ -27,12 +27,15 @@ where the text is ambiguous or contradicts itself, quantities used before defini
 place where two defensible readings yield different results (state both readings and their
 consequences).
 
-**T3 — oracle comparison.** Only when the dispatch names a declared cheap oracle. Write a
-small throwaway reference implementation (in /tmp) of the spec text as literally as possible
-— deliberately do NOT "fix" anything that looks odd; implement what the text says — then
-compare against the declared oracle in fp64 at CPU scale (seconds). A doc-literal
-implementation that disagrees with the oracle is exactly the signal sought. Never run the
-project's production test suite, build steps, or GPU anything.
+**T3 — oracle comparison.** Only when the dispatch names a declared cheap oracle. Run the
+declared oracle command as given — the project has vouched it is cheap (its notes state the
+expected runtime; use whatever resources it declares). Write a small throwaway reference
+implementation (in /tmp) of the spec text as literally as possible — deliberately do NOT
+"fix" anything that looks odd; implement what the text says — then compare against the
+oracle, using the most reliable precision/reference available. A doc-literal implementation
+that disagrees with the oracle is exactly the signal sought. Never run the project's
+production test suite or long builds; if the oracle runs far past its declared budget, kill
+it and report that instead of waiting.
 
 ## Output (final message — consumed programmatically)
 

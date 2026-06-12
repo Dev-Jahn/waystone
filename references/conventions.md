@@ -59,7 +59,7 @@ Used on review/audit findings (a `severity:` field on the task, never part of th
 3. **Read sections, not the whole file.** Navigate via the generated INDEX; the DIGEST is injected each session for orientation.
 4. **Binding but falsifiable.** When implementation evidence contradicts the SSOT: stop, register a `decision/...` task describing the discrepancy, get a ruling, then amend the SSOT via ADR. Never silently comply with a spec that evidence contradicts; never silently diverge from it either.
 5. **Bulk-edit quarantine.** Any single round that changes more than ~100 SSOT lines is presumed risky (this is exactly how spec FATALs historically slipped in): run `/jahns-workflow:audit` on the changed sections before downstream work consumes them.
-6. **Verifiable claims get executable twins.** Where a section's correctness is mechanically checkable with a *cheap* oracle (CPU-scale reference, fp64, seconds not hours), declare it under `oracles:` in `.jahns-workflow.yml` so audits can exercise it.
+6. **Verifiable claims get executable twins.** Where a section's correctness is mechanically checkable with a *cheap* oracle — a side-effect-free check that finishes in seconds (the constraint is wall-clock cost, not which hardware it uses) — declare it under `oracles:` in `.jahns-workflow.yml` with its expected runtime so audits can exercise it.
 
 ## 5. Document homes (one home per fact)
 
