@@ -53,8 +53,14 @@ def main(argv: list[str]) -> int:
         if rest and rest[0] == "merge":
             import jw_merge
             return jw_merge.main(["merge", *rest[1:]])
-        print("jw round: only 'merge' is available in this version", file=sys.stderr)
+        if rest and rest[0] == "close":
+            return _run_module_main("jw_round", rest)
+        print("jw round: expected 'close' or 'merge'", file=sys.stderr)
         return 1
+    if group == "lanes":
+        return _run_module_main("jw_lanes", rest)
+    if group == "resume":
+        return _run_module_main("jw_resume", rest)
 
     # legacy modules with main() reading sys.argv
     legacy = {"validate": "jw_validate", "roadmap": "jw_roadmap",

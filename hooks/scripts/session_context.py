@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from jw_common import git_branch_info, load_config, load_tasks  # noqa: E402
+from jw_common import git_branch_info, load_config, load_tasks, next_actionable  # noqa: E402
 
 MAX_CHARS = 8000
 MAX_TASK_LINES = 8
@@ -50,6 +50,11 @@ def main() -> int:
     for label, group in (("active", active), ("blocked", blocked), ("pending decision", decisions)):
         for t in group[:MAX_TASK_LINES]:
             lines.append(f"  {label}: {t['id']} — {t.get('title', '')}")
+    nxt = next_actionable(data, cap=5)
+    if nxt:
+        lines.append("next actionable (deps satisfied):")
+        for tid, title in nxt:
+            lines.append(f"  → {tid} — {title}")
     lines.append(f"Task registry: tasks.yaml | Roadmap: ROADMAP.md | Conventions: see CLAUDE.md workflow section")
 
     digest = root / cfg["generated_dir"] / "DIGEST.md"

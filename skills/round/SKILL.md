@@ -20,31 +20,32 @@ rather than duplicating).
 
 ## Step 2 — Sync the task registry
 
-Update `tasks.yaml` to match reality (the guard hook auto-validates and regenerates
-ROADMAP.md on save — if it reports violations, fix them immediately):
+First register any newly discovered work as new tasks (proper `<type>/<slug>` IDs + explanatory
+titles; set `anchor:` to the governing SSOT §-anchor when known — audits scope by it). Unresolved
+questions for the user become `decision/...` tasks; when a `decision/...` is answered, record the
+ruling in its `ruling:` field.
 
-- Mark finished tasks `done` (a `gate/...` task is done only if the bar actually passed — link evidence in PROGRESS).
-- Set `round: <round-id>` on every task worked this round.
-- Register newly discovered work as new tasks (proper `<type>/<slug>` IDs + explanatory titles; set `anchor:` to the governing SSOT §-anchor when known — audits scope by it). Unresolved questions for the user become `decision/...` tasks.
-- Update `blocked` states from deps.
-
-## Step 3 — SSOT maintenance
-
-Skip if the config has no `ssot:`. Otherwise:
+Then close the round in one atomic, deterministic step instead of hand-editing each field:
 
 ```bash
-uv run <plugin-root>/scripts/jw_ssot.py check .
-# stale (exit 3) → regenerate:
-uv run <plugin-root>/scripts/jw_ssot.py split . && uv run <plugin-root>/scripts/jw_ssot.py digest .
+uv run <plugin-root>/scripts/jw.py round close . --round <round-id> \
+    --done <comma-ids that fully passed> --touched <comma-ids worked but not done>
 ```
 
-Then measure the round's SSOT churn: `git diff <watermark> HEAD --numstat -- <ssot>`, where
-the watermark is `state.last_round_commit` from `.jahns-workflow.yml`; if null, fall back to
-the most recent commit whose subject starts with `docs(round):`; if neither exists, skip the
-measurement and note that. If added+deleted > 100 lines, apply the **bulk-edit quarantine**
-rule: state prominently in the report and in PROGRESS that `/jahns-workflow:audit` must run
-on the changed sections before dependent work consumes them. Finally, update
-`state.last_round_commit` to the current HEAD.
+`round close` flips the `--done` tasks to `done`, stamps `round:` on every worked task, validates
+the registry, regenerates `ROADMAP.md` (and SSOT views if configured), advances
+`state.last_round_commit`, and prints the SSOT churn (flagging the >100-line bulk-edit quarantine).
+A `gate/...` task goes in `--done` only if the bar actually passed (link evidence in PROGRESS).
+If `round close` reports the registry invalid, fix the reported issues before continuing.
+If lanes were used this round, first verify them: `uv run <plugin-root>/scripts/jw.py lanes verify .`.
+
+## Step 3 — SSOT quarantine check
+
+`round close` already regenerated the SSOT views and printed the churn since the previous round.
+If it reported a **bulk edit (>100 lines)**, apply the quarantine rule: state prominently in the
+report and in PROGRESS that `/jahns-workflow:audit` must run on the changed sections before
+dependent work consumes them. (Churn measurement, view regen, and the watermark advance are all
+handled by `round close` — no manual `git diff`/watermark edit.)
 
 ## Step 4 — PROGRESS entry + archive
 

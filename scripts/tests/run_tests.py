@@ -22,8 +22,10 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 
 import jw_common  # noqa: E402
+import jw_lanes  # noqa: E402
 import jw_merge  # noqa: E402
 import jw_review  # noqa: E402
+import jw_round  # noqa: E402
 
 
 def git(root, *args):
@@ -203,6 +205,123 @@ class ConfigTests(unittest.TestCase):
     def test_invalid_mode_raises(self):
         with self.assertRaises(ValueError):
             self._cfg("version: 1\nproject: x\nreview:\n  mode: bogus\n")
+
+
+TASKS_FIXTURE = """# registry — comments must be preserved
+version: 1
+project: x
+tasks:
+  - id: feat/alpha
+    title: "first task"
+    status: active
+    deps: []
+  - id: gate/beta
+    title: "a gate blocked on alpha"
+    status: blocked
+    deps: [feat/alpha]
+"""
+
+
+class TextSurgeryTests(unittest.TestCase):
+    def test_set_existing_field(self):
+        out = jw_round.set_task_field(TASKS_FIXTURE, "feat/alpha", "status", "done")
+        self.assertIn("status: done", out)
+        self.assertIn("# registry — comments must be preserved", out)  # comment preserved
+        self.assertIn('title: "first task"', out)  # other fields intact
+        self.assertEqual(out.count("status: active"), 0)
+
+    def test_insert_missing_field(self):
+        out = jw_round.set_task_field(TASKS_FIXTURE, "feat/alpha", "round", "2026-06-19-z")
+        self.assertIn("round: 2026-06-19-z", out)
+        # inserted into feat/a block, not gate/b
+        a_block = out.split("gate/beta")[0]
+        self.assertIn("round: 2026-06-19-z", a_block)
+
+    def test_only_targets_named_task(self):
+        out = jw_round.set_task_field(TASKS_FIXTURE, "gate/beta", "status", "done")
+        self.assertIn("status: active", out)  # feat/a untouched
+        self.assertEqual(out.count("status: done"), 1)
+
+    def test_missing_task_raises(self):
+        with self.assertRaises(KeyError):
+            jw_round.set_task_field(TASKS_FIXTURE, "feat/nope", "status", "done")
+
+    def test_set_config_scalar_nested(self):
+        cfg = "version: 1\nstate:\n  last_audit_commit: null\n  last_round_commit: null\n"
+        out = jw_round.set_config_scalar(cfg, "last_round_commit", "abc123")
+        self.assertIn("  last_round_commit: abc123", out)
+        self.assertIn("  last_audit_commit: null", out)  # sibling preserved
+        with self.assertRaises(KeyError):
+            jw_round.set_config_scalar(cfg, "nonexistent_key", "v")
+
+
+class NextActionableTests(unittest.TestCase):
+    def test_deps_gate(self):
+        data = {"tasks": [
+            {"id": "feat/a", "title": "A", "status": "done"},
+            {"id": "feat/b", "title": "B", "status": "pending", "deps": ["feat/a"]},
+            {"id": "feat/c", "title": "C", "status": "pending", "deps": ["feat/b"]},  # dep b not done
+            {"id": "feat/d", "title": "D", "status": "active", "deps": []},
+            {"id": "gate/e", "title": "E", "status": "blocked", "deps": ["feat/a"]},  # stale-blocked
+        ]}
+        got = dict(jw_common.next_actionable(data))
+        self.assertIn("feat/b", got)   # dep a done
+        self.assertIn("feat/d", got)   # no deps
+        self.assertIn("gate/e", got)   # stale-blocked: dep a done → actionable now
+        self.assertNotIn("feat/c", got)  # dep b not done
+        self.assertNotIn("feat/a", got)  # already done
+
+
+class LaneTests(unittest.TestCase):
+    def test_contains_base(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            init_repo(root)
+            base = git(root, "rev-parse", "HEAD").stdout.strip()
+            git(root, "checkout", "-q", "-b", "feat/foo")
+            (root / "g.txt").write_text("1"); git(root, "add", "-A"); git(root, "commit", "-qm", "c1")
+            self.assertEqual(jw_lanes.check_lane(root, "feat/foo", {"branch": "feat/foo", "base_sha": base}), [])
+            # a base the branch does NOT contain: make an unrelated commit on a sibling branch
+            git(root, "checkout", "-q", "main")
+            (root / "h.txt").write_text("2"); git(root, "add", "-A"); git(root, "commit", "-qm", "sib")
+            sib = git(root, "rev-parse", "HEAD").stdout.strip()
+            fails = jw_lanes.check_lane(root, "feat/foo", {"branch": "feat/foo", "base_sha": sib})
+            self.assertTrue(fails and "does NOT contain" in fails[0])
+
+    def test_missing_branch(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            init_repo(root)
+            base = git(root, "rev-parse", "HEAD").stdout.strip()
+            fails = jw_lanes.check_lane(root, "t", {"branch": "no/such", "base_sha": base})
+            self.assertTrue(fails and "does not exist" in fails[0])
+
+
+class RoundCloseTests(unittest.TestCase):
+    def test_close_integration(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            init_repo(root)
+            (root / ".jahns-workflow.yml").write_text(
+                "version: 1\nproject: x\nstate:\n  last_audit_commit: null\n  last_round_commit: null\n")
+            (root / "tasks.yaml").write_text(TASKS_FIXTURE)
+            git(root, "add", "-A"); git(root, "commit", "-qm", "setup")
+            rc = jw_round.close(root, "2026-06-19-z", done=["feat/alpha"], touched=["gate/beta"], commit="HEAD")
+            self.assertEqual(rc, 0)
+            txt = (root / "tasks.yaml").read_text()
+            # feat/a flipped to done and stamped
+            a = txt.split("gate/beta")[0]
+            self.assertIn("status: done", a)
+            self.assertIn("round: 2026-06-19-z", a)
+            # gate/b stamped with round but NOT flipped to done
+            b = "gate/beta" + txt.split("gate/beta")[1]
+            self.assertIn("round: 2026-06-19-z", b)
+            self.assertIn("status: blocked", b)
+            # comment preserved, ROADMAP generated, watermark advanced
+            self.assertIn("# registry — comments must be preserved", txt)
+            self.assertTrue((root / "ROADMAP.md").is_file())
+            head = git(root, "rev-parse", "HEAD").stdout.strip()
+            self.assertIn(f"last_round_commit: {head}", (root / ".jahns-workflow.yml").read_text())
 
 
 if __name__ == "__main__":

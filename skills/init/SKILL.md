@@ -72,7 +72,9 @@ through PRs with a `@codex` bot.
 2. `tasks.yaml` — minimal valid registry (`version: 1`, `project:`, `milestones: []`, `tasks: []`),
    with a YAML comment documenting the optional task fields (`deps`, `milestone`, `round`,
    `anchor` — §-anchor of the SSOT section the task governs, used by audits — `severity`,
-   `origin`, `branch`, `notes`).
+   `origin`, `branch`, `notes`, `ruling` — the user's decision on a `decision/...` task,
+   `result` — a recorded measurement/outcome, `lane` — `{branch, base_sha, depends_on}` for
+   parallel worktree lanes, verified by `jw lanes verify`).
 3. Missing directories for adr/reviews/progress-archive; `docs/CONVENTIONS.md` as a verbatim copy of `<plugin-root>/references/conventions.md`; an ADR-0000 from `<plugin-root>/templates/adr.md` recording "adopted jahns-workflow" (so the numbering and format are established by example).
 4. If no PROGRESS file exists, create one with a one-line header pointing at tasks.yaml/ROADMAP.
 

@@ -30,7 +30,23 @@ Full convention: [references/conventions.md](references/conventions.md).
 | PostToolUse hook | On `tasks.yaml` edits only: schema validation (exit-2 feedback) + deterministic `ROADMAP.md` regeneration. ~13ms no-op otherwise |
 
 All rendering/validation is plain Python (`scripts/jw_*.py`, run via `uv`) — zero LLM tokens.
-A unified front door `scripts/jw.py` dispatches `jw <group>` (validate/roadmap/ssot/status/remote/review/approve/round).
+A unified front door `scripts/jw.py` dispatches `jw <group>`
+(validate/roadmap/ssot/status/remote/review/approve/round/lanes/resume).
+
+## Round closeout & resume (v0.2.1)
+
+- **`jw round close . --round <id> --done <ids> --touched <ids>`** does the whole deterministic
+  closeout ritual atomically: comment-preserving status/round flips on tasks.yaml, validate,
+  regenerate ROADMAP/SSOT views, advance the `last_round_commit` watermark, and report SSOT churn
+  (flagging the >100-line bulk-edit quarantine). No more hand-edited watermarks or per-task flips.
+- **PreCompact / SessionEnd hooks** snapshot a re-entry pointer (HEAD, branch, active round,
+  active/blocked tasks, next-actionable) to a plugin-local file — closing the "update memory
+  before compaction" loop. The SessionStart injection now also lists **next-actionable** tasks
+  (deps satisfied, including stale-`blocked` ones whose deps are now done).
+- **`jw lanes verify .`** checks each task's `lane:` manifest — that the lane branch *contains*
+  its recorded `base_sha` (the correct invariant; not descent from the moving integration tip).
+  For parallel worktree lanes, set `worktree.baseRef: "head"` in Claude Code settings so lanes
+  branch from local state, and record each lane's `base_sha` at creation.
 
 ## Review profiles (v0.2.0)
 

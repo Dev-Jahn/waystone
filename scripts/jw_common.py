@@ -126,6 +126,27 @@ def git_branch_info(root: Path) -> dict:
     return {"branch": branch, "dirty": dirty, "ahead": ahead, "behind": behind}
 
 
+def next_actionable(data: dict, cap: int = 6) -> list[tuple[str, str]]:
+    """Tasks ready to pick up next: pending/active (or stale-blocked — `blocked` with every dep
+    already done) whose deps are all satisfied. Pure: returns [(id, title)] sorted by id."""
+    tasks = [t for t in data.get("tasks", []) if isinstance(t, dict) and t.get("id")]
+    by_id = {t["id"]: t for t in tasks}
+    out = []
+    for t in tasks:
+        if t.get("status") not in ("pending", "active", "blocked"):
+            continue
+        deps = t.get("deps", []) or []
+        if all(by_id.get(d, {}).get("status") == "done" for d in deps):
+            out.append((t["id"], t.get("title", "")))
+    return sorted(out)[:cap]
+
+
+def resume_path(root: Path) -> Path:
+    """Plugin-local ephemeral re-entry snapshot for a project (NOT committed to the repo)."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", str(root.resolve())).strip("-")
+    return Path.home() / ".claude" / "jahns-workflow" / "resume" / f"{slug}.md"
+
+
 def slugify(text: str, max_len: int = 40) -> str:
     """Filename slug for generated SSOT sections. Keeps Hangul (Korean headings stay
     readable); task IDs are NOT slugified with this — their grammar stays ASCII."""
