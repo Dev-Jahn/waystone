@@ -46,7 +46,59 @@ def load_config(root: Path) -> dict:
     gen = Path(cfg["generated_dir"])
     if gen.is_absolute() or ".." in gen.parts:
         raise ValueError(f"generated_dir must be a relative path inside the repo: {cfg['generated_dir']!r}")
+    rv = cfg.setdefault("review", {})
+    if not isinstance(rv, dict):
+        raise ValueError("review: must be a mapping (mode/reviewers/require_ci)")
+    rv.setdefault("mode", "packet")  # packet | pr
+    rv.setdefault("reviewers", ["codex", "gpt-5.5-pro"])
+    rv.setdefault("require_ci", False)
+    if rv["mode"] not in ("packet", "pr"):
+        raise ValueError(f"review.mode must be 'packet' or 'pr', got {rv['mode']!r}")
     return cfg
+
+
+def git_rc(root: Path, *args: str) -> tuple[int, str, str]:
+    """Run git; return (returncode, stdout, stderr). Distinguishes failure from empty output."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), *args], capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return (127, "", str(e))
+    return (out.returncode, out.stdout.strip(), out.stderr.strip())
+
+
+def git_full_sha(root: Path, ref: str = "HEAD") -> str | None:
+    """Full 40-char commit sha for `ref`, or None if it does not resolve."""
+    rc, out, _ = git_rc(root, "rev-parse", "--verify", f"{ref}^{{commit}}")
+    return out if rc == 0 and out else None
+
+
+def upstream_ref(root: Path) -> str | None:
+    """The tracked upstream (e.g. 'origin/main') of the current branch, or None."""
+    rc, out, _ = git_rc(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+    return out if rc == 0 and out else None
+
+
+def is_ancestor(root: Path, a: str, b: str) -> bool:
+    """True iff commit `a` is an ancestor of (i.e. contained in) commit `b`."""
+    rc, _, _ = git_rc(root, "merge-base", "--is-ancestor", a, b)
+    return rc == 0
+
+
+def head_pushed(root: Path, fetch: bool = True) -> tuple[bool, dict]:
+    """Is the current HEAD contained in its tracked upstream (i.e. actually pushed)?
+    Returns (pushed, info). info carries upstream/head/behind for reporting."""
+    up = upstream_ref(root)
+    if not up:
+        return (False, {"reason": "no upstream tracking branch"})
+    if fetch:
+        git_rc(root, "fetch", "--quiet", up.split("/", 1)[0])
+    head = git_full_sha(root, "HEAD")
+    pushed = is_ancestor(root, "HEAD", up)
+    rc, out, _ = git_rc(root, "rev-list", "--count", f"HEAD..{up}")
+    behind = int(out) if rc == 0 and out.isdigit() else None
+    return (pushed, {"upstream": up, "head": head, "behind": behind})
 
 
 def load_tasks(root: Path) -> dict:

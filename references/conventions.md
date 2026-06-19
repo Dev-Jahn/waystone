@@ -81,3 +81,20 @@ rather than copying it.
 `pending → active → done`, with `blocked` (unmet deps — list them) and `dropped`
 (abandoned, keep for the record) as side states. `done` requires its gates green; a `gate/...`
 task is `done` only when the bar actually passed, with evidence linked in PROGRESS.
+
+## 7. Review (configured by `review.mode`)
+
+A review means "reviewer R examined tree SHA X" — it is always bound to a commit, never to a
+filename or a round id alone. No review is requested against an unpushed HEAD.
+
+- **packet mode**: a round closes, is pushed, and a request packet (pinned to the load-bearing
+  commit) goes to a web reviewer; the reply is ingested verbatim and triaged.
+- **pr mode**: each round opens a PR; `review freeze` stamps the current head as cycle N (an
+  immutable target recorded as a PR-comment marker). A review is identified by
+  `(reviewer, cycle, reviewed_sha)`. Remediation produces a new head → the cycle goes stale →
+  re-freeze (cycle N+1) so reviewers re-examine the new SHA. Merge is decided by the computed
+  gate (`round merge`), not by judgement: it blocks unless the cycle is fresh, the required
+  reviews + resolved findings are bound to the current head, there are no open blockers or
+  unresolved decisions, and a human approval is bound to that exact head. External reviewer
+  findings are always claims — reproduce/confirm before acting; the implementing agent and the
+  verifying agent are separate.

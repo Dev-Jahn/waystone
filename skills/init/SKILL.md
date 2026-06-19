@@ -55,10 +55,19 @@ progress_archive_dir: docs/progress
 generated_dir: docs/ssot
 digest_max_lines: 150
 oracles: []                     # sections with cheap executable checks; see audit skill
+review:
+  mode: packet                  # packet (paste to web reviewer) | pr (SHA-bound PR review cycles)
+  reviewers: [codex, gpt-5.5-pro]
+  require_ci: false             # if true, the merge gate blocks until CI passes
 state:
   last_audit_commit: null
   last_round_commit: null
 ```
+
+Ask the user which `review.mode` fits: `packet` (default — close a round, push, paste a
+request packet to the web reviewer) or `pr` (open a PR per round, freeze a SHA-bound review
+cycle, and let a deterministic gate guard the merge). PR mode suits repos that already work
+through PRs with a `@codex` bot.
 
 2. `tasks.yaml` — minimal valid registry (`version: 1`, `project:`, `milestones: []`, `tasks: []`),
    with a YAML comment documenting the optional task fields (`deps`, `milestone`, `round`,

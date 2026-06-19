@@ -40,3 +40,21 @@ Report in the user's configured language: counts by verdict and severity, blocke
 first with their task IDs. Remind that blockers must be resolved before the next round
 consumes downstream work; offer to start on them. Suggested commit message:
 `docs(review): ingest <round-id> feedback`.
+
+## PR mode (review.mode: pr) — SHA-bound cycle + merge gate
+
+When the project uses PR-mode review, the same verify-then-register discipline applies, plus:
+
+- After adjudicating a cycle's Codex findings, post a resolution marker so the merge gate can
+  see it — a PR comment containing `<!-- jw-findings:v1\ncycle: <N>\nresolved: true\n-->`
+  (only after every REAL finding is fixed/deferred-with-cause).
+- A finding fixed in code produces a NEW head SHA, which makes the frozen cycle stale. Do not
+  merge against a stale cycle — re-freeze (`jw review freeze --pr <N>`) so reviewers re-examine
+  the new SHA. Codex re-reviews the new head; the macro reviewer does a full or delta review.
+- The merge is gated, not judged: `uv run <plugin-root>/scripts/jw.py round merge --pr <N> .`
+  prints PASS only when the cycle is fresh, CI ok (if required), a fresh Codex review + resolved
+  findings + a macro result are all bound to the current head, zero open blockers/decisions, and
+  a human approval is bound to the current head. The user approves with
+  `jw approve --pr <N> --sha <current-head>` (a new push auto-invalidates it). Only run
+  `round merge --pr <N> --execute --squash|--rebase|--merge` once the gate passes and the user
+  has approved — never merge on natural-language judgement.

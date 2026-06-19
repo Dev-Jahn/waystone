@@ -30,6 +30,23 @@ Full convention: [references/conventions.md](references/conventions.md).
 | PostToolUse hook | On `tasks.yaml` edits only: schema validation (exit-2 feedback) + deterministic `ROADMAP.md` regeneration. ~13ms no-op otherwise |
 
 All rendering/validation is plain Python (`scripts/jw_*.py`, run via `uv`) — zero LLM tokens.
+A unified front door `scripts/jw.py` dispatches `jw <group>` (validate/roadmap/ssot/status/remote/review/approve/round).
+
+## Review profiles (v0.2.0)
+
+Set `review.mode` in `.jahns-workflow.yml`:
+
+- **`packet`** (default) — close a round, push, paste a request packet to a web reviewer.
+- **`pr`** — SHA-bound review cycles on a GitHub PR, with a deterministic merge gate. A review
+  is identified by `(reviewer, cycle, reviewed_sha)`, stored as machine-readable markers in PR
+  comments (GitHub is the canonical store, never inferred from filenames). A new push makes a
+  cycle stale; a merge is blocked by `jw round merge` unless — at the *current* head — the cycle
+  is fresh, CI is ok (if `require_ci`), a fresh Codex review + resolved findings + a macro-reviewer
+  result are bound to the head, there are zero open blockers/decisions, and a human approval
+  (`jw approve --pr N --sha <head>`) is bound to the head. The gate is computed, never judged.
+
+Both modes share a hard push gate (`jw remote verify`): no review is requested against an
+unpushed HEAD. Deterministic core is tested under `scripts/tests/` (`uv run scripts/tests/run_tests.py`).
 
 ## Requirements
 

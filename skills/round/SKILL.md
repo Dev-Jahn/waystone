@@ -53,15 +53,26 @@ configured language). Then archive: move dated sections from months before the c
 into `docs/progress/<YYYY-MM>.md` (mechanical cut-paste, newest-first preserved), leaving
 PROGRESS.md with the current month + the header pointers.
 
-## Step 5 — Review packet
+## Step 5 — Request review
 
-Generate `<reviews_dir>/<round-id>-request.md` from `<plugin-root>/templates/review-request.md`.
-External reviewers typically browse the repo directly (e.g. ChatGPT's GitHub connector), so:
-record the pushed HEAD hash in the packet (verify the round's commits are actually pushed —
-`git status -sb`; if not, note that the user must push before requesting review), and prefer
-pointers (file paths, §-anchors, commit hashes) over inlined diffs — inline only small
-load-bearing snippets, or full diffs/pseudocode if the reviewer has no repo access. State
-every load-bearing claim falsifiably and list the test ladder's known blind spots.
+**First, a hard push gate (both modes):** run `uv run <plugin-root>/scripts/jw.py remote verify .`.
+A review must point at a pushed commit; if this exits non-zero, STOP and tell the user to push
+the round's commits before a packet/cycle is created — do not emit a packet for an unpushed HEAD.
+
+**Packet mode** (`review.mode: packet`, default): generate `<reviews_dir>/<round-id>-request.md`
+from `<plugin-root>/templates/review-request.md`. External reviewers typically browse the repo
+directly (e.g. ChatGPT's GitHub connector), so record the pushed HEAD hash and prefer pointers
+(file paths, §-anchors, commit hashes) over inlined diffs — inline only small load-bearing
+snippets, or full diffs/pseudocode if the reviewer has no repo access. **Pin the packet HEAD to
+the load-bearing implementation commit, not a later docs-only round-close commit** — otherwise
+the reviewer reads a stale registry and raises false-positive findings. State every load-bearing
+claim falsifiably and list the test ladder's known blind spots.
+
+**PR mode** (`review.mode: pr`): open/locate the round's PR, then freeze a SHA-bound review cycle:
+`uv run <plugin-root>/scripts/jw.py review freeze --pr <N> --round <round-id> .`. This stamps the
+current PR head as cycle N (immutable target), posts the `@codex` request, and asks the macro
+reviewer to bind its reply to that SHA. Check progress with `jw review status --pr <N>`; never
+treat "a comment appeared" as "review done" — a review is `(reviewer, cycle, reviewed_sha)`.
 
 ## Step 6 — Report
 
