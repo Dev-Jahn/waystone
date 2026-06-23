@@ -40,7 +40,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
-from jw_common import find_project_root, git_full_sha, load_config  # noqa: E402
+from jw_common import (  # noqa: E402
+    CONFIG_NAME, WorkflowError, find_project_root, git_full_sha, load_config, normalize_config,
+)
 
 CODEX_BOT = "chatgpt-codex-connector[bot]"  # REST `user.login` form
 INBOX = Path("/tmp/review.md")  # fixed drop-file: user saves the reviewer reply here, byte-exact
@@ -59,13 +61,48 @@ MERGE_OK_VERDICTS = {"shipped", "shipped-with-risk", "approved", "approve", "lgt
 
 # ---- pure marker logic -------------------------------------------------------
 def emit_marker(kind: str, fields: dict) -> str:
-    lines = [f"<!-- jw-{kind}:v1"]
-    for k, v in fields.items():
-        if isinstance(v, (list, tuple)):
-            v = ", ".join(str(x) for x in v)
-        lines.append(f"{k}: {v}")
-    lines.append("-->")
-    return "\n".join(lines)
+    """Encode a marker as real YAML (lists stay lists, ints stay ints) — never hand-joined text,
+    so the round-trip is a typed protocol, not a string blob."""
+    body = yaml.safe_dump(dict(fields), sort_keys=False, default_flow_style=False,
+                          allow_unicode=True).strip()
+    return f"<!-- jw-{kind}:v1\n{body}\n-->"
+
+
+# ---- strict marker schema (a marker is BELIEVED only if every field is the exact type) --------
+def _is_sha(v: object) -> bool:
+    return isinstance(v, str) and bool(re.fullmatch(r"[0-9a-f]{40}", v))
+
+
+def _is_cycle(v: object) -> bool:
+    return type(v) is int and v >= 1  # `type(... ) is int` rejects bool (a subtype) and float
+
+
+def _is_strlist(v: object) -> bool:
+    return isinstance(v, list) and all(isinstance(x, str) for x in v)
+
+
+def _nonempty_str(v: object) -> bool:
+    return isinstance(v, str) and bool(v.strip())
+
+
+def marker_valid(m: dict) -> bool:
+    """Type-strict schema gate. `cycle: true`, `review_cycle: 1.0`, `reviewed_sha: <not-40-hex>`,
+    `decision_required: {}`, `resolved: "yes"` etc. are all rejected here (ignored), never coerced.
+    SHA/base_sha are validated when present; binding to head/base is a separate freshness check."""
+    k = m.get("_kind")
+    if k == "review-cycle":
+        return (_is_cycle(m.get("cycle")) and _is_sha(m.get("target_sha"))
+                and (m.get("base_sha") is None or _is_sha(m.get("base_sha"))))
+    if k == "review-result":
+        return (_is_cycle(m.get("review_cycle")) and _is_sha(m.get("reviewed_sha"))
+                and _nonempty_str(m.get("reviewer")) and _nonempty_str(m.get("verdict"))
+                and _is_strlist(m.get("decision_required", [])))
+    if k == "findings":
+        return _is_cycle(m.get("cycle")) and type(m.get("resolved")) is bool
+    if k == "approval":
+        return (_is_sha(m.get("sha")) and _is_cycle(m.get("cycle")) and _nonempty_str(m.get("by"))
+                and (m.get("base_sha") is None or _is_sha(m.get("base_sha"))))
+    return False
 
 
 def parse_markers(text: str, kind: str | None = None) -> list[dict]:
@@ -107,7 +144,7 @@ def latest_cycle(markers: list[dict], operators: tuple = ()) -> dict | None:
     re-post of the same cycle advances the boundary. When `operators` is given, only freeze markers
     POSTED by a trusted operator count, so an untrusted actor can't inject a higher cycle to hijack
     the frozen target."""
-    cycles = [m for m in markers if m.get("_kind") == "review-cycle" and isinstance(m.get("cycle"), int)
+    cycles = [m for m in markers if m.get("_kind") == "review-cycle" and marker_valid(m)
               and (not operators or m.get("_author") in operators)]
     return max(cycles, key=lambda m: (m["cycle"], m.get("_at") or "")) if cycles else None
 
@@ -139,8 +176,7 @@ def classify(markers: list[dict], current_head: str, macro_reviewers: tuple = ()
     def at(m: dict) -> str:
         return m.get("_at") or ""
 
-    trusted_cycles = [m for m in markers if m.get("_kind") == "review-cycle"
-                      and isinstance(m.get("cycle"), int)
+    trusted_cycles = [m for m in markers if m.get("_kind") == "review-cycle" and marker_valid(m)
                       and (not operators or m.get("_author") in operators)]
     # the freeze boundary is the LATEST marker of the highest cycle (a re-post of the same cycle is
     # a new boundary — Codex must review after it). Same cycle with a different (head, base) → block.
@@ -154,6 +190,7 @@ def classify(markers: list[dict], current_head: str, macro_reviewers: tuple = ()
     cyc = lc["cycle"] if lc else None
     frozen = (lc or {}).get("target_sha")
     frozen_base = (lc or {}).get("base_sha")
+    freeze_at = at(lc) if lc else ""
     base_ok = current_base is None or str(frozen_base) == current_base
     head_matches = bool(lc) and not conflict and str(frozen) == current_head and base_ok
 
@@ -163,11 +200,12 @@ def classify(markers: list[dict], current_head: str, macro_reviewers: tuple = ()
         mx = max((at(i) for i in items), default="")
         return [i for i in items if at(i) == mx]
 
-    # results: this head+cycle, trusted operator. Per macro reviewer, the newest result(s) must
-    # ALL be merge-compatible (a same-second shipped/not-shipped tie → not ok).
-    results = [m for m in markers if m.get("_kind") == "review-result"
+    # results: valid, this head+cycle, trusted operator, and posted AFTER the freeze (evidence that
+    # predates the frozen target can't be retroactively applied to it). Per macro reviewer the
+    # newest result(s) must ALL be merge-compatible (a same-second shipped/not-shipped tie → not ok).
+    results = [m for m in markers if m.get("_kind") == "review-result" and marker_valid(m)
                and str(m.get("reviewed_sha")) == current_head and m.get("review_cycle") == cyc
-               and (not operators or m.get("_author") in operators)]
+               and (not operators or m.get("_author") in operators) and at(m) > freeze_at]
 
     def mergeable(r: dict) -> bool:
         return str(r.get("verdict", "")).lower() in MERGE_OK_VERDICTS and not r.get("decision_required")
@@ -180,15 +218,17 @@ def classify(markers: list[dict], current_head: str, macro_reviewers: tuple = ()
 
     # findings: this cycle, trusted operator; the newest resolution(s) must all be resolved AND
     # post-date the newest Codex signal (a later 'resolved: false' or a fresh Codex finding blocks).
-    cyc_findings = [m for m in markers if m.get("_kind") == "findings" and m.get("cycle") == cyc
-                    and (not operators or m.get("_author") in operators)]
+    cyc_findings = [m for m in markers if m.get("_kind") == "findings" and marker_valid(m)
+                    and m.get("cycle") == cyc
+                    and (not operators or m.get("_author") in operators) and at(m) > freeze_at]
     findings_group = latest_group(cyc_findings) if cyc_findings else []
     findings_at = max((at(f) for f in findings_group), default="")
     findings_resolved = (bool(findings_group) and all(f.get("resolved") is True for f in findings_group)
                          and (codex_signal_at is None or findings_at > codex_signal_at))
 
-    # the approval must come AFTER every piece of evidence at this head
-    evidence = []
+    # the approval must come AFTER every piece of evidence at this head — and after the freeze,
+    # so the chronology freeze < {codex, macro result, findings} < approval is enforced.
+    evidence = [freeze_at] if lc else []
     if results:
         evidence.append(max(at(r) for r in results))
     if cyc_findings:
@@ -199,8 +239,9 @@ def classify(markers: list[dict], current_head: str, macro_reviewers: tuple = ()
 
     def approval_ok(a: dict) -> bool:
         author = a.get("_author", "")
-        return (str(a.get("sha")) == current_head
-                and (cyc is None or a.get("cycle") == cyc)            # bound to THIS cycle
+        return (marker_valid(a)
+                and str(a.get("sha")) == current_head
+                and a.get("cycle") == cyc                              # bound to THIS cycle
                 and (current_base is None or str(a.get("base_sha")) == current_base)  # and base
                 and bool(author) and not author.endswith("[bot]")
                 and (not approvers or author in approvers)
@@ -307,12 +348,12 @@ def pr_bundle(root: Path, pr: int, repo: str | None = None) -> dict | None:
         repo = resolve_repo(root)
     # comments + formal reviews are both fetched via paginated REST (the canonical event log) — a
     # marker can live in either, and operator/author filtering decides whether it's believed.
+    # Markers (cycle/result/findings/approval) live ONLY in issue comments. Formal reviews are used
+    # solely as Codex signals (commit_id) — a marker in a PENDING/unsubmitted review body must NOT
+    # count, so review bodies are deliberately NOT parsed for markers.
     comments = rest_comments(root, repo, pr) if repo else []
     bodies = [{"id": c["id"], "body": c["body"], "author": c["author"], "at": c["at"]} for c in comments]
     reviews = rest_reviews(root, repo, pr) if repo else []
-    for r in reviews:
-        bodies.append({"id": r["id"], "body": r["body"], "author": r["author"],
-                       "at": r["at"], "state": r["state"]})
     return {
         "head": j.get("headRefOid", ""), "base_sha": j.get("baseRefOid", ""),
         "bodies": bodies, "reviews": reviews,
@@ -384,13 +425,6 @@ def ci_state(bundle: dict) -> str:
     return "failing"
 
 
-def pr_facts(root: Path, pr: int, cfg: dict, repo: str | None) -> dict | None:
-    bundle = pr_bundle(root, pr, repo)
-    if bundle is None:
-        return None
-    return facts_from_bundle(bundle, cfg, repo)
-
-
 def facts_from_bundle(bundle: dict, cfg: dict, repo: str | None) -> dict:
     owner = (repo.split("/", 1)[0] if repo else "")
     approvers = tuple({owner, *cfg["review"].get("approvers", [])} - {""})
@@ -417,6 +451,28 @@ def facts_from_bundle(bundle: dict, cfg: dict, repo: str | None) -> dict:
     return cls
 
 
+def pr_context(root: Path, pr: int) -> dict | None:
+    """The canonical PR context shared by freeze/status/approve/merge. The trust POLICY is read
+    from the PR's BASE SHA (the protected target branch) — never head or the local checkout — so
+    every command agrees on one policy and a candidate branch can't enable pr-mode or widen its own
+    reviewer/operator/approver set. `policy` is None if the base config can't be read/parsed."""
+    repo = resolve_repo(root)
+    bundle = pr_bundle(root, pr, repo)
+    if bundle is None:
+        return None
+    base_sha = bundle.get("base_sha")
+    policy = None
+    if repo and base_sha:
+        txt = file_at_ref(root, repo, CONFIG_NAME, base_sha)
+        if txt is not None:
+            try:
+                policy = normalize_config(yaml.safe_load(txt))
+            except (yaml.YAMLError, ValueError):
+                policy = None
+    return {"repo": repo, "pr": pr, "bundle": bundle, "head": bundle["head"],
+            "base_sha": base_sha, "base": bundle.get("base"), "policy": policy}
+
+
 # ---- CLI ---------------------------------------------------------------------
 def _opt(argv: list[str], name: str) -> str | None:
     if name in argv:
@@ -436,18 +492,25 @@ def _root(argv: list[str]) -> Path | None:
 
 
 def freeze(root: Path, pr: int, round_id: str | None) -> int:
-    cfg = load_config(root)
-    if cfg["review"]["mode"] != "pr":
-        print("jw_review freeze: review.mode is 'packet'; freeze is for PR mode.", file=sys.stderr)
+    ctx = pr_context(root, pr)
+    if ctx is None:
         return 1
-    bundle = pr_bundle(root, pr)
-    if bundle is None:
+    policy = ctx["policy"]
+    if policy is None:
+        print("jw_review freeze: cannot read the base-branch policy (.jahns-workflow.yml at the PR "
+              "base SHA) — pr-mode review is gated on the protected base config.", file=sys.stderr)
         return 1
+    if policy["review"]["mode"] != "pr":
+        print("jw_review freeze: the base branch's review.mode is not 'pr'. PR-mode review applies "
+              "only once the base policy is pr — review the packet→pr transition PR in packet mode "
+              "first, merge it, then pr-mode applies from the next PR.", file=sys.stderr)
+        return 1
+    bundle = ctx["bundle"]
     head = bundle["head"] or git_full_sha(root, "HEAD")
     base_sha = bundle.get("base_sha", "")
     markers = parse_bodies(bundle["bodies"])
     n = next_cycle_number(markers)
-    reviewers = cfg["review"]["reviewers"]
+    reviewers = policy["review"]["reviewers"]
     marker = emit_marker("review-cycle", {
         "round_id": round_id or "(unset)", "cycle": n, "target_sha": head,
         "base_sha": base_sha, "reviewers": reviewers,
@@ -470,11 +533,14 @@ def freeze(root: Path, pr: int, round_id: str | None) -> int:
 
 
 def status(root: Path, pr: int | None) -> int:
-    cfg = load_config(root)
     if pr is not None:
-        facts = pr_facts(root, pr, cfg, resolve_repo(root))
-        if facts is None:
+        ctx = pr_context(root, pr)
+        if ctx is None:
             return 1
+        if ctx["policy"] is None:
+            print("jw_review status: cannot read the base-branch policy at the PR base SHA.", file=sys.stderr)
+            return 1
+        facts = facts_from_bundle(ctx["bundle"], ctx["policy"], ctx["repo"])
         print(f"PR #{pr} review status ({facts['pr_state']}{', DRAFT' if facts['is_draft'] else ''}):")
         print(f"  current head:   {facts['current_head'][:12]}")
         print(f"  latest cycle:   {facts['latest_cycle']} (frozen {str(facts['frozen_sha'])[:12]})")
@@ -485,6 +551,7 @@ def status(root: Path, pr: int | None) -> int:
         print(f"  findings resolved: {facts['findings_resolved']}")
         print(f"  approved@head:  {facts['approved_at_head']}  ({facts['n_approvals']} approval(s))")
         return 0
+    cfg = load_config(root)  # packet-mode status uses the local config (no PR to read a base from)
     rdir = root / cfg["reviews_dir"]
     if not rdir.is_dir():
         print("no reviews dir yet")

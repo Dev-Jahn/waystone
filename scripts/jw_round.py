@@ -23,49 +23,69 @@ import re
 import sys
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from jw_common import (  # noqa: E402
-    ROUND_RE, find_project_root, git, git_full_sha, load_config,
+    ROUND_RE, WorkflowError, find_project_root, git, git_full_sha, load_config,
 )
 
 
-# ---- pure text surgery -------------------------------------------------------
-def _task_block_span(lines: list[str], task_id: str) -> tuple[int, int] | None:
-    """Return (start, end) line indices of the `- id: <task_id>` block, end exclusive."""
-    id_re = re.compile(r'^(\s*)-\s+id:\s*["\']?' + re.escape(task_id) + r'["\']?\s*$')
-    start = None
-    indent = 0
-    for i, ln in enumerate(lines):
-        m = id_re.match(ln)
-        if m:
-            start = i
-            indent = len(m.group(1))
-            break
-    if start is None:
-        return None
-    for j in range(start + 1, len(lines)):
-        ln = lines[j]
-        if not ln.strip():
+# ---- structure-bounded text surgery ------------------------------------------
+# Edits are scoped by the YAML AST (yaml.compose) — a `- id:` under `metadata:` or a nested
+# `state:` must NOT be mistaken for the real `tasks:`/top-level `state:`. We find the exact node
+# LINE RANGE from the AST, then do comment-preserving text surgery only inside that range.
+def _compose_mapping(text: str) -> "yaml.MappingNode":
+    node = yaml.compose(text)
+    if not isinstance(node, yaml.MappingNode):
+        raise WorkflowError("document top level must be a mapping")
+    return node
+
+
+def _top_level(root: "yaml.MappingNode", key: str):
+    """Value node of the UNIQUE top-level mapping key (None if absent; WorkflowError on duplicate)."""
+    found = [v for k, v in root.value if isinstance(k, yaml.ScalarNode) and k.value == key]
+    if len(found) > 1:
+        raise WorkflowError(f"ambiguous document: {len(found)} top-level {key!r} keys")
+    return found[0] if found else None
+
+
+def _task_item_span(text: str, task_id: str) -> tuple[int, int]:
+    """(start_line, end_line) of the task whose DIRECT `id` == task_id, located only inside the
+    top-level `tasks:` sequence. Raises KeyError if absent, WorkflowError if ambiguous (duplicate
+    `tasks`/id/`id`-key)."""
+    tasks = _top_level(_compose_mapping(text), "tasks")
+    if tasks is None:
+        raise KeyError("no top-level 'tasks' sequence")
+    if not isinstance(tasks, yaml.SequenceNode):
+        raise WorkflowError("'tasks' is not a list")
+    matches = []
+    for item in tasks.value:
+        if not isinstance(item, yaml.MappingNode):
             continue
-        cur = len(ln) - len(ln.lstrip())
-        if cur <= indent and (ln.lstrip().startswith("- ") or cur < indent):
-            return (start, j)
-    return (start, len(lines))
+        ids = [v.value for k, v in item.value
+               if isinstance(k, yaml.ScalarNode) and k.value == "id" and isinstance(v, yaml.ScalarNode)]
+        if len(ids) > 1:
+            raise WorkflowError(f"task near line {item.start_mark.line + 1} has multiple id keys")
+        if ids and ids[0] == task_id:
+            matches.append((item.start_mark.line, item.end_mark.line))
+    if len(matches) > 1:
+        raise WorkflowError(f"ambiguous registry: duplicate task id {task_id!r}")
+    if not matches:
+        raise KeyError(f"task id not found in registry: {task_id}")
+    return matches[0]
 
 
 def set_task_field(text: str, task_id: str, field: str, value: str) -> str:
-    """Set `field: value` inside a task block, preserving all other content/comments.
-    Updates the field if present, else inserts it right after the id line. Raises if the
-    task is absent (a round must not silently no-op)."""
+    """Set `field: value` inside the task block (located via the AST, never a decoy elsewhere),
+    preserving all other content/comments. Updates the field if present, else inserts it right
+    after the id line. Raises if the task is absent or the structure is ambiguous."""
     lines = text.splitlines(keepends=True)
-    span = _task_block_span(lines, task_id)
-    if span is None:
-        raise KeyError(f"task id not found in registry: {task_id}")
-    start, end = span
+    start, end = _task_item_span(text, task_id)
+    end = min(end, len(lines))
     nl = "\n" if not lines[start].endswith("\r\n") else "\r\n"
     field_indent = len(lines[start]) - len(lines[start].lstrip()) + 2
-    # match ONLY a task-level field at the exact sibling indent — never a deeper nested key
-    # (e.g. a `lane:`/`status:` sub-mapping must not be mistaken for the task's `status`).
+    # match ONLY a task-level field at the exact sibling indent — never a deeper nested key.
     field_re = re.compile(rf"^ {{{field_indent}}}{re.escape(field)}:\s*.*$")
     for k in range(start + 1, end):
         if field_re.match(lines[k]):
@@ -94,29 +114,22 @@ def set_config_scalar(text: str, key: str, value: str, section: str | None = Non
                 return replace_at(i, m.group(1))
         raise KeyError(f"config key not found: {key}")
 
-    sec_re = re.compile(r"^(\s*)" + re.escape(section) + r":\s*$")
-    start = sec_indent = None
-    for i, ln in enumerate(lines):
-        m = sec_re.match(ln)
-        if m:
-            start, sec_indent = i, len(m.group(1))
-            break
-    if start is None:
+    # AST-bounded: the UNIQUE top-level `section` mapping, then its DIRECT child `key` only — a
+    # nested `foo.state.<key>` or a duplicate top-level `state` can't be edited by mistake.
+    sec = _top_level(_compose_mapping(text), section)
+    if sec is None:
         raise KeyError(f"config section not found: {section}")
-    child_indent = sec_indent + 2  # only a DIRECT child of the section, never a deeper nested key
-    for j in range(start + 1, len(lines)):
-        ln = lines[j]
-        if not ln.strip():
-            continue
-        cur = len(ln) - len(ln.lstrip())
-        if cur <= sec_indent:
-            break  # dedented out of the section
-        if cur != child_indent:
-            continue  # nested deeper than a direct child — skip
-        m = key_re.match(ln)
-        if m:
-            return replace_at(j, m.group(1))
-    raise KeyError(f"config key {key!r} not found under section {section!r}")
+    if not isinstance(sec, yaml.MappingNode):
+        raise WorkflowError(f"config section {section!r} is not a mapping")
+    child_lines = [k.start_mark.line for k, v in sec.value
+                   if isinstance(k, yaml.ScalarNode) and k.value == key]
+    if len(child_lines) > 1:
+        raise WorkflowError(f"ambiguous config: {len(child_lines)} {key!r} keys under {section!r}")
+    if not child_lines:
+        raise KeyError(f"config key {key!r} not found under section {section!r}")
+    i = child_lines[0]
+    indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+    return replace_at(i, indent)
 
 
 # ---- orchestration -----------------------------------------------------------
@@ -152,6 +165,9 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
         print("jw_round close: state.last_round_commit is missing from .jahns-workflow.yml — "
               "add it (under `state:`) before closing rounds.", file=sys.stderr)
         return 1
+    except WorkflowError as e:
+        print(f"jw_round close: cannot safely edit .jahns-workflow.yml — {e}", file=sys.stderr)
+        return 1
 
     orig_tasks_text = tasks_path.read_text(encoding="utf-8")
     text = orig_tasks_text
@@ -176,7 +192,7 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
             text = set_task_field(text, tid, "status", "done")
         for tid in dict.fromkeys(done + touched):
             text = set_task_field(text, tid, "round", round_id)
-    except KeyError as e:
+    except (KeyError, WorkflowError) as e:
         print(f"jw_round close: {e}", file=sys.stderr)
         return 1
 
@@ -217,8 +233,7 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
         roadmap_path.write_text(jw_roadmap.render(root), encoding="utf-8")
         if cfg.get("ssot"):
             import jw_ssot
-            jw_ssot.split(root)
-            jw_ssot.digest(root)
+            jw_ssot.regenerate(root)  # one full regen; raises WorkflowError (caught below) not sys.exit
     except Exception as e:  # noqa: BLE001 — any failure must roll every written artifact back
         tasks_path.write_text(orig_tasks_text, encoding="utf-8")
         cfg_path.write_text(ctext, encoding="utf-8")

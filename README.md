@@ -120,6 +120,20 @@ log (`issues/{pr}/comments --slurp`, not the 100-cap `gh pr view`), keyed on eac
 can't pose as old. The Codex `Reviewed commit:` line is matched anchored to its own line (quoted or
 negated prose mentioning the SHA is not a signal).
 
+**Frozen-acceptance hardening (v0.2.7).** Three trust boundaries are now structural, not patched:
+(A) *PR reducer* — markers are a strict typed protocol (`yaml.safe_dump`/schema-checked, so
+`cycle: true`, `review_cycle: 1.0`, a non-40-hex SHA, or `resolved: "yes"` are rejected, never
+coerced); evidence must post-date the freeze (`freeze < {codex, macro result, findings} < approval`,
+strictly); markers are read only from issue comments (a marker in a PENDING formal-review body is
+ignored); and the trust policy is loaded once from the **base SHA** for *every* command
+(freeze/status/approve/merge), so a local checkout can't switch a packet-policy repo into pr mode.
+(B) *YAML mutation* — `tasks`/`state` edits are bounded by the document AST (`yaml.compose`), so a
+decoy `- id:` under `metadata:` or a nested `state:` is never touched, and duplicate/ambiguous
+structure fails closed. (C) *Closeout/views* — library helpers raise a catchable `WorkflowError`
+(never `sys.exit`, which slipped past rollback); a single pure builder generates all SSOT views so
+`jw ssot check` verifies every view's exact bytes (not just `.hash`) and flags missing/extra files;
+`deps` elements must be task ids. The threat model and acceptance contract for v0.2 are frozen.
+
 ## Requirements
 
 - `git`, `bash`, [`uv`](https://docs.astral.sh/uv/) on PATH (scripts use PEP 723 inline deps; first run downloads `pyyaml` once).

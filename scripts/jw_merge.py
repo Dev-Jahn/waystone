@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
-from jw_common import load_config, normalize_config  # noqa: E402
+from jw_common import load_config  # noqa: E402
 import jw_review  # noqa: E402
 import jw_validate  # noqa: E402
 
@@ -84,19 +84,23 @@ def merge_gate(g: dict) -> tuple[bool, list[str]]:
 
 # ---- CLI ---------------------------------------------------------------------
 def approve(root: Path, pr: int, sha: str) -> int:
-    repo = jw_review.resolve_repo(root)
-    bundle = jw_review.pr_bundle(root, pr, repo)
-    if bundle is None:
+    ctx = jw_review.pr_context(root, pr)
+    if ctx is None:
         return 1
+    if ctx["policy"] is None:
+        print("jw approve: cannot read the base-branch policy at the PR base SHA.", file=sys.stderr)
+        return 1
+    repo, bundle = ctx["repo"], ctx["bundle"]
     head = bundle["head"]
     base_sha = bundle.get("base_sha", "")
     if len(sha) < 7 or not head.startswith(sha):
         print(f"jw approve: refusing — --sha {sha} is not the current PR head ({head[:12]}). "
               f"Approval must bind to the exact current head.", file=sys.stderr)
         return 3
-    # bind the approval to the current cycle, so a later re-freeze (new cycle/base) invalidates it
+    # bind the approval to the current cycle, so a later re-freeze (new cycle/base) invalidates it.
+    # operators come from the BASE policy (consistent with the gate), not the local checkout.
     owner = repo.split("/", 1)[0] if repo else ""
-    operators = tuple({owner, *load_config(root)["review"].get("operators", [])} - {""})
+    operators = tuple({owner, *ctx["policy"]["review"].get("operators", [])} - {""})
     lc = jw_review.latest_cycle(jw_review.parse_bodies(bundle["bodies"]), operators)
     if lc is None:
         print("jw approve: no review cycle is frozen yet — run `jw review freeze` first.", file=sys.stderr)
@@ -124,25 +128,22 @@ def _gather(root: Path, pr: int) -> dict | None:
     the PR's BASE SHA — the protected target branch — NOT the PR head, so a candidate branch
     cannot relax its own merge rules (add itself as operator/approver, drop reviewers, disable
     CI). The CONTENT being merged (tasks.yaml blockers/decisions) is read from the head."""
-    repo = jw_review.resolve_repo(root)
-    bundle = jw_review.pr_bundle(root, pr, repo)
-    if bundle is None:
+    ctx = jw_review.pr_context(root, pr)
+    if ctx is None:
         return None
-    head = bundle["head"]
-    base_sha = bundle.get("base_sha")
-    read_ok = True
-    policy = load_config(root)  # fallback only
+    repo, bundle = ctx["repo"], ctx["bundle"]
+    head, base_sha = ctx["head"], ctx["base_sha"]
+    policy = ctx["policy"]              # POLICY @ base SHA (None if unreadable)
+    read_ok = policy is not None
     data = {}
-    if repo and head and base_sha:
-        pol_text = jw_review.file_at_ref(root, repo, ".jahns-workflow.yml", base_sha)  # POLICY @ base
-        tasks_text = jw_review.file_at_ref(root, repo, "tasks.yaml", head)             # CONTENT @ head
-        if pol_text is None or tasks_text is None:
+    if read_ok and repo and head:
+        tasks_text = jw_review.file_at_ref(root, repo, "tasks.yaml", head)  # CONTENT @ head
+        if tasks_text is None:
             read_ok = False
         else:
             try:
-                policy = normalize_config(yaml.safe_load(pol_text))
                 data = yaml.safe_load(tasks_text) or {}
-            except (yaml.YAMLError, ValueError):
+            except yaml.YAMLError:
                 read_ok = False
             else:
                 # head tasks.yaml must be schema-valid, not merely parseable — a malformed
@@ -151,6 +152,8 @@ def _gather(root: Path, pr: int) -> dict | None:
                     read_ok = False
     else:
         read_ok = False
+    if policy is None:
+        policy = load_config(root)  # for facts only; read_ok is already False → gate blocks
     facts = jw_review.facts_from_bundle(bundle, policy, repo)
     reviewers = policy["review"]["reviewers"]
     # any configured reviewer other than codex is a mandatory macro reviewer — never guess by name
@@ -159,6 +162,7 @@ def _gather(root: Path, pr: int) -> dict | None:
     return {
         **facts,
         "head_read_ok": read_ok,
+        "policy_mode": policy["review"]["mode"],
         "require_ci": policy["review"]["require_ci"],
         "want_codex": "codex" in reviewers,
         "want_pro": bool(macro),
@@ -170,12 +174,14 @@ def _gather(root: Path, pr: int) -> dict | None:
 
 
 def merge(root: Path, pr: int, execute: bool, method: str | None) -> int:
-    cfg = load_config(root)
-    if cfg["review"]["mode"] != "pr":
-        print("jw merge: review.mode is 'packet'; the merge guard is for PR mode.", file=sys.stderr)
-        return 1
     g = _gather(root, pr)
     if g is None:
+        return 1
+    # the merge guard applies only under a pr-mode BASE policy (not the local checkout) — a branch
+    # can't switch a packet-policy repo into pr mode to wave itself through an empty reviewer set.
+    if g.get("policy_mode") != "pr":
+        print("jw merge: the base-branch review.mode is not 'pr'; the merge guard is for PR mode.",
+              file=sys.stderr)
         return 1
     ok, failures = merge_gate(g)
     if not ok:

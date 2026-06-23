@@ -10,6 +10,13 @@ import yaml
 
 CONFIG_NAME = ".jahns-workflow.yml"
 TASKS_NAME = "tasks.yaml"
+
+
+class WorkflowError(Exception):
+    """A recoverable workflow error raised by library helpers. Library code must raise this (an
+    ordinary Exception, catchable by rollback logic) rather than calling sys.exit() — only CLI
+    main() converts it to an exit code. (sys.exit raises SystemExit/BaseException, which slips past
+    `except Exception` rollbacks.)"""
 REGISTRY_PATH = Path.home() / ".claude" / "jahns-workflow" / "projects.json"
 
 TASK_TYPES = ("feat", "fix", "perf", "gate", "spike", "decision", "docs", "chore")

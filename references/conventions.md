@@ -117,7 +117,11 @@ earlier shipped, and a Codex signal newer than a findings resolution or approval
 Evidence is cycle-bound — a Codex signal must post-date the latest freeze, and the human approval
 binds to `(cycle, head, base)` and must come after all evidence — so re-freezing to a new
 cycle/base can never reuse a previous cycle's Codex review or approval. Markers tied on the newest
-timestamp with conflicting content fail closed. Ordering is strict (post-date, not equal-or-after);
+timestamp with conflicting content fail closed. The chronology is strict: `freeze < {codex, macro
+result, findings} < approval`. Markers are a typed protocol (schema-checked, never coerced) read
+only from issue comments; the trust policy is loaded from the PR base SHA for every command, so a
+candidate branch can't enable pr-mode or widen its reviewer/operator/approver set — the
+`packet → pr` transition PR is itself reviewed in packet mode, and pr mode applies from the next PR. Ordering is strict (post-date, not equal-or-after);
 the freeze boundary is the latest marker of the highest cycle, so re-freezing advances it. PR
 comments are read as a paginated REST event log keyed on each comment's effective (`updated_at`)
 time, so neither a 101st comment nor an edited-to-look-old comment can hide state from the gate.

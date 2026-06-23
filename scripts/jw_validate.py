@@ -100,6 +100,15 @@ def validate(data: object) -> list[str]:
         deps = t.get("deps", [])
         if not isinstance(deps, list):
             errs.append(f"{loc}.deps: must be a list of task ids")
+        else:
+            seen_deps: set[str] = set()
+            for d in deps:
+                if not isinstance(d, str) or not TASK_ID_RE.match(d):
+                    errs.append(f"{loc}.deps: each dep must be a <type>/<slug> task id, got {d!r}")
+                elif d in seen_deps:
+                    errs.append(f"{loc}.deps: duplicate dep {d!r}")
+                else:
+                    seen_deps.add(d)
         for field in ("anchor", "origin", "branch", "notes", "ruling", "result"):
             v = t.get(field)
             if v is not None and not isinstance(v, str):
@@ -113,8 +122,14 @@ def validate(data: object) -> list[str]:
                     errs.append(f"{loc}.lane.branch: required string")
                 if not isinstance(lane.get("base_sha"), str):
                     errs.append(f"{loc}.lane.base_sha: required string (sha the lane was cut from)")
-                if "depends_on" in lane and not isinstance(lane["depends_on"], list):
-                    errs.append(f"{loc}.lane.depends_on: must be a list")
+                if "depends_on" in lane:
+                    dep_on = lane["depends_on"]
+                    if not isinstance(dep_on, list):
+                        errs.append(f"{loc}.lane.depends_on: must be a list")
+                    else:
+                        for d in dep_on:
+                            if not isinstance(d, str) or not TASK_ID_RE.match(d):
+                                errs.append(f"{loc}.lane.depends_on: each must be a task id, got {d!r}")
 
     # Dependency references and cycles (only over well-formed ids). A non-list `deps` is already
     # flagged above; normalize it to [] here so graph construction can't raise on it.
