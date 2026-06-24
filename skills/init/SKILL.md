@@ -54,7 +54,6 @@ reviews_dir: docs/reviews
 progress_archive_dir: docs/progress
 generated_dir: docs/ssot
 digest_max_lines: 150
-oracles: []                     # sections with cheap executable checks; see audit skill
 review:
   mode: packet                  # packet (paste to web reviewer) | pr (SHA-bound PR review cycles)
   reviewers: [codex, gpt-5.5-pro]
@@ -62,7 +61,6 @@ review:
   # operators: []               # PR mode: extra GitHub logins trusted to post review markers (owner always is)
   # approvers: []               # PR mode: extra GitHub logins trusted to post the final approval
 state:
-  last_audit_commit: null
   last_round_commit: null
 ```
 
@@ -73,7 +71,7 @@ through PRs with a `@codex` bot.
 
 2. `tasks.yaml` — minimal valid registry (`version: 1`, `project:`, `milestones: []`, `tasks: []`),
    with a YAML comment documenting the optional task fields (`deps`, `milestone`, `round`,
-   `anchor` — §-anchor of the SSOT section the task governs, used by audits — `severity`,
+   `anchor` — §-anchor of the SSOT section the task governs — `severity`,
    `origin`, `branch`, `notes`, `ruling` — the user's decision on a `decision/...` task,
    `result` — a recorded measurement/outcome, `lane` — `{branch, base_sha, depends_on}` for
    parallel worktree lanes, verified by `jw lanes verify`).

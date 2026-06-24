@@ -2,7 +2,7 @@
 
 A Claude Code plugin that harnesses SSOT-anchored agentic development: one global naming
 convention across all projects, a machine-validated task registry, zero-token roadmap/digest
-generation, round-based progress discipline, external-review ingestion, and scoped SSOT audits.
+generation, round-based progress discipline, and external-review ingestion.
 
 Generalizes a research-workflow battle-tested on theory-heavy repos, but applies to any
 programming project (web, systems, ML) that anchors work on one design document.
@@ -10,9 +10,9 @@ programming project (web, systems, ML) that anchors work on one design document.
 ## What it enforces (from adoption onward — never retroactively)
 
 - **Task IDs** `<type>/<kebab-slug>` (`feat|fix|perf|gate|spike|decision|docs|chore`) registered in `tasks.yaml` with explanatory titles before first use. Bare codenames (`P0`, `E3`, `Q1`) are rejected by a validator hook.
-- **Severities** `blocker > major > minor` on review/audit findings.
+- **Severities** `blocker > major > minor` on review findings.
 - **One home per fact**: SSOT (design), `tasks.yaml` (registry), `ROADMAP.md` (generated view), `PROGRESS.md` (log, auto-archived monthly), ADRs (decisions), reviews dir (external feedback, verbatim).
-- **SSOT discipline**: §-anchor citations only; generated section split + INDEX + session-injected DIGEST; "binding but falsifiable" discrepancy rule; bulk-edit quarantine (>100 changed lines → audit before dependent work).
+- **SSOT discipline**: §-anchor citations only; generated section split + INDEX + session-injected DIGEST; "binding but falsifiable" discrepancy rule (implementation evidence that contradicts the SSOT → register a `decision`, amend via ADR).
 
 Full convention: [references/conventions.md](references/conventions.md).
 
@@ -23,9 +23,7 @@ Full convention: [references/conventions.md](references/conventions.md).
 | `/jahns-workflow:init` | One-click setup; non-destructive retrofit for in-progress projects (incl. agent-memory cleanup, project registration) |
 | `/jahns-workflow:round` | Close a work round: sync registry → PROGRESS entry + archive → refresh views → review-request packet |
 | `/jahns-workflow:review` | Ingest an external review reply: preserve verbatim → verify each finding → register as tasks |
-| `/jahns-workflow:audit` | Scoped, tiered SSOT audit (consistency / independent re-derivation / cheap-oracle checks). Cost cap is wall-clock, not hardware — never runs production suites or expensive builds |
 | `/jahns-workflow:status` | Cross-project terminal dashboard (branches, rounds, active/blocked tasks). Registry entries can be local (`path`) or remote (`repo: owner/name`, fetched via `gh api` — for projects not cloned on this machine) |
-| `spec-auditor` agent | Independent verifier fanned out by the audit skill |
 | SessionStart hook | Injects digest + active tasks on startup/resume/clear/**compact** (capped ~8KB; no-ops in ~30ms in non-initialized projects) |
 | PostToolUse hook | On `tasks.yaml` edits only: schema validation (exit-2 feedback) + deterministic `ROADMAP.md` regeneration. ~13ms no-op otherwise |
 
@@ -37,8 +35,8 @@ A unified front door `scripts/jw.py` dispatches `jw <group>`
 
 - **`jw round close . --round <id> --done <ids> --touched <ids>`** does the whole deterministic
   closeout ritual atomically: comment-preserving status/round flips on tasks.yaml, validate,
-  regenerate ROADMAP/SSOT views, advance the `last_round_commit` watermark, and report SSOT churn
-  (flagging the >100-line bulk-edit quarantine). No more hand-edited watermarks or per-task flips.
+  regenerate ROADMAP/SSOT views, and advance the `last_round_commit` watermark. No more hand-edited
+  watermarks or per-task flips.
 - **PreCompact / SessionEnd hooks** snapshot a re-entry pointer (HEAD, branch, active round,
   active/blocked tasks, next-actionable) to a plugin-local file — closing the "update memory
   before compaction" loop. The SessionStart injection now also lists **next-actionable** tasks
@@ -154,13 +152,13 @@ Then in each project: `/jahns-workflow:init`. **Restart Claude Code after instal
 ## Files a project gains
 
 ```
-.jahns-workflow.yml      # config: SSOT path, dir mapping, oracles, audit watermark
+.jahns-workflow.yml      # config: SSOT path, dir mapping, review mode
 tasks.yaml               # THE codename registry (validated on every edit)
 ROADMAP.md               # generated Mermaid dependency graph + task table (GitHub renders it)
 PROGRESS.md              # round log (older months auto-archived to docs/progress/)
 docs/CONVENTIONS.md      # verbatim copy of the global convention
 docs/ssot/               # generated: sections/ split, INDEX.md, DIGEST.md
-docs/adr/  docs/reviews/ # decisions; review request/feedback/audit records
+docs/adr/  docs/reviews/ # decisions; review request/feedback records
 CLAUDE.md                # gains a marker-delimited workflow stanza
 ```
 

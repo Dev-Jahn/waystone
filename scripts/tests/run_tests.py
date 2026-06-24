@@ -676,10 +676,10 @@ class TextSurgeryTests(unittest.TestCase):
             jw_round.set_task_field(TASKS_FIXTURE, "feat/nope", "status", "done")
 
     def test_set_config_scalar_nested(self):
-        cfg = "version: 1\nstate:\n  last_audit_commit: null\n  last_round_commit: null\n"
+        cfg = "version: 1\nstate:\n  last_push_commit: null\n  last_round_commit: null\n"
         out = jw_round.set_config_scalar(cfg, "last_round_commit", "abc123")
         self.assertIn("  last_round_commit: abc123", out)
-        self.assertIn("  last_audit_commit: null", out)  # sibling preserved
+        self.assertIn("  last_push_commit: null", out)  # sibling preserved
         with self.assertRaises(KeyError):
             jw_round.set_config_scalar(cfg, "nonexistent_key", "v")
 
@@ -750,7 +750,7 @@ class RoundCloseTests(unittest.TestCase):
             root = Path(d)
             init_repo(root)
             (root / ".jahns-workflow.yml").write_text(
-                "version: 1\nproject: x\nstate:\n  last_audit_commit: null\n  last_round_commit: null\n")
+                "version: 1\nproject: x\nstate:\n  last_round_commit: null\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             git(root, "add", "-A"); git(root, "commit", "-qm", "setup")
             rc = jw_round.close(root, "2026-06-19-z", done=["feat/alpha"], touched=["gate/beta"], commit="HEAD")

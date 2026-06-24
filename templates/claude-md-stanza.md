@@ -3,8 +3,7 @@
 
 - **SSOT**: `{SSOT_PATH}` — binding but falsifiable. Read sections via `{GENERATED_DIR}/INDEX.md`; never re-read the whole file; cite by §-anchor, never line numbers. If implementation evidence contradicts it: STOP, register a `decision/...` task, get a ruling, amend via ADR. Never silently comply or diverge.
 - **Task registry**: every unit of work gets an ID `<type>/<kebab-slug>` (feat|fix|perf|gate|spike|decision|docs|chore) registered in `tasks.yaml` with an explanatory title BEFORE first use. Bare codenames (P0, E3, Q1…) are banned. `ROADMAP.md` is generated — never edit it.
-- **Severities** on review/audit findings: blocker > major > minor (field, not ID). Blockers resolve before the next round.
+- **Severities** on review findings: blocker > major > minor (field, not ID). Blockers resolve before the next round.
 - **Rounds**: close each work round with `/jahns-workflow:round` (updates registry, PROGRESS, roadmap, digest, review packet). Ingest external review replies with `/jahns-workflow:review`.
-- **Bulk SSOT edits** (>~100 lines in one round) are quarantined: run `/jahns-workflow:audit` on changed sections before dependent work consumes them.
 - Full convention: `docs/CONVENTIONS.md`.
 <!-- jahns-workflow:end -->

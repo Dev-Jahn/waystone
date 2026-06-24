@@ -1,7 +1,7 @@
 {
   "name": "jahns-workflow",
   "version": "0.2.7",
-  "description": "SSOT-anchored agentic development workflow harness: one-click project setup, task registry with a global naming convention, zero-token roadmap rendering, round closeout, external review ingestion, and scoped SSOT audits.",
+  "description": "SSOT-anchored agentic development workflow harness: one-click project setup, task registry with a global naming convention, zero-token roadmap rendering, round closeout, and external review ingestion.",
   "author": {
     "name": "Jahn",
     "email": "ajhskku@gmail.com"

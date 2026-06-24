@@ -21,7 +21,7 @@ rather than duplicating).
 ## Step 2 — Sync the task registry
 
 First register any newly discovered work as new tasks (proper `<type>/<slug>` IDs + explanatory
-titles; set `anchor:` to the governing SSOT §-anchor when known — audits scope by it). Unresolved
+titles; set `anchor:` to the governing SSOT §-anchor when known). Unresolved
 questions for the user become `decision/...` tasks; when a `decision/...` is answered, record the
 ruling in its `ruling:` field.
 
@@ -33,28 +33,20 @@ uv run <plugin-root>/scripts/jw.py round close . --round <round-id> \
 ```
 
 `round close` flips the `--done` tasks to `done`, stamps `round:` on every worked task, validates
-the registry, regenerates `ROADMAP.md` (and SSOT views if configured), advances
-`state.last_round_commit`, and prints the SSOT churn (flagging the >100-line bulk-edit quarantine).
+the registry, regenerates `ROADMAP.md` (and SSOT views if configured), and advances
+`state.last_round_commit`.
 A `gate/...` task goes in `--done` only if the bar actually passed (link evidence in PROGRESS).
 If `round close` reports the registry invalid, fix the reported issues before continuing.
 If lanes were used this round, first verify them: `uv run <plugin-root>/scripts/jw.py lanes verify .`.
 
-## Step 3 — SSOT quarantine check
-
-`round close` already regenerated the SSOT views and printed the churn since the previous round.
-If it reported a **bulk edit (>100 lines)**, apply the quarantine rule: state prominently in the
-report and in PROGRESS that `/jahns-workflow:audit` must run on the changed sections before
-dependent work consumes them. (Churn measurement, view regen, and the watermark advance are all
-handled by `round close` — no manual `git diff`/watermark edit.)
-
-## Step 4 — PROGRESS entry + archive
+## Step 3 — PROGRESS entry + archive
 
 Append an entry from `<plugin-root>/templates/progress-entry.md` (content in the user's
 configured language). Then archive: move dated sections from months before the current one
 into `docs/progress/<YYYY-MM>.md` (mechanical cut-paste, newest-first preserved), leaving
 PROGRESS.md with the current month + the header pointers.
 
-## Step 5 — Request review
+## Step 4 — Request review
 
 **First, a hard push gate (both modes):** run `uv run <plugin-root>/scripts/jw.py remote verify .`.
 A review must point at a pushed commit; if this exits non-zero, STOP and tell the user to push
@@ -75,10 +67,10 @@ current PR head as cycle N (immutable target), posts the `@codex` request, and a
 reviewer to bind its reply to that SHA. Check progress with `jw review status --pr <N>`; never
 treat "a comment appeared" as "review done" — a review is `(reviewer, cycle, reviewed_sha)`.
 
-## Step 6 — Report
+## Step 5 — Report
 
 Report in the user's configured language: shipped tasks (id — title), registry/roadmap state,
-SSOT churn (+ quarantine flag if triggered), where the review packet is, and a suggested
+where the review packet is, and a suggested
 commit message (`docs(round): close <round-id>`). Do not commit unless the project's conventions
 say rounds end in a commit and the user has authorized committing.
 

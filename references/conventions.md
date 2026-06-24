@@ -32,15 +32,15 @@ IDs share one mental model. Branch names may reuse the task ID verbatim (`feat/s
 Every task carries a `title`: one explanatory phrase a person seeing the repo for the first
 time can understand. Titles, not IDs, are what roadmap nodes and dashboards display alongside
 the ID. A task that governs a specific SSOT section also carries an `anchor:` field
-(§-anchor string such as `"DESIGN §5.6"`) — audits use these anchors to scope verification,
-so set them whenever the binding section is known.
+(§-anchor string such as `"DESIGN §5.6"`) — it documents the binding section, surfaces in the
+roadmap view, and scopes review findings, so set it whenever the binding section is known.
 
 **Banned:** bare letter-number codenames (`P0`, `E3`, `Q1`, `T7`, `P-3`, …) as identifiers of
 work. They collide across projects and decay into noise. (Domain terms inside prose are fine.)
 
 ## 2. Severity — `blocker` > `major` > `minor`
 
-Used on review/audit findings (a `severity:` field on the task, never part of the ID):
+Used on review findings (a `severity:` field on the task, never part of the ID):
 
 - **blocker** — wrong results, data loss, or invalidates dependent work. Resolve before the next round consumes anything downstream.
 - **major** — real defect or hazard; schedule within the current milestone.
@@ -58,8 +58,6 @@ Used on review/audit findings (a `severity:` field on the task, never part of th
 2. **Cite by §-anchor or heading, never by line number.** Line numbers rot with every edit.
 3. **Read sections, not the whole file.** Navigate via the generated INDEX; the DIGEST is injected each session for orientation.
 4. **Binding but falsifiable.** When implementation evidence contradicts the SSOT: stop, register a `decision/...` task describing the discrepancy, get a ruling, then amend the SSOT via ADR. Never silently comply with a spec that evidence contradicts; never silently diverge from it either.
-5. **Bulk-edit quarantine.** Any single round that changes more than ~100 SSOT lines is presumed risky (this is exactly how spec FATALs historically slipped in): run `/jahns-workflow:audit` on the changed sections before downstream work consumes them.
-6. **Verifiable claims get executable twins.** Where a section's correctness is mechanically checkable with a *cheap* oracle — a side-effect-free check that finishes in seconds (the constraint is wall-clock cost, not which hardware it uses) — declare it under `oracles:` in `.jahns-workflow.yml` with its expected runtime so audits can exercise it.
 
 ## 5. Document homes (one home per fact)
 
@@ -129,6 +127,6 @@ time, so neither a 101st comment nor an edited-to-look-old comment can hide stat
 Trust-model note: approval binds to a trusted approver's GitHub login, but a coding agent that
 shares that login's `gh` credential can post an approval indistinguishable from a hand-made one.
 The gate therefore guarantees *who is authorised*, not *that a human personally acted* — for a
-solo developer driving agents, treat approval as an audit trail and merge speed-bump, not a hard
-human-in-the-loop control. A true human gate requires running the agent under a separate bot
+solo developer driving agents, treat approval as a provenance record and merge speed-bump, not a
+hard human-in-the-loop control. A true human gate requires running the agent under a separate bot
 identity and reserving the approver credential for interactive use.

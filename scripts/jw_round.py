@@ -9,8 +9,7 @@
   1. flip the given tasks to done and stamp every worked task with the round id
      (surgical, comment-preserving edits to tasks.yaml — never a full rewrite),
   2. validate the registry and regenerate ROADMAP.md (and SSOT views if configured),
-  3. set state.last_round_commit to the round's tip,
-  4. report the SSOT churn since the previous round watermark (bulk-edit quarantine signal).
+  3. set state.last_round_commit to the round's tip.
 
 The text-surgery helpers (set_task_field, set_config_scalar) are pure and tested.
 
@@ -204,16 +203,6 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
             print(f"  - {e}", file=sys.stderr)
         return 2
 
-    # churn since the previous watermark (computed before advancing it)
-    prev = (cfg.get("state") or {}).get("last_round_commit")
-    churn = None
-    if prev and cfg.get("ssot"):
-        stat = git(root, "diff", "--numstat", f"{prev}..{full}", "--", cfg["ssot"])
-        if stat:
-            adds = sum(int(p.split("\t")[0]) for p in stat.splitlines() if p.split("\t")[0].isdigit())
-            dels = sum(int(p.split("\t")[1]) for p in stat.splitlines() if p.split("\t")[1].isdigit())
-            churn = adds + dels
-
     # --- commit phase (all preflight checks passed): write with rollback ---
     # ROADMAP.render reads tasks.yaml from disk, so the new registry must be written first. If any
     # later step raises, restore the primary mutated files (tasks.yaml, cfg, ROADMAP) AND the whole
@@ -254,9 +243,6 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
 
     print(f"round {round_id} closed: {len(done)} done, {len(set(done + touched))} stamped; "
           f"watermark set @ {full[:12]}")
-    if churn is not None:
-        flag = "  ⚠ BULK EDIT (>100 lines) — run /jahns-workflow:audit on changed sections" if churn > 100 else ""
-        print(f"SSOT churn since last round: {churn} lines{flag}")
     return 0
 
 
