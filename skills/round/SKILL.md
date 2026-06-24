@@ -1,13 +1,13 @@
 ---
 name: round
-description: This skill should be used when the user runs "/jahns-workflow:round", says to "close the round", "wrap up this round", "finish the work cycle", or when an autonomous work round (implement → verify → push) reaches its end and the project CLAUDE.md mandates round closeout. Updates the task registry, PROGRESS, roadmap, SSOT views, and produces the external review packet.
+description: This skill should be used when the user runs "/jahns-workflow:round", says to "close the round", "wrap up this round", "finish the work cycle", or when an autonomous work round (implement → verify → push) reaches its end and the project CLAUDE.md mandates round closeout. Updates the task registry, PROGRESS, roadmap, SSOT views, and produces the external review bundle.
 argument-hint: "[round-slug] e.g. lstream-seams"
 ---
 
 # jahns-workflow: round
 
 Close the current work round: bring the task registry up to date, record the round in
-PROGRESS, refresh generated views, and emit a paste-ready external review packet.
+PROGRESS, refresh generated views, and build a self-contained external review bundle.
 
 Requires an initialized project (`.jahns-workflow.yml`). If missing, stop and point the user
 at `/jahns-workflow:init`. Plugin root = two directories above this skill's base directory.
@@ -52,33 +52,53 @@ PROGRESS.md with the current month + the header pointers.
 A review must point at a pushed commit; if this exits non-zero, STOP and tell the user to push
 the round's commits before a packet/cycle is created — do not emit a packet for an unpushed HEAD.
 
-**Packet mode** (`review.mode: packet`, default): generate `<reviews_dir>/<round-id>-request.md`
-from `<plugin-root>/templates/review-request.md`. External reviewers typically browse the repo
-directly (e.g. ChatGPT's GitHub connector), so record the pushed HEAD hash and prefer pointers
-(file paths, §-anchors, commit hashes) over inlined diffs — inline only small load-bearing
-snippets, or full diffs/pseudocode if the reviewer has no repo access. **Pin the packet HEAD to
-the load-bearing implementation commit, not a later docs-only round-close commit** — otherwise
-the reviewer reads a stale registry and raises false-positive findings. State every load-bearing
-claim falsifiably and list the test ladder's known blind spots.
+**Packet mode** (`review.mode: packet`, default): the reviewer no longer browses the repo (the
+ChatGPT GitHub connector is unavailable) — it reads a self-contained **review bundle** zip.
 
-**PR mode** (`review.mode: pr`): open/locate the round's PR, then freeze a SHA-bound review cycle:
-`uv run <plugin-root>/scripts/jw.py review freeze --pr <N> --round <round-id> .`. This stamps the
-current PR head as cycle N (immutable target), posts the `@codex` request, and asks the macro
-reviewer to bind its reply to that SHA. Check progress with `jw review status --pr <N>`; never
-treat "a comment appeared" as "review done" — a review is `(reviewer, cycle, reviewed_sha)`.
+1. Write `<reviews_dir>/<round-id>-request.md` from `<plugin-root>/templates/review-request.md`:
+   state every load-bearing claim **falsifiably** under "Claims to attack" and list the test
+   ladder's known blind spots. This is packaged verbatim as the bundle's `__review__/REQUEST.md`.
+2. **The reviewed tree is the current HEAD.** So if your conventions end a round in a commit, commit
+   the closeout (`docs(round): close <round-id>`) and push it FIRST — then `repo/tasks.yaml` /
+   PROGRESS carry the round's final state and the manifest scope matches them. (Bundling before the
+   closeout commit is allowed; the bundle is then internally consistent but marked `worktree_dirty`.)
+3. Build the bundle:
+   `uv run <plugin-root>/scripts/jw.py review bundle . --round <round-id>`. It reads the base
+   watermark `round close` recorded, builds `repo/` **directly from git objects of HEAD** (exact
+   tracked tree — no `.git`/caches/secrets; a symlink ships as a regular file holding its target string,
+   recorded in `manifest.symlinks`, never a rebuildable link entry),
+   adds `__review__/DIFF.patch` + `CHANGED_FILES.txt` + `COMMITS.txt` + a schema-validated
+   `MANIFEST.yaml`, stamps the reviewed head into the sidecar, and writes the zip to
+   `<reviews_dir>/bundles/` (untracked). HEAD must be pushed (the gate above).
+4. Attach that zip to the web reviewer and paste the one-line prompt the command prints. (One-time:
+   the ChatGPT Project must hold the reviewer kit — `/jahns-workflow:reviewer-kit`.)
+
+**PR mode** (`review.mode: pr`): the `@codex` PR bot reviews on the PR, but the macro reviewer
+(GPT) also lost repo browsing and needs the same bundle.
+
+1. Open/locate the round's PR, then freeze a SHA-bound review cycle:
+   `uv run <plugin-root>/scripts/jw.py review freeze --pr <N> --round <round-id> .`. This stamps the
+   current PR head as cycle N (immutable target) and posts the `@codex` request.
+2. Write `<reviews_dir>/<round-id>-request.md` (same falsifiable-claims template).
+3. Build the macro-reviewer bundle: `uv run <plugin-root>/scripts/jw.py review bundle . --pr <N>
+   --round <round-id>` (reviewed head = the frozen cycle SHA). Attach it + paste the one-line prompt;
+   the reply ends with a `jw-review-result` marker the merge gate consumes.
+4. Check progress with `jw review status --pr <N>`; never treat "a comment appeared" as "review
+   done" — a review is `(reviewer, cycle, reviewed_sha)`.
 
 ## Step 5 — Report
 
 Report in the user's configured language: shipped tasks (id — title), registry/roadmap state,
-where the review packet is, and a suggested
-commit message (`docs(round): close <round-id>`). Do not commit unless the project's conventions
-say rounds end in a commit and the user has authorized committing.
+where the review bundle (`*.review.zip`) is, and a suggested commit message
+(`docs(round): close <round-id>`). Do not commit unless the project's conventions say rounds end
+in a commit and the user has authorized committing.
 
 End with the **next-step reminder** (so the reply is preserved byte-exact, not re-typed by a model):
 
-> Paste the packet to the external reviewer. To ingest the reply, save it **in a separate shell**:
-> `cat > /tmp/review.md` → paste → `Ctrl-D`. Then run `/jahns-workflow:review <round-id>`, which
-> copies `/tmp/review.md` verbatim into the reviews dir (no model retyping).
+> Attach the `*.review.zip` bundle to the external reviewer and paste the one-line prompt the
+> bundle command printed. To ingest the reply, save it **in a separate shell**: `cat > /tmp/review.md`
+> → paste → `Ctrl-D`. Then run `/jahns-workflow:review <round-id>`, which copies `/tmp/review.md`
+> verbatim into the reviews dir (no model retyping) and cross-checks it against the bundle.
 
 ## Step 6 — Refresh the re-entry pointer
 

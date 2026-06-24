@@ -21,6 +21,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 
+import jw_bundle  # noqa: E402
 import jw_common  # noqa: E402
 import jw_lanes  # noqa: E402
 import jw_merge  # noqa: E402
@@ -28,6 +29,7 @@ import jw_resume  # noqa: E402
 import jw_review  # noqa: E402
 import jw_round  # noqa: E402
 import jw_validate  # noqa: E402
+import yaml  # noqa: E402
 
 
 def git(root, *args):
@@ -1040,7 +1042,9 @@ class IngestTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             dest = root / "docs/reviews/2026-06-22-x-feedback.md"
             content = dest.read_bytes()
-            self.assertTrue(content.endswith(body))          # body byte-exact, verbatim
+            self.assertIn(body, content)                     # body byte-exact, verbatim (within the file)
+            # verbatim body sits between the header separator and the appended structured section
+            self.assertIn(body + b"\n\n---\n\n## Bundle identity check", content)
             self.assertIn(b"round: 2026-06-22-x", content)
             self.assertIn(b"reviewer: gpt-5.5-pro", content)
             self.assertFalse(src.exists())                   # drop-file consumed
@@ -1290,6 +1294,633 @@ class IntegrationSmokeTests(unittest.TestCase):
             jw_review._gh = orig
         self.assertEqual(rc_pass, 0)    # full lifecycle → gate PASS (dry run)
         self.assertEqual(rc_stale, 3)   # after re-freeze, cycle-1 evidence is stale → BLOCKED
+
+
+class BundleTests(unittest.TestCase):
+    """v0.3.0 review-bundle kernel: deterministic git-archive packaging, manifest schema validation,
+    base/head resolution from the round sidecar, push precondition, and reviewer-kit rendering."""
+
+    def _quiet(self):
+        import contextlib
+        import io
+        return contextlib.redirect_stdout(io.StringIO())
+
+    def test_manifest_validation(self):
+        cfg = {"ssot": None, "progress": "PROGRESS.md", "adr_dir": "docs/adr",
+               "reviews_dir": "docs/reviews", "generated_dir": "docs/ssot"}
+        ident = {"project": "demo", "round_id": "2026-06-23-r", "review_mode": "packet",
+                 "review_cycle": None, "branch": "main", "base_sha": "b" * 40,
+                 "head_sha": "a" * 40, "repo": None}
+        good = jw_bundle.build_manifest(cfg, ident, has_checks=False, worktree_dirty=False, omissions=[])
+        good["scope"] = {"tasks": [], "ssot_anchors": [], "changed_file_count": 2}
+        self.assertEqual(jw_bundle.validate_manifest(good), [])
+        bad_sha = {**good, "head_sha": "nothex"}
+        self.assertTrue(any("head_sha" in e for e in jw_bundle.validate_manifest(bad_sha)))
+        pr_no_cycle = {**good, "review_mode": "pr", "review_cycle": None}
+        self.assertTrue(any("review_cycle" in e for e in jw_bundle.validate_manifest(pr_no_cycle)))
+        no_scope = {**good, "scope": {"tasks": []}}  # missing changed_file_count
+        self.assertTrue(any("changed_file_count" in e for e in jw_bundle.validate_manifest(no_scope)))
+
+    def _packet_repo(self, d: Path, round_id="2026-06-23-r"):
+        """A pushed two-commit repo with workflow files COMMITTED into the reviewed head (so repo/
+        and the manifest scope come from one tree) + an on-disk request + a packet sidecar (head is
+        stamped by bundle, not here). Returns (work, base, head)."""
+        bare = d / "r.git"
+        work = d / "w"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)])
+        work.mkdir()
+        init_repo(work)  # commit c0 = base
+        base = git(work, "rev-parse", "HEAD").stdout.strip()
+        (work / ".jahns-workflow.yml").write_text(
+            "version: 1\nproject: demo\nreviews_dir: docs/reviews\nreview:\n  mode: packet\n")
+        (work / "tasks.yaml").write_text(
+            "version: 1\nproject: demo\ntasks:\n"
+            f"- id: feat/x-thing\n  title: the x thing that does y\n  status: done\n"
+            f"  round: {round_id}\n  anchor: '§1'\n")
+        (work / "g.txt").write_text("new feature line\n")
+        git(work, "add", "-A")
+        git(work, "commit", "-qm", "c1")  # the reviewed head: workflow files committed
+        head = git(work, "rev-parse", "HEAD").stdout.strip()
+        git(work, "remote", "add", "origin", str(bare))
+        git(work, "push", "-q", "-u", "origin", "main")
+        rdir = work / "docs/reviews"
+        rdir.mkdir(parents=True)
+        (rdir / f"{round_id}-request.md").write_text("# Review request\n\nfalsifiable claims here.\n")
+        rec = {"schema": jw_bundle.RECORD_SCHEMA, "project": "demo", "round_id": round_id,
+               "review_mode": "packet", "review_cycle": None, "branch": "main",
+               "base_sha": base, "round_commit": head, "head_sha": None}  # head stamped by bundle
+        (rdir / f"{round_id}-bundle.yaml").write_text(yaml.safe_dump(rec))
+        return work, base, head
+
+    def test_packet_bundle_end_to_end(self):
+        import zipfile
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            work, base, head = self._packet_repo(d)
+            with self._quiet():
+                rc = jw_bundle.bundle(work, "2026-06-23-r", None, out_dir=d / "out")
+            self.assertEqual(rc, 0)
+            zips = list((d / "out").glob("*.review.zip"))
+            self.assertEqual(len(zips), 1)
+            self.assertIn(head[:12], zips[0].name)  # filename short-SHA cross-check
+            ex = d / "ex"
+            ex.mkdir()
+            with zipfile.ZipFile(zips[0]) as zf:
+                zf.extractall(ex)
+            # repo/ is the git-archive tree of head (tracked files only — no .git)
+            self.assertTrue((ex / "repo" / "f.txt").is_file())
+            self.assertTrue((ex / "repo" / "g.txt").is_file())
+            self.assertFalse((ex / "repo" / ".git").exists())
+            man = yaml.safe_load((ex / "__review__" / "MANIFEST.yaml").read_text())
+            self.assertEqual(man["schema"], jw_bundle.BUNDLE_SCHEMA)
+            self.assertEqual(man["head_sha"], head)
+            self.assertEqual(man["base_sha"], base)        # base = previous watermark
+            self.assertEqual(man["review_mode"], "packet")
+            self.assertEqual(man["comparison"], f"{base}..{head}")
+            self.assertIn("feat/x-thing", man["scope"]["tasks"])
+            self.assertIn("§1", man["scope"]["ssot_anchors"])
+            self.assertEqual(jw_bundle.validate_manifest(man), [])
+            self.assertIn("g.txt", (ex / "__review__" / "CHANGED_FILES.txt").read_text())
+            self.assertIn("Review request", (ex / "__review__" / "REQUEST.md").read_text())
+            # scope and repo/tasks.yaml come from ONE tree (the committed head) — no provenance split
+            self.assertIn("feat/x-thing", (ex / "repo" / "tasks.yaml").read_text())
+            # bundle stamps the actual reviewed head into the sidecar (for the ingest cross-check)
+            rec = yaml.safe_load((work / "docs/reviews/2026-06-23-r-bundle.yaml").read_text())
+            self.assertEqual(rec["head_sha"], head)
+
+    def test_symlink_stored_as_target_not_followed(self):
+        import zipfile
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            secret = d / "secret.txt"
+            secret.write_text("SUPER-SECRET-LOCAL-CONTENT\n")
+            bare = d / "r.git"
+            work = d / "w"
+            subprocess.run(["git", "init", "-q", "--bare", str(bare)])
+            work.mkdir()
+            init_repo(work)
+            base = git(work, "rev-parse", "HEAD").stdout.strip()
+            (work / ".jahns-workflow.yml").write_text(
+                "version: 1\nproject: demo\nreviews_dir: docs/reviews\nreview:\n  mode: packet\n")
+            (work / "tasks.yaml").write_text("version: 1\nproject: demo\ntasks: []\n")
+            (work / "leak.txt").symlink_to(secret)            # tracked symlink → out-of-tree secret
+            (work / ".gitattributes").write_text("ignoreme.txt export-ignore\n")
+            (work / "ignoreme.txt").write_text("present in the tracked tree\n")
+            git(work, "add", "-A")
+            git(work, "commit", "-qm", "c1")
+            head = git(work, "rev-parse", "HEAD").stdout.strip()
+            git(work, "remote", "add", "origin", str(bare))
+            git(work, "push", "-q", "-u", "origin", "main")
+            rdir = work / "docs/reviews"
+            rdir.mkdir(parents=True)
+            (rdir / "2026-06-23-r-request.md").write_text("# req\n")
+            (rdir / "2026-06-23-r-bundle.yaml").write_text(yaml.safe_dump(
+                {"schema": jw_bundle.RECORD_SCHEMA, "project": "demo", "round_id": "2026-06-23-r",
+                 "review_mode": "packet", "review_cycle": None, "branch": "main",
+                 "base_sha": base, "round_commit": head, "head_sha": None}))
+            with self._quiet():
+                rc = jw_bundle.bundle(work, "2026-06-23-r", None, out_dir=d / "out")
+            self.assertEqual(rc, 0)
+            zp = list((d / "out").glob("*.review.zip"))[0]
+            with zipfile.ZipFile(zp) as zf:
+                names = zf.namelist()
+                self.assertIn("repo/leak.txt", names)
+                # the symlink is stored as its TARGET STRING, never followed — no out-of-tree leak
+                self.assertEqual(zf.read("repo/leak.txt").decode(), str(secret))
+                self.assertNotIn(b"SUPER-SECRET-LOCAL-CONTENT", b"".join(zf.read(n) for n in names))
+                # .gitattributes export-ignore is NOT applied — the exact tracked tree is shipped
+                self.assertIn("repo/ignoreme.txt", names)
+                # GPT 7th review #2: the entry MUST be a regular file (S_IFREG), NOT a S_IFLNK entry
+                # that `unzip` rebuilds as a live out-of-tree link. Record it in manifest.symlinks.
+                mode = zf.getinfo("repo/leak.txt").external_attr >> 16
+                self.assertEqual(mode & 0o170000, 0o100000, oct(mode))  # S_IFREG, never 0o120000
+                man = yaml.safe_load(zf.read("__review__/MANIFEST.yaml"))
+                self.assertIn({"path": "leak.txt", "target": str(secret)}, man["symlinks"])
+            # the Python-zipfile-only assertion above missed the real-extraction leak; prove the real
+            # `unzip` does NOT materialize a live link that would resolve to the out-of-tree secret.
+            import shutil
+            if shutil.which("unzip"):
+                ux = d / "unz"
+                ux.mkdir()
+                subprocess.run(["unzip", "-q", str(zp), "-d", str(ux)], capture_output=True)
+                self.assertFalse((ux / "repo" / "leak.txt").is_symlink())
+                self.assertEqual((ux / "repo" / "leak.txt").read_text(), str(secret))
+
+    def test_close_rolls_back_sidecar_on_write_failure(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            init_repo(work)
+            base = git(work, "rev-parse", "HEAD").stdout.strip()
+            (work / ".jahns-workflow.yml").write_text(
+                "version: 1\nproject: demo\nreviews_dir: docs/reviews\nreview:\n  mode: packet\n"
+                "state:\n  last_round_commit: " + base + "\n")
+            orig_tasks = ("version: 1\nproject: demo\ntasks:\n"
+                          "- id: feat/x-thing\n  title: the x thing that does y\n  status: active\n")
+            (work / "tasks.yaml").write_text(orig_tasks)
+            git(work, "add", "-A")
+            git(work, "commit", "-qm", "c1")
+            # reviews_dir is a FILE where the dir should be → the sidecar write raises mid-commit
+            (work / "docs").mkdir()
+            (work / "docs/reviews").write_text("not a dir\n")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = jw_round.close(work, "2026-06-23-r", ["feat/x-thing"], [], "HEAD")
+            self.assertEqual(rc, 1)
+            # the whole closeout (incl. the task status flip) must be rolled back — atomic with the sidecar
+            self.assertEqual((work / "tasks.yaml").read_text(), orig_tasks)
+
+    def test_unpushed_head_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            work, base, head = self._packet_repo(d)
+            # an unpushed CLOSEOUT commit (bookkeeping only → passes round-binding) that isn't pushed
+            (work / "tasks.yaml").write_text(
+                "version: 1\nproject: demo\ntasks:\n- id: feat/x-thing\n  title: the x thing that does y\n"
+                "  status: done\n  round: 2026-06-23-r\n  anchor: '§1'\n  notes: stamped\n")
+            git(work, "add", "-A")
+            git(work, "commit", "-qm", "docs(round): close")
+            with self._quiet():
+                rc = jw_bundle.bundle(work, "2026-06-23-r", None, out_dir=d / "out")
+            self.assertEqual(rc, 1)  # head not pushed → refuse (durable-commit precondition)
+
+    def test_missing_sidecar_fails_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            work, base, head = self._packet_repo(d)
+            (work / "docs/reviews/2026-06-23-r-bundle.yaml").unlink()
+            with self._quiet():
+                rc = jw_bundle.bundle(work, "2026-06-23-r", None, out_dir=d / "out")
+            self.assertEqual(rc, 1)  # no record → cannot resolve base/head
+
+    def test_round_close_writes_sidecar(self):
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            init_repo(work)  # c0 — becomes the base watermark
+            base = git(work, "rev-parse", "HEAD").stdout.strip()
+            (work / ".jahns-workflow.yml").write_text(
+                "version: 1\nproject: demo\nreviews_dir: docs/reviews\nreview:\n  mode: packet\n"
+                "state:\n  last_round_commit: " + base + "\n")
+            (work / "tasks.yaml").write_text(
+                "version: 1\nproject: demo\ntasks:\n"
+                "- id: feat/x-thing\n  title: the x thing that does y\n  status: active\n")
+            (work / "code.txt").write_text("impl\n")
+            git(work, "add", "-A")
+            git(work, "commit", "-qm", "c1")
+            head = git(work, "rev-parse", "HEAD").stdout.strip()
+            with self._quiet():
+                rc = jw_round.close(work, "2026-06-23-r", ["feat/x-thing"], [], "HEAD")
+            self.assertEqual(rc, 0)
+            rec = yaml.safe_load((work / "docs/reviews/2026-06-23-r-bundle.yaml").read_text())
+            self.assertEqual(rec["schema"], jw_bundle.RECORD_SCHEMA)
+            self.assertEqual(rec["base_sha"], base)   # previous watermark captured as base
+            self.assertEqual(rec["round_commit"], head)  # this round's tip, binds the bundle
+            self.assertIsNone(rec["head_sha"])        # head is stamped by `jw review bundle`, not at close
+            self.assertEqual(rec["review_mode"], "packet")
+
+    def test_reviewer_kit_render(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "kit"
+            with self._quiet():
+                rc = jw_bundle.kit(out)
+            self.assertEqual(rc, 0)
+            for name in jw_bundle.KIT_SOURCES:
+                self.assertTrue((out / name).is_file(), name)
+            man = yaml.safe_load((out / "KIT_MANIFEST.yaml").read_text())
+            self.assertEqual(man["protocol"], jw_bundle.REVIEWER_PROTOCOL)
+            self.assertEqual(set(man["templates"]), set(jw_bundle.KIT_SOURCES))
+            # manifest hash matches the rendered bytes (tamper-evident kit)
+            import hashlib
+            for name, h in man["templates"].items():
+                self.assertEqual(hashlib.sha256((out / name).read_bytes()).hexdigest(), h)
+
+    def test_first_round_base_none_is_coherent(self):
+        import zipfile
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            work, base, head = self._packet_repo(d)
+            # first-round semantics: no previous watermark → base_sha null
+            rec_path = work / "docs/reviews/2026-06-23-r-bundle.yaml"
+            rec = yaml.safe_load(rec_path.read_text())
+            rec["base_sha"] = None
+            rec_path.write_text(yaml.safe_dump(rec))
+            with self._quiet():
+                rc = jw_bundle.bundle(work, "2026-06-23-r", None, out_dir=d / "out")
+            self.assertEqual(rc, 0)
+            ex = d / "ex"
+            ex.mkdir()
+            with zipfile.ZipFile(list((d / "out").glob("*.review.zip"))[0]) as zf:
+                zf.extractall(ex)
+            man = yaml.safe_load((ex / "__review__" / "MANIFEST.yaml").read_text())
+            self.assertIsNone(man["base_sha"])
+            self.assertTrue(man["comparison"].startswith("(root).."))
+            # empty-tree diff must cover the FULL tree (f.txt from c0 AND g.txt from c1), so
+            # CHANGED_FILES / changed_file_count / DIFF agree with COMMITS + the (root).. label
+            cf = (ex / "__review__" / "CHANGED_FILES.txt").read_text()
+            self.assertIn("f.txt", cf)
+            self.assertIn("g.txt", cf)
+            self.assertGreaterEqual(man["scope"]["changed_file_count"], 2)
+            self.assertTrue((ex / "__review__" / "DIFF.patch").read_text().strip())
+            self.assertEqual(jw_bundle.validate_manifest(man), [])
+
+    def test_unreachable_base_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            work, base, head = self._packet_repo(d)
+            rec_path = work / "docs/reviews/2026-06-23-r-bundle.yaml"
+            rec = yaml.safe_load(rec_path.read_text())
+            rec["base_sha"] = "0" * 40  # well-formed hex, but not a reachable commit
+            rec_path.write_text(yaml.safe_dump(rec))
+            with self._quiet():
+                rc = jw_bundle.bundle(work, "2026-06-23-r", None, out_dir=d / "out")
+            self.assertEqual(rc, 1)  # fail closed rather than ship an empty diff
+
+    def test_validate_rejects_base_equals_head(self):
+        cfg = {"ssot": None, "progress": "P", "adr_dir": "a", "reviews_dir": "r", "generated_dir": "g"}
+        ident = {"project": "demo", "round_id": "2026-06-23-r", "review_mode": "packet",
+                 "review_cycle": None, "branch": "main", "base_sha": "a" * 40,
+                 "head_sha": "a" * 40, "repo": None}
+        m = jw_bundle.build_manifest(cfg, ident, has_checks=False, worktree_dirty=False, omissions=[])
+        m["scope"] = {"tasks": [], "ssot_anchors": [], "changed_file_count": 0}
+        self.assertTrue(any("equals head_sha" in e for e in jw_bundle.validate_manifest(m)))
+
+    def test_pr_mode_resolve_and_owner_provenance(self):
+        HEAD, BASE = "a" * 40, "b" * 40
+        mk = jw_review.emit_marker
+
+        def ctx_with(author):
+            body = mk("review-cycle", {"round_id": "2026-06-23-pr", "cycle": 2,
+                                       "target_sha": HEAD, "base_sha": BASE})
+            return lambda root, pr: {
+                "repo": "owner/repo", "pr": pr,
+                "bundle": {"bodies": [{"id": 1, "body": body, "author": author, "at": "2026-06-23T01:00:00Z"}],
+                           "head": HEAD, "base_sha": BASE, "head_ref": "feat/x"},
+                "head": HEAD, "base_sha": BASE, "base": "main",
+                "policy": {"project": "demo", "review": {"operators": [], "reviewers": ["codex", "gpt-5.5-pro"]}},
+            }
+        saved = jw_review.pr_context
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                jw_review.pr_context = ctx_with("owner")
+                ident = jw_bundle._resolve_pr(root, 7, None)
+                self.assertEqual(ident["review_mode"], "pr")
+                self.assertEqual(ident["review_cycle"], 2)
+                self.assertEqual(ident["head_sha"], HEAD)
+                self.assertEqual(ident["base_sha"], BASE)
+                self.assertEqual(ident["round_id"], "2026-06-23-pr")
+                # a freeze marker posted by an UNTRUSTED actor must be ignored (owner provenance),
+                # so the attacker cannot redirect the bundled SHA — no frozen cycle remains
+                jw_review.pr_context = ctx_with("attacker")
+                with self.assertRaises(jw_common.WorkflowError):
+                    jw_bundle._resolve_pr(root, 7, None)
+        finally:
+            jw_review.pr_context = saved
+
+    def test_round_binding_rejects_forward_code(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            work, base, head = self._packet_repo(d)  # sidecar round_commit = head
+            # commit NEXT-ROUND code (non-bookkeeping) without re-closing, then push it
+            (work / "nextfeature.py").write_text("next round code\n")
+            git(work, "add", "-A")
+            git(work, "commit", "-qm", "next round work")
+            git(work, "push", "-q", "origin", "main")  # pushed, so only the round-binding guard can refuse
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = jw_bundle.bundle(work, "2026-06-23-r", None, out_dir=d / "out")
+            self.assertEqual(rc, 1)  # HEAD advanced past the round with CODE → wrong-tree guard fires
+
+    def test_read_blobs_missing_object_fails_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            init_repo(work)
+            # a nonexistent object → cat-file --batch prints "<sha> missing"; we must raise, not ship empty
+            with self.assertRaises(jw_common.WorkflowError):
+                jw_bundle._read_blobs(work, ["0" * 40])
+
+    def test_reclose_preserves_stamped_head(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            work, base, head = self._packet_repo(d)
+            cfg = jw_common.load_config(work)
+            jw_bundle.record_stamp_head(work, cfg, "2026-06-23-r", head)  # a bundle stamped the head
+            jw_bundle.write_record(work, cfg, {  # a RE-CLOSE rewrites the record
+                "project": "demo", "round_id": "2026-06-23-r", "branch": "main",
+                "base_sha": base, "round_commit": head})
+            rec = jw_bundle.read_record(work, cfg, "2026-06-23-r")
+            self.assertEqual(rec["head_sha"], head)  # the stamp survives re-close (ingest stays bound)
+
+    def test_non_utf8_path_recorded_as_omission(self):
+        import os
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            init_repo(work)
+            try:
+                with open(os.path.join(os.fsencode(str(work)), b"bad\xffname.txt"), "wb") as f:
+                    f.write(b"x")
+            except OSError:
+                self.skipTest("filesystem rejects non-utf8 filenames")
+            git(work, "add", "-A")
+            git(work, "commit", "-qm", "badname")
+            head = git(work, "rev-parse", "HEAD").stdout.strip()
+            oms: list = []
+            jw_bundle._repo_entries(work, head, oms)
+            self.assertTrue(any(o.get("kind") == "non-utf8-path" for o in oms))
+
+    def test_round_binding_requires_round_commit(self):
+        # GPT 7th review #1: a record WITHOUT round_commit must FAIL CLOSED, not silently bypass the
+        # binding guard (which let a later HEAD's tree ship under this round's label — the v0.3.0 hole).
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            work, base, head = self._packet_repo(d)
+            rp = work / "docs/reviews/2026-06-23-r-bundle.yaml"
+            rec = yaml.safe_load(rp.read_text())
+            rec.pop("round_commit")            # pre-binding / tampered sidecar
+            rp.write_text(yaml.safe_dump(rec))
+            (work / "nextfeature.py").write_text("next round code\n")   # forward CODE past the round
+            git(work, "add", "-A")
+            git(work, "commit", "-qm", "next round")
+            git(work, "push", "-q", "origin", "main")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = jw_bundle.bundle(work, "2026-06-23-r", None, out_dir=d / "out")
+            self.assertEqual(rc, 1)            # unbound head → refuse, demand re-close
+            self.assertEqual(list((d / "out").glob("*.review.zip")) if (d / "out").exists() else [], [])
+
+    def test_closeout_only_fails_closed_on_git_error(self):
+        # GPT 7th review #1: a FAILED `git diff` (nonzero rc, empty stdout) must raise, never read as
+        # "closeout-only" — else a binding diff that errors would wave forward CODE commits through.
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            work, base, head = self._packet_repo(d)
+            cfg = jw_common.load_config(work)
+            with self.assertRaises(jw_common.WorkflowError):
+                jw_bundle._closeout_only(work, cfg, "0" * 40, head)
+
+    def test_request_symlink_refused(self):
+        # GPT 7th review #2: a symlinked request must be refused (read_bytes() would follow it and
+        # ship out-of-tree content into __review__/REQUEST.md).
+        import contextlib
+        import io
+        import zipfile
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            secret = d / "secret.txt"
+            secret.write_text("OUT-OF-TREE-SECRET\n")
+            work, base, head = self._packet_repo(d)
+            rp = work / "docs/reviews/2026-06-23-r-request.md"
+            rp.unlink()
+            rp.symlink_to(secret)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = jw_bundle.bundle(work, "2026-06-23-r", None, out_dir=d / "out")
+            self.assertEqual(rc, 1)
+            for z in ((d / "out").glob("*.review.zip") if (d / "out").exists() else []):
+                with zipfile.ZipFile(z) as zf:
+                    self.assertNotIn(b"OUT-OF-TREE-SECRET", zf.read("__review__/REQUEST.md"))
+
+    def test_checks_symlink_refused(self):
+        # GPT 7th review #2: same defense for the optional CHECKS.yaml input.
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            secret = d / "secret.txt"
+            secret.write_text("OUT-OF-TREE-SECRET\n")
+            work, base, head = self._packet_repo(d)
+            (work / "docs/reviews/2026-06-23-r-checks.yaml").symlink_to(secret)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = jw_bundle.bundle(work, "2026-06-23-r", None, out_dir=d / "out")
+            self.assertEqual(rc, 1)
+
+
+class BundleIngestTests(unittest.TestCase):
+    """Structured ingest: verbatim preservation + fail-closed bundle-identity cross-check."""
+
+    def _root(self, d: Path, head: str, round_id="2026-06-23-r"):
+        (d / ".jahns-workflow.yml").write_text(
+            "version: 1\nproject: demo\nreviews_dir: docs/reviews\nreview:\n  mode: packet\n")
+        rdir = d / "docs/reviews"
+        rdir.mkdir(parents=True)
+        rec = {"schema": jw_bundle.RECORD_SCHEMA, "project": "demo", "round_id": round_id,
+               "review_mode": "packet", "review_cycle": None, "branch": "main",
+               "base_sha": "b" * 40, "head_sha": head}
+        (rdir / f"{round_id}-bundle.yaml").write_text(yaml.safe_dump(rec))
+        return rdir
+
+    def _reply(self, reviewed_sha: str) -> bytes:
+        return (
+            "# Review Result\n\n## Findings\n\n### JW-GPT-001 — concrete bug in foo\n\n"
+            "- Severity: major\n- Category: correctness\n\nsome prose.\n\n"
+            "<!-- jw-review-summary:v1\nprotocol: jw-chatgpt-reviewer/v1\nreviewer: gpt-5.5-pro\n"
+            "project: demo\nround_id: 2026-06-23-r\nreview_mode: packet\nreview_cycle: null\n"
+            f"base_sha: {'b' * 40}\nreviewed_sha: {reviewed_sha}\nverdict: not-shipped\n"
+            "decision_required: false\nblocker: 0\nmajor: 1\nminor: 0\n-->\n"
+        ).encode("utf-8")
+
+    def test_identity_match_and_finding_skeleton(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            head = "a" * 40
+            rdir = self._root(d, head)
+            src = d / "in.md"
+            src.write_bytes(self._reply(head))
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = jw_review.ingest(d, "2026-06-23-r", src=src, reviewer="gpt-5.5-pro")
+            self.assertEqual(rc, 0)
+            fb = (rdir / "2026-06-23-r-feedback.md").read_text()
+            self.assertIn("check: **MATCH**", fb)
+            self.assertIn("| JW-GPT-001 — concrete bug in foo | major |", fb)  # triage skeleton row
+            self.assertIn(self._reply(head).split(b"<!--")[0].decode(), fb)   # verbatim body present
+
+    def test_identity_mismatch_fails_closed(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            rdir = self._root(d, "a" * 40)
+            src = d / "in.md"
+            src.write_bytes(self._reply("c" * 40))  # reviewed a DIFFERENT sha than was shipped
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = jw_review.ingest(d, "2026-06-23-r", src=src)
+            self.assertEqual(rc, 3)  # mismatch → triage halted
+            fb = (rdir / "2026-06-23-r-feedback.md").read_text()
+            self.assertIn("MISMATCH", fb)
+            self.assertIn("DO NOT triage automatically", fb)
+
+    def test_no_marker_back_compat(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            rdir = self._root(d, "a" * 40)
+            src = d / "in.md"
+            src.write_bytes(b"plain reviewer prose, no marker at all\n")
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = jw_review.ingest(d, "2026-06-23-r", src=src)
+            self.assertEqual(rc, 0)  # no summary marker → manual triage, not a failure
+            self.assertIn("no-marker", (rdir / "2026-06-23-r-feedback.md").read_text())
+
+    def _reply_no_sha(self) -> bytes:
+        return (
+            "# Review Result\n\n### JW-GPT-001 — a bug\n\n- Severity: minor\n\n"
+            "<!-- jw-review-summary:v1\nprotocol: jw-chatgpt-reviewer/v1\nreviewer: gpt-5.5-pro\n"
+            "project: demo\nround_id: 2026-06-23-r\nreview_mode: packet\nreview_cycle: null\n"
+            f"base_sha: {'b' * 40}\nverdict: shipped\ndecision_required: false\n"
+            "blocker: 0\nmajor: 0\nminor: 1\n-->\n"
+        ).encode("utf-8")
+
+    def test_missing_reviewed_sha_fails_closed(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            rdir = self._root(d, "a" * 40)
+            src = d / "in.md"
+            src.write_bytes(self._reply_no_sha())  # marker present but the load-bearing field is absent
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = jw_review.ingest(d, "2026-06-23-r", src=src)
+            self.assertEqual(rc, 3)  # absence of reviewed_sha must NOT be a silent MATCH
+            fb = (rdir / "2026-06-23-r-feedback.md").read_text()
+            self.assertIn("MISMATCH", fb)
+            self.assertIn("(missing)", fb)
+
+    def test_fenced_marker_flagged_unusable(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            rdir = self._root(d, "a" * 40)
+            src = d / "in.md"
+            # the reviewer (or a paste) wrapped the marker in a code fence → parse strips it
+            src.write_bytes(b"# Review Result\n\n```\n" + self._reply("a" * 40) + b"```\n")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = jw_review.ingest(d, "2026-06-23-r", src=src)
+            self.assertEqual(rc, 0)  # cannot SHA-cross-check, but must be flagged, not silently "no-marker"
+            self.assertIn("UNUSABLE-MARKER", (rdir / "2026-06-23-r-feedback.md").read_text())
+
+    def test_duplicate_markers_fail_closed(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            rdir = self._root(d, "a" * 40)
+            src = d / "in.md"
+            src.write_bytes(self._reply("a" * 40) + b"\n\n" + self._reply("a" * 40))  # two summary markers
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = jw_review.ingest(d, "2026-06-23-r", src=src)
+            self.assertEqual(rc, 3)  # ambiguous identity → fail closed
+            self.assertIn("ambiguous", (rdir / "2026-06-23-r-feedback.md").read_text())
+
+    def _reply_fields(self, reviewed_sha: str, review_cycle: str = "null", base_sha: str = "b" * 40) -> bytes:
+        return (
+            "# Review Result\n\n<!-- jw-review-summary:v1\nprotocol: jw-chatgpt-reviewer/v1\n"
+            "reviewer: gpt-5.5-pro\nproject: demo\nround_id: 2026-06-23-r\nreview_mode: packet\n"
+            f"review_cycle: {review_cycle}\nbase_sha: {base_sha}\nreviewed_sha: {reviewed_sha}\n"
+            "verdict: shipped\ndecision_required: false\nblocker: 0\nmajor: 0\nminor: 0\n-->\n"
+        ).encode("utf-8")
+
+    def test_review_cycle_mismatch_fails_closed(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            rdir = self._root(d, "a" * 40)  # packet bundle → review_cycle is None
+            src = d / "in.md"
+            src.write_bytes(self._reply_fields("a" * 40, review_cycle="2"))  # same head, WRONG cycle
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = jw_review.ingest(d, "2026-06-23-r", src=src)
+            self.assertEqual(rc, 3)  # a same-head reply under a different cycle must NOT pass
+            self.assertIn("review_cycle", (rdir / "2026-06-23-r-feedback.md").read_text())
+
+    def test_base_sha_mismatch_fails_closed(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            rdir = self._root(d, "a" * 40)  # bundle base_sha = b*40
+            src = d / "in.md"
+            src.write_bytes(self._reply_fields("a" * 40, base_sha="c" * 40))  # WRONG base
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = jw_review.ingest(d, "2026-06-23-r", src=src)
+            self.assertEqual(rc, 3)
+            self.assertIn("base_sha", (rdir / "2026-06-23-r-feedback.md").read_text())
+
+    def test_no_record_crosschecks_live_head(self):
+        # no bundle record (bundle not built / reset by re-close), but a marker carrying a WRONG
+        # reviewed_sha must still FAIL CLOSED against the live committed HEAD, not pass silently.
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            init_repo(work)
+            (work / ".jahns-workflow.yml").write_text(
+                "version: 1\nproject: demo\nreviews_dir: docs/reviews\nreview:\n  mode: packet\n")
+            live = git(work, "rev-parse", "HEAD").stdout.strip()
+            rdir = work / "docs/reviews"
+            rdir.mkdir(parents=True)  # NO sidecar → identity is None
+
+            def reply(sha):
+                return (
+                    "# R\n\n<!-- jw-review-summary:v1\nprotocol: jw-chatgpt-reviewer/v1\nreviewer: gpt\n"
+                    "project: demo\nround_id: 2026-06-23-r\nreview_mode: packet\nreview_cycle: null\n"
+                    f"base_sha: none\nreviewed_sha: {sha}\nverdict: shipped\ndecision_required: false\n"
+                    "blocker: 0\nmajor: 0\nminor: 0\n-->\n"
+                ).encode("utf-8")
+            wrong = work / "w.md"
+            wrong.write_bytes(reply("c" * 40))
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc_wrong = jw_review.ingest(work, "2026-06-23-r", src=wrong)
+            self.assertEqual(rc_wrong, 3)  # wrong reviewed_sha vs live HEAD → fail closed
+            ok = work / "ok.md"
+            ok.write_bytes(reply(live))
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc_ok = jw_review.ingest(work, "2026-06-23-r", src=ok)
+            self.assertEqual(rc_ok, 0)  # reviewed_sha == live HEAD → accepted (degraded, no bundle record)
 
 
 if __name__ == "__main__":

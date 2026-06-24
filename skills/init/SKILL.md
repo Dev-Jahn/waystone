@@ -64,10 +64,12 @@ state:
   last_round_commit: null
 ```
 
-Ask the user which `review.mode` fits: `packet` (default — close a round, push, paste a
-request packet to the web reviewer) or `pr` (open a PR per round, freeze a SHA-bound review
-cycle, and let a deterministic gate guard the merge). PR mode suits repos that already work
-through PRs with a `@codex` bot.
+Ask the user which `review.mode` fits: `packet` (default — close a round, push, then build a
+self-contained `*.review.zip` bundle with `jw review bundle` and attach it to the web reviewer)
+or `pr` (open a PR per round, freeze a SHA-bound review cycle, and let a deterministic gate guard
+the merge). PR mode suits repos that already work through PRs with a `@codex` bot; its macro
+reviewer also consumes the same bundle. For either mode, the web reviewer's ChatGPT Project is set
+up once with `/jahns-workflow:reviewer-kit` (static protocol + Project instructions).
 
 2. `tasks.yaml` — minimal valid registry (`version: 1`, `project:`, `milestones: []`, `tasks: []`),
    with a YAML comment documenting the optional task fields (`deps`, `milestone`, `round`,

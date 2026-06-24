@@ -216,6 +216,29 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     if gen_existed:
         gen_backup = Path(tempfile.mkdtemp(prefix="jw-ssot-bak-")) / "g"
         shutil.copytree(gen_dir, gen_backup)
+
+    # packet-mode bundle record (written INSIDE the atomic block, rolled back on failure): the BASE
+    # watermark for `jw review bundle`. base = the previous watermark; on a re-close (prev already
+    # advanced to this tip) keep any base a prior close captured, so re-closing can't collapse the
+    # range. The HEAD is stamped later by `jw review bundle` (the actual reviewed commit).
+    sidecar = None
+    if (cfg.get("review", {}) or {}).get("mode") == "packet":
+        import jw_bundle
+        prev = (cfg.get("state") or {}).get("last_round_commit")  # previous watermark (pre-advance) = bundle base
+        base = prev if (prev and prev != full) else None
+        if base is None:
+            ex = jw_bundle.read_record(root, cfg, round_id)
+            if ex:
+                base = ex.get("base_sha")
+        sc_path = jw_bundle.record_path(root, cfg, round_id)
+        sidecar = {
+            "path": sc_path,
+            "orig": sc_path.read_text(encoding="utf-8") if sc_path.is_file() else None,
+            "base": base,
+            "identity": {"project": cfg.get("project") or data0.get("project"), "round_id": round_id,
+                         "branch": git(root, "branch", "--show-current") or None, "base_sha": base,
+                         "round_commit": full},  # binds `jw review bundle` to THIS round's tip
+        }
     try:
         tasks_path.write_text(text, encoding="utf-8")
         cfg_path.write_text(ctext_new, encoding="utf-8")
@@ -223,6 +246,8 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
         if cfg.get("ssot"):
             import jw_ssot
             jw_ssot.regenerate(root)  # one full regen; raises WorkflowError (caught below) not sys.exit
+        if sidecar is not None:
+            jw_bundle.write_record(root, cfg, sidecar["identity"])
     except Exception as e:  # noqa: BLE001 — any failure must roll every written artifact back
         tasks_path.write_text(orig_tasks_text, encoding="utf-8")
         cfg_path.write_text(ctext, encoding="utf-8")
@@ -236,6 +261,14 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
                 shutil.copytree(gen_backup, gen_dir)
         if gen_backup is not None:
             shutil.rmtree(gen_backup.parent, ignore_errors=True)
+        if sidecar is not None:  # restore/remove the bundle record too — best-effort (tasks/config
+            try:                 # are already restored above), so a pathological path can't crash rollback
+                if sidecar["orig"] is None:
+                    sidecar["path"].unlink(missing_ok=True)
+                else:
+                    sidecar["path"].write_text(sidecar["orig"], encoding="utf-8")
+            except OSError:
+                pass
         print(f"jw_round close: closeout failed mid-write and was rolled back — {e}", file=sys.stderr)
         return 1
     if gen_backup is not None:
@@ -243,6 +276,10 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
 
     print(f"round {round_id} closed: {len(done)} done, {len(set(done + touched))} stamped; "
           f"watermark set @ {full[:12]}")
+    if sidecar is not None:
+        b = sidecar["base"]
+        print(f"bundle record → {cfg['reviews_dir']}/{round_id}-bundle.yaml "
+              f"(base {b[:12] if b else '(root)'}; head stamped at `jw review bundle`)")
     return 0
 
 

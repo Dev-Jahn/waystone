@@ -2,7 +2,8 @@
 
 A Claude Code plugin that harnesses SSOT-anchored agentic development: one global naming
 convention across all projects, a machine-validated task registry, zero-token roadmap/digest
-generation, round-based progress discipline, and external-review ingestion.
+generation, round-based progress discipline, deterministic SHA-pinned review bundles for an
+external web reviewer, and external-review ingestion.
 
 Generalizes a research-workflow battle-tested on theory-heavy repos, but applies to any
 programming project (web, systems, ML) that anchors work on one design document.
@@ -21,8 +22,9 @@ Full convention: [references/conventions.md](references/conventions.md).
 | | |
 |---|---|
 | `/jahns-workflow:init` | One-click setup; non-destructive retrofit for in-progress projects (incl. agent-memory cleanup, project registration) |
-| `/jahns-workflow:round` | Close a work round: sync registry → PROGRESS entry + archive → refresh views → review-request packet |
-| `/jahns-workflow:review` | Ingest an external review reply: preserve verbatim → verify each finding → register as tasks |
+| `/jahns-workflow:round` | Close a work round: sync registry → PROGRESS entry + archive → refresh views → build the review bundle |
+| `/jahns-workflow:review` | Ingest an external review reply: preserve verbatim → bundle-identity cross-check → verify each finding → register as tasks |
+| `/jahns-workflow:reviewer-kit` | One-time: render the web reviewer's ChatGPT Project kit (static protocol + Project instructions) |
 | `/jahns-workflow:status` | Cross-project terminal dashboard (branches, rounds, active/blocked tasks). Registry entries can be local (`path`) or remote (`repo: owner/name`, fetched via `gh api` — for projects not cloned on this machine) |
 | SessionStart hook | Injects digest + active tasks on startup/resume/clear/**compact** (capped ~8KB; no-ops in ~30ms in non-initialized projects) |
 | PostToolUse hook | On `tasks.yaml` edits only: schema validation (exit-2 feedback) + deterministic `ROADMAP.md` regeneration. ~13ms no-op otherwise |
@@ -58,7 +60,8 @@ A unified front door `scripts/jw.py` dispatches `jw <group>`
 
 Set `review.mode` in `.jahns-workflow.yml`:
 
-- **`packet`** (default) — close a round, push, paste a request packet to a web reviewer.
+- **`packet`** (default) — close a round, push, and attach a self-contained review bundle to a web
+  reviewer (see *Review bundle + reviewer kit (v0.3.0)* below).
 - **`pr`** — SHA-bound review cycles on a GitHub PR, with a deterministic merge gate. A review
   is identified by `(reviewer, cycle, reviewed_sha)`, stored as machine-readable markers in PR
   comments (GitHub is the canonical store, never inferred from filenames). A new push makes a
@@ -140,6 +143,42 @@ structure fails closed. (C) *Closeout/views* — library helpers raise a catchab
 (never `sys.exit`, which slipped past rollback); a single pure builder generates all SSOT views so
 `jw ssot check` verifies every view's exact bytes (not just `.hash`) and flags missing/extra files;
 `deps` elements must be task ids. The threat model and acceptance contract for v0.2 are frozen.
+
+## Review bundle + reviewer kit (v0.3.0)
+
+The web reviewer can no longer browse the repo through the ChatGPT GitHub connector, so packet
+mode now ships a **self-contained, SHA-pinned review bundle** instead of a paste-and-browse packet.
+
+- **`jw review bundle . --round <id>`** (packet) **/ `--pr <N>`** (the PR macro reviewer, which also
+  lost repo browsing) builds a `jahns-review-bundle/v1` zip: `repo/` is assembled **directly from git
+  objects** of the reviewed head (`git ls-tree`/`cat-file` — exact tracked tree, no `.git`/caches/
+  credentials, no `.gitattributes` export-ignore surprises; a tracked symlink ships as a **regular file
+  holding its target string** — recorded in `manifest.symlinks`, never a link entry `unzip` could rebuild
+  — so it can't resolve to an out-of-tree file at the reviewer), plus a base→head
+  `DIFF.patch` + `CHANGED_FILES.txt` + `COMMITS.txt`, the model-authored falsifiable `REQUEST.md`, and
+  a schema-validated `MANIFEST.yaml` binding review identity. Generation is script-deterministic, never
+  a model hand-assembling a zip. Control material lives in `__review__/`, OUTSIDE `repo/`, so repository
+  content can't masquerade as bundle metadata; bundles are written to an untracked `<reviews_dir>/bundles/`.
+- **The reviewed head is the committed HEAD** (so `repo/tasks.yaml`, PROGRESS, and the manifest scope
+  are all computed from the same tree — no pre-/post-closeout provenance split), **bound to the round**:
+  the sidecar records the round's tip, and the bundler refuses if HEAD advanced past it with
+  non-closeout (code) commits, or if a newer round has since been closed — so `bundle --round X`
+  can't ship the wrong tree under round X's label. **Base** is the previous round's watermark, captured
+  by `round close` into a `<round-id>-bundle.yaml` sidecar (the live `last_round_commit` is overwritten
+  to this round's tip) — never inferred from the round name; it must be reachable and an ancestor of
+  head. Head must be pushed (durable-commit precondition).
+- **`/jahns-workflow:reviewer-kit`** renders the reviewer's ChatGPT Project once: `PROJECT_INSTRUCTIONS.txt`
+  (control plane) + five `JW_*.md` Project Sources (static protocol: authority order, repository
+  contract, review playbook, output contract, examples) + a hash-stamped `KIT_MANIFEST.yaml`.
+- **Structured ingest.** The reviewer's reply ends with a `jw-review-summary` marker; `jw review
+  ingest` preserves the reply byte-exact, then **appends** (never edits the verbatim body) a
+  bundle-identity cross-check that binds the reply to the recorded bundle on **every** axis
+  (`protocol`/`project`/`round_id`/`review_mode`/`review_cycle`/`base_sha`/`reviewed_sha`), so a
+  reply bound to a different SHA — or the same head under a different cycle — **fails closed**,
+  halting triage; a missing/duplicate/fenced marker is flagged, not silently passed. Plus a
+  `JW-GPT-NNN` finding triage skeleton. The pr-mode output contract appends the `jw-review-result`
+  marker (with `decision_required` as a list, as the merge gate requires), so one bundle serves both
+  review profiles.
 
 ## Requirements
 

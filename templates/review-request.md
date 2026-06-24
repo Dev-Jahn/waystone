@@ -1,34 +1,48 @@
-# Review request — round {round-id}
+# Review Request — round {round-id}
 
-> Paste this whole packet to the external reviewer (e.g. web ChatGPT).
-> Ingest the reply with `/jahns-workflow:review {round-id}`.
+> This file is packaged verbatim into the review bundle as `__review__/REQUEST.md` by
+> `jw review bundle`. It is a map + a set of falsifiable claims — never a substitute for the
+> reviewer inspecting the packaged `repo/` tree and `__review__/DIFF.patch`.
 
-## Scope
+## Identity
+- Project: {project}
+- Round: {round-id}
+- Base: {base full sha, or "(root)" for the first round}
+- Reviewed HEAD: {the committed HEAD being bundled — commit the round closeout first so this tree carries the final task statuses + PROGRESS}
 
-- Repo: {owner/name}, branch {branch}, **HEAD {pushed commit hash}** — review the code at this exact commit
-- Commits this round: {first}..{last} ({n} commits, {diffstat})
-- Round goal: {one paragraph}
-- Tasks shipped: {id — title, one per line}
-- SSOT sections touched: {§-anchors, or "none"}
+## Round objective
 
-## What changed
+{One paragraph: what this round set out to achieve.}
 
-{Concise narrative with pointers the reviewer can follow directly in the repo: file paths,
-SSOT §-anchors, commit hashes. Reviewers with repo access (e.g. a GitHub connector) should
-read the actual code at the HEAD above rather than trusting this summary. Inline only small
-load-bearing snippets where reading them in place saves a lookup; if the reviewer has NO repo
-access, inline the key diffs/pseudocode instead.}
+## Tasks and acceptance claims
 
-## Claims to verify (please attack these)
+{One line per shipped task, each a falsifiable acceptance claim + an evidence pointer, e.g.
+`- feat/stream-carry — chunked path is fp32-equivalent to the full path for nonzero initial
+state (gate/chunk-equivalence: max rel err 3e-7) — see scripts/tests/test_carry.py`}
 
-{Numbered list of the round's load-bearing claims, each stated falsifiably, e.g.
-"1. The chunked path is numerically equivalent to the full path within fp32 tolerance for
-nonzero initial state (gate/chunk-equivalence passed with max rel err 3e-7)."}
+## Changed surface
+
+{Paths, symbols, interfaces, schemas, migrations, and SSOT §-anchors the round touched. The
+reviewer uses `__review__/DIFF.patch` for the exact change set; this orients it.}
+
+## Claims to attack
+
+{Numbered, falsifiable. The reviewer is asked to try to break these, e.g.
+"1. The retry path is idempotent across an ambiguous timeout (commit after remote write)."}
 
 ## Known weak spots
 
-{Where the implementer is least confident. Blind spots of the current test ladder.}
+{Where the implementer is least confident; blind spots of the current test ladder.}
 
 ## Questions
 
 {Specific questions for the reviewer, numbered.}
+
+## Provided check evidence
+
+{Commands already run this round, as `command — result — evidence/log pointer`. The reviewer
+treats these as implementer evidence (provided, not performed) and may re-run cheap ones.}
+
+## Explicitly out of scope
+
+{Areas the round did not change and does not ask the reviewer to audit.}
