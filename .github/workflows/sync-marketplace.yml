@@ -1,0 +1,58 @@
+name: Sync marketplace pin
+
+# When main moves (a release pushed by release-to-main.sh), mirror this repo's main sha and the
+# plugin.json version into Dev-Jahn/jahns-cc-marketplace's marketplace.json, so the marketplace
+# always pins the latest release. Cross-repo write uses a deploy key scoped to the marketplace repo
+# only (private key in the MARKETPLACE_DEPLOY_KEY secret; public key registered there with write).
+on:
+  push:
+    branches: [main]
+
+# newest release wins; supersede any in-flight sync so the pin never lands on a stale sha
+concurrency:
+  group: sync-marketplace
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (read plugin version)
+        uses: actions/checkout@v4
+
+      - name: Read plugin version
+        id: ver
+        run: echo "version=$(jq -r .version .claude-plugin/plugin.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.MARKETPLACE_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pin sha + version in the marketplace
+        env:
+          NEW_SHA: ${{ github.sha }}
+          NEW_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          git clone git@github.com:Dev-Jahn/jahns-cc-marketplace.git mp
+          cd mp
+          f=.claude-plugin/marketplace.json
+          tmp=$(mktemp)
+          jq --indent 2 --arg sha "$NEW_SHA" --arg ver "$NEW_VERSION" \
+            '(.plugins[] | select(.name=="jahns-workflow")) |= (.source.sha = $sha | .version = $ver)' \
+            "$f" > "$tmp"
+          mv "$tmp" "$f"
+          if git diff --quiet -- "$f"; then
+            echo "marketplace already pins ${NEW_SHA} @ v${NEW_VERSION} — nothing to do."
+            exit 0
+          fi
+          git config user.name "jahns-workflow-ci"
+          git config user.email "ci@users.noreply.github.com"
+          git commit -qm "chore(jahns-workflow): pin v${NEW_VERSION} @ ${NEW_SHA:0:7} (auto-sync from main)"
+          git push origin HEAD:main
+          echo "marketplace updated → v${NEW_VERSION} @ ${NEW_SHA:0:7}"
