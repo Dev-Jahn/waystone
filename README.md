@@ -62,7 +62,8 @@ Set `review.mode` in `.jahns-workflow.yml`:
   (`jw approve --pr N --sha <head>`) is bound to the head. The gate is computed, never judged.
 
 Both modes share a hard push gate (`jw remote verify`): no review is requested against an
-unpushed HEAD. Deterministic core is tested under `scripts/tests/` (`uv run scripts/tests/run_tests.py`).
+unpushed HEAD. The deterministic core has a regression suite maintained on the `dev` branch
+(`uv run scripts/tests/run_tests.py`); `main` ships the plugin runtime only.
 
 **Provenance binding (v0.2.2).** A review marker is only believed when its provenance binds: a
 result must come from a configured reviewer, for the latest cycle, at the current head, with a
