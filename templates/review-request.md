@@ -1,48 +1,65 @@
-# Review Request — round {round-id}
+# External Review Brief — {round-id}
 
-> This file is packaged verbatim into the review bundle as `__review__/REQUEST.md` by
-> `jw review bundle`. It is a map + a set of falsifiable claims — never a substitute for the
-> reviewer inspecting the packaged `repo/` tree and `__review__/DIFF.patch`.
+> The reviewer has the full repo as a zip **including `.git`** — they can run git directly
+> (`git log`, `git diff`, `git show`, even CPU tests). This brief is a map to cut their ramp-up
+> time, **not** a substitute for reading the code. This is a **domain / code review**, not a
+> jahns-workflow harness audit.
 
-## Identity
-- Project: {project}
-- Round: {round-id}
-- Base: {base full sha, or "(root)" for the first round}
-- Reviewed HEAD: {the committed HEAD being bundled — commit the round closeout first so this tree carries the final task statuses + PROGRESS}
+## Target
+- Project / Branch: {project} / {branch}
+- Reviewed HEAD: {head full sha}  ← `git rev-parse HEAD` must match this; if not, stop and report it
+- Diff base: {base full sha, or "(root)" for the first round}
 
-## Round objective
+Run first:
 
-{One paragraph: what this round set out to achieve.}
+```bash
+git rev-parse HEAD
+git log --oneline --decorate --graph -n 30
+git diff --stat {base}..HEAD
+git diff --name-status --find-renames {base}..HEAD
+```
 
-## Tasks and acceptance claims
+## What changed and why
 
-{One line per shipped task, each a falsifiable acceptance claim + an evidence pointer, e.g.
-`- feat/stream-carry — chunked path is fp32-equivalent to the full path for nonzero initial
-state (gate/chunk-equivalence: max rel err 3e-7) — see scripts/tests/test_carry.py`}
+{Not a file list — the intent. What problem this round attacked, what structure you chose, and
+why you believe it is right. 5–10 sentences the reviewer can step into.}
 
-## Changed surface
+## Read these first
 
-{Paths, symbols, interfaces, schemas, migrations, and SSOT §-anchors the round touched. The
-reviewer uses `__review__/DIFF.patch` for the exact change set; this orients it.}
+1. `{path}` — {why it is load-bearing}
+2. `{path}` — {why}
 
 ## Claims to attack
 
-{Numbered, falsifiable. The reviewer is asked to try to break these, e.g.
-"1. The retry path is idempotent across an ambiguous timeout (commit after remote write)."}
+{Numbered, falsifiable. What you assert is true and want the reviewer to try to break — the
+math / model / kernel / physics invariant, the thing a passing test could still get wrong.}
+
+## Evidence already produced (mine — inspect, don't trust)
+
+| Claim | Command / artifact | My reading | Where it lives |
+|---|---|---|---|
+| {claim} | `{command}` | {your interpretation} | `{path/to/log or PROGRESS §}` |
 
 ## Known weak spots
 
-{Where the implementer is least confident; blind spots of the current test ladder.}
+{Where you are least confident — the proof gap, the GPU-only race, the training dynamics you are
+unsure you read right, the boundary condition you hand-waved.}
 
-## Questions
+## Domain lens
 
-{Specific questions for the reviewer, numbered.}
+{See `docs/review-profile.md` for this project's standing review priorities. This round
+especially: <the angle that matters most this round>.}
 
-## Provided check evidence
+## Out of scope
 
-{Commands already run this round, as `command — result — evidence/log pointer`. The reviewer
-treats these as implementer evidence (provided, not performed) and may re-run cheap ones.}
+{What not to audit this round — including the jahns-workflow harness unless explicitly asked.}
 
-## Explicitly out of scope
+## Response I want
 
-{Areas the round did not change and does not ask the reviewer to audit.}
+Major / critical issues only (skip style, naming, optional refactors). Return:
+
+1. Verdict: `ok-to-use` or `hold`
+2. Major findings — each with a concrete failure mechanism and where you confirmed it
+3. Domain questions / decision points
+4. Checks you actually ran
+5. Residual risks from unavailable GPU / data / environment

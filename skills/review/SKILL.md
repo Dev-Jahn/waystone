@@ -27,14 +27,31 @@ metadata header and consumes the drop-file:
 uv run <plugin-root>/scripts/jw.py review ingest . --round <round-id> --reviewer "<model, e.g. gpt-5.5-pro>"
 ```
 
-Besides the byte-exact copy, ingest **appends** (never edits the verbatim body) a *bundle identity
-check* and a *finding triage skeleton* beneath it: it parses the reply's `jw-review-summary:v1`
-marker and cross-checks `reviewed_sha`/`round_id`/`project` against the round's bundle record
-(`<round-id>-bundle.yaml`). **If it exits 3 (identity MISMATCH)** the reply reviewed a different
-SHA than was shipped — do NOT triage; re-bundle the correct head or get a reply bound to it. If it
-reports `no review at /tmp/review.md`, tell the user to save the reply first (`cat > /tmp/review.md`,
-paste, `Ctrl-D`) and stop. For a PR-mode cycle, pass `--pr <N>` so the cross-check binds to the
-frozen cycle head. Then read `<reviews_dir>/<round-id>-feedback.md` to triage.
+Besides the byte-exact copy, ingest **appends** (never edits the verbatim body) an *identity check*
+and a *finding triage skeleton* beneath it.
+
+- **Default `raw-zip` flow:** a loose domain reviewer's reply usually carries **no**
+  `jw-review-summary` marker, so ingest records the identity as `no-marker` and **proceeds to
+  triage** (exit 0). That is expected, not a failure — the binding is the brief's "Reviewed HEAD"
+  the reviewer was asked to confirm (verify in Step 0 below that the SHA the reviewer reports matches
+  the brief). If a marker *is* present, ingest cross-checks `reviewed_sha` against the live `HEAD`
+  (plus `round_id`/`project`); a mismatch here may simply mean **HEAD advanced since you sent the
+  review** (you committed more while waiting) — confirm the reviewer's SHA is the one you sent before
+  deciding it reviewed the wrong tree.
+
+  **Step 0 (raw-zip only):** read the reviewer's reported `git rev-parse HEAD` from their reply and
+  confirm it equals the brief's `Reviewed HEAD`. If they differ, the reviewer reviewed a stale/wrong
+  zip — re-send the correct one; don't triage. (This is the implementer-side check the loose flow
+  relies on, since there is no SHA-pinned bundle record.)
+- **`strict-bundle` / PR mode:** ingest parses the `jw-review-summary:v1` marker and cross-checks
+  it against the round's bundle record (`<round-id>-bundle.yaml`) on every identity axis. **If it
+  exits 3 (identity MISMATCH)** the reply reviewed a different target than was shipped — do NOT
+  triage; re-bundle the correct head or get a reply bound to it. For a PR-mode cycle pass `--pr <N>`
+  so the cross-check binds to the frozen cycle head.
+
+If ingest reports `no review at /tmp/review.md`, tell the user to save the reply first
+(`cat > /tmp/review.md`, paste, `Ctrl-D`) and stop. Then read
+`<reviews_dir>/<round-id>-feedback.md` to triage.
 
 ## Step 3 — Verify, then triage (never blindly implement)
 
@@ -46,8 +63,11 @@ Reviewer findings are claims, not facts. For each distinct finding:
    - `NEEDS-RULING` — turns on an SSOT interpretation → register a `decision/...` task instead of acting.
 2. Register each REAL finding in `tasks.yaml`: appropriate type (`fix`/`perf`/`docs`), explanatory title, `severity: blocker|major|minor`, `origin: review-<round-id>`, and `anchor:` when the finding binds to an SSOT section. The guard hook validates on save.
 
-Fill in the triage-skeleton table ingest appended to the feedback file (in the user's configured
-language; quoted reviewer text verbatim): for each `JW-GPT-NNN` row set verdict → evidence → task id.
+A loose (`raw-zip`) reply has free-form findings, so ingest parses **no** `JW-GPT-NNN` rows and
+notes "triage the verbatim reply manually" — triage each finding in the body directly (verdict →
+evidence → register REAL ones), no table required. A `strict-bundle`/PR reply follows the output
+contract, so ingest appends a `JW-GPT-NNN` triage-skeleton table — fill each row (in the user's
+configured language; quoted reviewer text verbatim): verdict → evidence → task id.
 
 ## Step 4 — Report
 

@@ -59,6 +59,11 @@ def normalize_config(cfg: dict | None) -> dict:
     if not isinstance(rv, dict):
         raise ValueError("review: must be a mapping (mode/reviewers/require_ci/approvers/operators)")
     rv.setdefault("mode", "packet")  # packet | pr
+    # packet-mode transport: raw-zip (default — the user attaches a .git-inclusive repo zip + a
+    # domain brief; the reviewer runs git directly and reviews for domain validity, not the harness)
+    # or strict-bundle (the SHA-pinned jahns-review-bundle for provenance-gated review). PR mode
+    # always uses the strict bundle for its macro reviewer, regardless of this key.
+    rv.setdefault("packet_transport", "raw-zip")
     rv.setdefault("reviewers", ["codex", "gpt-5.5-pro"])
     rv.setdefault("require_ci", False)
     rv.setdefault("approvers", [])  # extra trusted approver logins beyond the repo owner
@@ -68,6 +73,9 @@ def normalize_config(cfg: dict | None) -> dict:
     rv.setdefault("operators", [])
     if rv["mode"] not in ("packet", "pr"):
         raise ValueError(f"review.mode must be 'packet' or 'pr', got {rv['mode']!r}")
+    if rv["packet_transport"] not in ("raw-zip", "strict-bundle"):
+        raise ValueError(
+            f"review.packet_transport must be 'raw-zip' or 'strict-bundle', got {rv['packet_transport']!r}")
     if not (isinstance(rv["reviewers"], list) and all(isinstance(r, str) for r in rv["reviewers"])):
         raise ValueError("review.reviewers must be a list of strings")
     if not isinstance(rv["require_ci"], bool):

@@ -52,6 +52,11 @@ KIT_SOURCES = (
     "PROJECT_INSTRUCTIONS.txt", "JW_INSTRUCTION.md", "JW_REPOSITORY_CONTRACT.md",
     "JW_REVIEW_PLAYBOOK.md", "JW_OUTPUT_CONTRACT.md", "JW_EXAMPLES.md",
 )
+# loose kit: a short, unversioned domain-reviewer setup for the raw-repo-zip flow (the default).
+# Not a provenance protocol — no hash manifest — just enough to keep an external reviewer on
+# domain review (and off the harness) while the per-round brief carries the specifics.
+KIT_LOOSE_DIR = Path(__file__).resolve().parent.parent / "templates" / "chatgpt-reviewer-loose"
+KIT_LOOSE_SOURCES = ("REVIEWER_INSTRUCTIONS.md", "REVIEWER_CONTEXT.md")
 
 
 def _is_sha(v: object) -> bool:
@@ -610,9 +615,25 @@ def bundle(root: Path, round_id: str | None, pr: int | None, out_dir: Path | Non
 
 # ── reviewer kit ─────────────────────────────────────────────────────────────
 
-def kit(out_dir: Path | None) -> int:
-    """Render the static ChatGPT reviewer kit (Project Instructions + 5 Project Sources) plus a
-    KIT_MANIFEST.yaml. Carries no target-repository state — it is the one-time protocol setup."""
+def kit(out_dir: Path | None, mode: str = "loose") -> int:
+    """Render the ChatGPT reviewer kit. Default `mode="loose"` writes the short domain-reviewer
+    setup (REVIEWER_INSTRUCTIONS + optional REVIEWER_CONTEXT) for the raw-repo-zip flow.
+    `mode="strict"` writes the SHA-pinned JW_* protocol kit + a tamper-evident KIT_MANIFEST for
+    provenance-gated (PR) review. Carries no target-repository state — one-time per-protocol setup."""
+    if mode == "loose":
+        out = (out_dir or Path.cwd() / "jahns-chatgpt-reviewer-kit").resolve()
+        out.mkdir(parents=True, exist_ok=True)
+        for name in KIT_LOOSE_SOURCES:
+            src = KIT_LOOSE_DIR / name
+            if not src.is_file():
+                print(f"jw_bundle kit: missing template {src}", file=sys.stderr)
+                return 1
+            (out / name).write_bytes(src.read_bytes())
+        print(f"reviewer kit (loose) → {out}")
+        print("  ChatGPT setup: paste REVIEWER_INSTRUCTIONS.md into Project instructions; "
+              "optionally upload REVIEWER_CONTEXT.md as a Project Source.")
+        print("  Per round: attach the repo zip (incl. .git) + the round brief — no fixed protocol.")
+        return 0
     out = (out_dir or Path.cwd() / "jahns-chatgpt-reviewer-kit").resolve()
     out.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -663,7 +684,8 @@ def main(argv: list[str]) -> int:
     sub, rest = argv[0], argv[1:]
     out = _opt(rest, "--out")
     if sub == "kit":
-        return kit(Path(out).resolve() if out else None)
+        mode = "strict" if "--strict" in rest else "loose"
+        return kit(Path(out).resolve() if out else None, mode)
     root = _root(rest)
     if root is None:
         print("jw_bundle: no initialized project (missing .jahns-workflow.yml)", file=sys.stderr)

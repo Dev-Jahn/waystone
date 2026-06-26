@@ -1,7 +1,7 @@
 {
   "name": "jahns-workflow",
-  "version": "0.3.2",
-  "description": "SSOT-anchored agentic development workflow harness: one-click project setup, task registry with a global naming convention, zero-token roadmap rendering, round closeout, deterministic SHA-pinned review bundles + a ChatGPT reviewer kit, and external review ingestion.",
+  "version": "0.4.0",
+  "description": "SSOT-anchored agentic development workflow harness: one-click project setup, task registry with a global naming convention, zero-token roadmap rendering, round closeout, external domain review (a per-round brief + a .git-inclusive repo zip by default, or a SHA-pinned bundle for provenance-gated review), and external review ingestion.",
   "author": {
     "name": "Jahn",
     "email": "ajhskku@gmail.com"

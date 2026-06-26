@@ -1,13 +1,14 @@
 ---
 name: round
-description: This skill should be used when the user runs "/jahns-workflow:round", says to "close the round", "wrap up this round", "finish the work cycle", or when an autonomous work round (implement → verify → push) reaches its end and the project CLAUDE.md mandates round closeout. Updates the task registry, PROGRESS, roadmap, SSOT views, and produces the external review bundle.
+description: This skill should be used when the user runs "/jahns-workflow:round", says to "close the round", "wrap up this round", "finish the work cycle", or when an autonomous work round (implement → verify → push) reaches its end and the project CLAUDE.md mandates round closeout. Updates the task registry, PROGRESS, roadmap, SSOT views, and prepares the external review packet (a domain brief + a repo zip by default).
 argument-hint: "[round-slug] e.g. lstream-seams"
 ---
 
 # jahns-workflow: round
 
 Close the current work round: bring the task registry up to date, record the round in
-PROGRESS, refresh generated views, and build a self-contained external review bundle.
+PROGRESS, refresh generated views, and prepare the external review packet (by default a domain
+review brief the user pairs with a `.git`-inclusive repo zip).
 
 Requires an initialized project (`.jahns-workflow.yml`). If missing, stop and point the user
 at `/jahns-workflow:init`. Plugin root = two directories above this skill's base directory.
@@ -46,35 +47,65 @@ configured language). Then archive: move dated sections from months before the c
 into `docs/progress/<YYYY-MM>.md` (mechanical cut-paste, newest-first preserved), leaving
 PROGRESS.md with the current month + the header pointers.
 
-## Step 4 — Request review
+## Step 4 — Prepare external review
 
-**First, a hard push gate (both modes):** run `uv run <plugin-root>/scripts/jw.py remote verify .`.
+**First, a hard push gate (all modes):** run `uv run <plugin-root>/scripts/jw.py remote verify .`.
 A review must point at a pushed commit; if this exits non-zero, STOP and tell the user to push
 the round's commits before a packet/cycle is created — do not emit a packet for an unpushed HEAD.
 
-**Packet mode** (`review.mode: packet`, default): the reviewer no longer browses the repo (the
-ChatGPT GitHub connector is unavailable) — it reads a self-contained **review bundle** zip.
+**The reviewed tree is the current HEAD.** If your conventions end a round in a commit, commit the
+closeout (`docs(round): close <round-id>`) and push it FIRST so `tasks.yaml` / PROGRESS carry the
+round's final state — the brief's "Reviewed HEAD" and the reviewer's `git rev-parse HEAD` must agree.
 
-1. Write `<reviews_dir>/<round-id>-request.md` from `<plugin-root>/templates/review-request.md`:
-   state every load-bearing claim **falsifiably** under "Claims to attack" and list the test
-   ladder's known blind spots. This is packaged verbatim as the bundle's `__review__/REQUEST.md`.
-2. **The reviewed tree is the current HEAD.** So if your conventions end a round in a commit, commit
-   the closeout (`docs(round): close <round-id>`) and push it FIRST — then `repo/tasks.yaml` /
-   PROGRESS carry the round's final state and the manifest scope matches them. (Bundling before the
-   closeout commit is allowed; the bundle is then internally consistent but marked `worktree_dirty`.)
-3. Build the bundle:
-   `uv run <plugin-root>/scripts/jw.py review bundle . --round <round-id>`. It reads the base
-   watermark `round close` recorded, builds `repo/` **directly from git objects of HEAD** (exact
-   tracked tree — no `.git`/caches/secrets; a symlink ships as a regular file holding its target string,
-   recorded in `manifest.symlinks`, never a rebuildable link entry),
-   adds `__review__/DIFF.patch` + `CHANGED_FILES.txt` + `COMMITS.txt` + a schema-validated
-   `MANIFEST.yaml`, stamps the reviewed head into the sidecar, and writes the zip to
-   `<reviews_dir>/bundles/` (untracked). HEAD must be pushed (the gate above).
-4. Attach that zip to the web reviewer and paste the one-line prompt the command prints. (One-time:
-   the ChatGPT Project must hold the reviewer kit — `/jahns-workflow:reviewer-kit`.)
+**Packet mode — `raw-zip` (`review.mode: packet`, the default; `review.packet_transport: raw-zip`).**
+The reviewer is a *domain* reviewer who gets the whole repo (incl. `.git`) and runs git directly —
+not a workflow auditor reading a sandboxed bundle.
+
+1. Confirm the working tree is clean and HEAD is the pushed round commit (`git rev-parse HEAD`
+   should equal `git rev-parse @{upstream}` — the Step-4 push gate already fetched). The brief's
+   `Reviewed HEAD` is this SHA; do not let HEAD move after you stamp it (the zip below must be of
+   this exact HEAD, so don't `git pull` between stamping and zipping).
+2. Write `<reviews_dir>/<round-id>-request.md` from `<plugin-root>/templates/review-request.md`: a
+   **briefing**, not a protocol — what changed and *why*, the files to read first, falsifiable
+   "claims to attack", evidence pointers (to where logs/PROGRESS already live — do **not** copy
+   them into a new dir), known weak spots, and the domain lens. Fill `Reviewed HEAD` / `Diff base`
+   from the HEAD above and the round's `base_sha` (in `<reviews_dir>/<round-id>-bundle.yaml`, or
+   `(root)` for the first round). Keep the harness out of scope unless the user asks.
+3. Tell the user to zip the repo root **including `.git`** and drag-drop it to the reviewer. Suggested
+   command (tune the excludes per repo — keep `.git`):
+   ```bash
+   zip -y -r "../$(basename "$PWD")@$(git rev-parse --short=12 HEAD).zip" . \
+     -x './.venv/*' './node_modules/*' './__pycache__/*' './.pytest_cache/*' './.mypy_cache/*' \
+        './wandb/*' './runs/*' './checkpoints/*' './data/*' \
+        '*.env' './.env*' '*.pem' '*.key' '*id_rsa*' '*.tfstate*' './.aws/*' './.ssh/*'
+   ```
+   (`-y` stores symlinks as links rather than following them; `.git` is kept on purpose so the
+   reviewer can `git log`/`git diff`/`git show`.)
+   **⚠ Secrets:** this ships the **whole worktree** (incl. untracked files) **and full `.git`
+   history** to the external reviewer — the excludes above are size/secret hygiene, not a guarantee.
+   Any secret ever committed stays in history even if later removed from HEAD. Tell the user to skim
+   `unzip -l <zip>` before upload, and if history was ever cleaned (or they can't risk it) to use
+   `strict-bundle` instead — it ships only the tracked HEAD tree, never `.git` or untracked files.
+4. One-time per project: the ChatGPT Project holds the **loose** reviewer kit
+   (`/jahns-workflow:reviewer-kit` → paste `REVIEWER_INSTRUCTIONS.md`). Optionally add a repo-local
+   `docs/review-profile.md` (from `<plugin-root>/templates/review-profile.md`) for the domain lens.
+5. Give the user the attach-and-prompt line, e.g.:
+   > 첨부한 repo zip을 풀고 `.git`으로 HEAD/diff를 직접 확인한 뒤
+   > `docs/reviews/<round-id>-request.md`를 읽고 major 위주로 도메인 리뷰해줘.
+
+**Packet mode — `strict-bundle` (only when `review.packet_transport: strict-bundle`).** Build the
+SHA-pinned self-contained bundle instead (provenance-gated review, or when the reviewer cannot run
+git): `uv run <plugin-root>/scripts/jw.py review bundle . --round <round-id>` builds `repo/`
+directly from git objects of HEAD (exact tracked tree — no `.git`/caches/secrets; symlinks stored as
+their target string), adds `__review__/DIFF.patch` + `CHANGED_FILES.txt` + `COMMITS.txt` + a
+schema-validated `MANIFEST.yaml`, stamps the reviewed head into the sidecar, and writes the zip to
+`<reviews_dir>/bundles/`. Attach it and paste the printed prompt. The ChatGPT Project then needs the
+**strict** kit (`/jahns-workflow:reviewer-kit` rendered with `--strict`).
 
 **PR mode** (`review.mode: pr`): the `@codex` PR bot reviews on the PR, but the macro reviewer
-(GPT) also lost repo browsing and needs the same bundle.
+(GPT) also lost repo browsing and needs the strict bundle — so its ChatGPT Project must hold the
+**strict** kit (`/jahns-workflow:reviewer-kit --strict`); the loose kit emits no `jw-review-result`
+marker and the merge gate would never see the macro result.
 
 1. Open/locate the round's PR, then freeze a SHA-bound review cycle:
    `uv run <plugin-root>/scripts/jw.py review freeze --pr <N> --round <round-id> .`. This stamps the
@@ -89,16 +120,18 @@ ChatGPT GitHub connector is unavailable) — it reads a self-contained **review 
 ## Step 5 — Report
 
 Report in the user's configured language: shipped tasks (id — title), registry/roadmap state,
-where the review bundle (`*.review.zip`) is, and a suggested commit message
-(`docs(round): close <round-id>`). Do not commit unless the project's conventions say rounds end
-in a commit and the user has authorized committing.
+where the review brief (`<reviews_dir>/<round-id>-request.md`) is — and, in `strict-bundle`/PR
+mode, where the `*.review.zip` is — plus a suggested commit message (`docs(round): close
+<round-id>`). Do not commit unless the project's conventions say rounds end in a commit and the
+user has authorized committing.
 
 End with the **next-step reminder** (so the reply is preserved byte-exact, not re-typed by a model):
 
-> Attach the `*.review.zip` bundle to the external reviewer and paste the one-line prompt the
-> bundle command printed. To ingest the reply, save it **in a separate shell**: `cat > /tmp/review.md`
-> → paste → `Ctrl-D`. Then run `/jahns-workflow:review <round-id>`, which copies `/tmp/review.md`
-> verbatim into the reviews dir (no model retyping) and cross-checks it against the bundle.
+> Attach the review artifact to the external reviewer and paste the prompt. In the default
+> `raw-zip` flow that is the repo zip (incl. `.git`) + the round brief; in `strict-bundle`/PR mode
+> it is the `*.review.zip`. To ingest the reply, save it **in a separate shell**:
+> `cat > /tmp/review.md` → paste → `Ctrl-D`. Then run `/jahns-workflow:review <round-id>`, which
+> copies `/tmp/review.md` verbatim into the reviews dir (no model retyping) and triages it.
 
 ## Step 6 — Refresh the re-entry pointer
 

@@ -55,7 +55,8 @@ progress_archive_dir: docs/progress
 generated_dir: docs/ssot
 digest_max_lines: 150
 review:
-  mode: packet                  # packet (paste to web reviewer) | pr (SHA-bound PR review cycles)
+  mode: packet                  # packet (hand the change to a web reviewer) | pr (SHA-bound PR review cycles)
+  packet_transport: raw-zip     # raw-zip (default — .git-inclusive repo zip + a domain brief) | strict-bundle
   reviewers: [codex, gpt-5.5-pro]
   require_ci: false             # if true, the merge gate blocks until CI passes
   # operators: []               # PR mode: extra GitHub logins trusted to post review markers (owner always is)
@@ -64,12 +65,19 @@ state:
   last_round_commit: null
 ```
 
-Ask the user which `review.mode` fits: `packet` (default — close a round, push, then build a
-self-contained `*.review.zip` bundle with `jw review bundle` and attach it to the web reviewer)
-or `pr` (open a PR per round, freeze a SHA-bound review cycle, and let a deterministic gate guard
-the merge). PR mode suits repos that already work through PRs with a `@codex` bot; its macro
-reviewer also consumes the same bundle. For either mode, the web reviewer's ChatGPT Project is set
-up once with `/jahns-workflow:reviewer-kit` (static protocol + Project instructions).
+Ask the user which `review.mode` fits: `packet` (default — close a round, push, then hand the
+change to a web reviewer) or `pr` (open a PR per round, freeze a SHA-bound review cycle, and let a
+deterministic gate guard the merge; suits repos that already work through PRs with a `@codex` bot).
+
+In packet mode the transport is `review.packet_transport`: **`raw-zip`** (default) — the user
+attaches a `.git`-inclusive repo zip + a per-round domain **brief** and the reviewer runs git
+directly and reviews for domain validity — or **`strict-bundle`** — the SHA-pinned self-contained
+`*.review.zip` (`jw review bundle`) for provenance-gated review or a reviewer that can't run git.
+PR mode always uses the strict bundle for its macro reviewer.
+
+The web reviewer's ChatGPT Project is set up once with `/jahns-workflow:reviewer-kit` — the **loose**
+domain-reviewer kit by default (for `raw-zip`), or `--strict` for the JW_* protocol kit (for
+`strict-bundle`/PR).
 
 2. `tasks.yaml` — minimal valid registry (`version: 1`, `project:`, `milestones: []`, `tasks: []`),
    with a YAML comment documenting the optional task fields (`deps`, `milestone`, `round`,

@@ -721,8 +721,13 @@ def ingest(root: Path, round_id: str | None, src: Path = INBOX, reviewer: str | 
     for mm in mismatches:
         lines.append(f"- ⚠ {mm}")
     if check_status == "MISMATCH":
-        lines.append("- **DO NOT triage automatically — the reply reviewed a different target than was shipped. "
-                     "Re-bundle the correct SHA or obtain a reply bound to it.**")
+        if identity is not None:  # strict/PR: a recorded head exists, so a mismatch is a wrong target
+            lines.append("- **DO NOT triage automatically — the reply reviewed a different target than was "
+                         "shipped. Re-bundle the correct SHA or obtain a reply bound to it.**")
+        else:  # degraded/raw-zip: no recorded head — the mismatch may just be HEAD advancing since review
+            lines.append("- **DO NOT triage automatically — the reviewed SHA doesn't match the live HEAD. "
+                         "This may simply mean HEAD advanced since you sent the review; confirm the reviewer "
+                         "reviewed the SHA you sent (and the right round/project) before triaging.**")
     lines += ["", "## Findings (triage skeleton — verify each before registering)", ""]
     if findings:
         lines.append("| finding | severity | verdict (REAL/REJECTED/NEEDS-RULING) | evidence | task id |")
