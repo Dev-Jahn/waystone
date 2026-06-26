@@ -225,11 +225,15 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     if (cfg.get("review", {}) or {}).get("mode") == "packet":
         import jw_bundle
         prev = (cfg.get("state") or {}).get("last_round_commit")  # previous watermark (pre-advance) = bundle base
+        # expand a short/ref watermark to a FULL 40-hex sha: jw_bundle._is_sha accepts only 40-hex, so
+        # a short base would be dropped to None at bundle time → diff vs the empty tree → whole repo.
+        # Also makes the re-close check (prev == full) compare full-vs-full, not short-vs-full.
+        prev = git_full_sha(root, str(prev)) if prev else None
         base = prev if (prev and prev != full) else None
         if base is None:
             ex = jw_bundle.read_record(root, cfg, round_id)
-            if ex:
-                base = ex.get("base_sha")
+            if ex and ex.get("base_sha"):
+                base = git_full_sha(root, str(ex.get("base_sha")))
         sc_path = jw_bundle.record_path(root, cfg, round_id)
         sidecar = {
             "path": sc_path,
