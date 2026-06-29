@@ -132,7 +132,7 @@ def _gather(root: Path, pr: int) -> dict | None:
     if ctx is None:
         return None
     repo, bundle = ctx["repo"], ctx["bundle"]
-    head, base_sha = ctx["head"], ctx["base_sha"]
+    head = ctx["head"]
     policy = ctx["policy"]              # POLICY @ base SHA (None if unreadable)
     read_ok = policy is not None
     data = {}

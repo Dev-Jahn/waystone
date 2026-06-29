@@ -21,13 +21,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from jw_common import (  # noqa: E402
-    find_project_root, git, git_branch_info, git_full_sha, load_config, load_tasks,
+    find_project_root, git, git_branch_info, git_full_sha, load_tasks,
     next_actionable, resume_path, start_here_path,
 )
 
 
 def snapshot(root: Path) -> str:
-    cfg = load_config(root)
     data = load_tasks(root)
     g = git_branch_info(root)
     head = git(root, "log", "-1", "--format=%h %s") or "(no commits)"

@@ -1,9 +1,10 @@
 name: Sync marketplace pin
 
 # When main moves (a release pushed by release-to-main.sh), mirror this repo's main sha and the
-# plugin.json version into Dev-Jahn/jahns-cc-marketplace's marketplace.json, so the marketplace
-# always pins the latest release. Cross-repo write uses a deploy key scoped to the marketplace repo
-# only (private key in the MARKETPLACE_DEPLOY_KEY secret; public key registered there with write).
+# plugin.json version + description into Dev-Jahn/jahns-cc-marketplace's marketplace.json, so the
+# marketplace always pins the latest release and never drifts from plugin.json's description. Cross-
+# repo write uses a deploy key scoped to the marketplace repo only (private key in the
+# MARKETPLACE_DEPLOY_KEY secret; public key registered there with write).
 on:
   push:
     branches: [main]
@@ -20,9 +21,15 @@ jobs:
       - name: Checkout main (read plugin version)
         uses: actions/checkout@v5
 
-      - name: Read plugin version
-        id: ver
-        run: echo "version=$(jq -r .version .claude-plugin/plugin.json)" >> "$GITHUB_OUTPUT"
+      - name: Read plugin version + description
+        id: meta
+        run: |
+          echo "version=$(jq -r .version .claude-plugin/plugin.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "description<<JWEOF"
+            jq -r .description .claude-plugin/plugin.json
+            echo "JWEOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Configure deploy key
         env:
@@ -33,27 +40,28 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Pin sha + version in the marketplace
+      - name: Pin sha + version + description in the marketplace
         env:
           NEW_SHA: ${{ github.sha }}
-          NEW_VERSION: ${{ steps.ver.outputs.version }}
+          NEW_VERSION: ${{ steps.meta.outputs.version }}
+          NEW_DESC: ${{ steps.meta.outputs.description }}
         run: |
           set -euo pipefail
           git clone git@github.com:Dev-Jahn/jahns-cc-marketplace.git mp
           cd mp
           f=.claude-plugin/marketplace.json
           tmp=$(mktemp)
-          jq --indent 2 --arg sha "$NEW_SHA" --arg ver "$NEW_VERSION" \
-            '(.plugins[] | select(.name=="jahns-workflow")) |= (.source.sha = $sha | .version = $ver)' \
+          jq --indent 2 --arg sha "$NEW_SHA" --arg ver "$NEW_VERSION" --arg desc "$NEW_DESC" \
+            '(.plugins[] | select(.name=="jahns-workflow")) |= (.source.sha = $sha | .version = $ver | .description = $desc)' \
             "$f" > "$tmp"
           mv "$tmp" "$f"
           if git diff --quiet -- "$f"; then
-            echo "marketplace already pins ${NEW_SHA} @ v${NEW_VERSION} — nothing to do."
+            echo "marketplace already in sync at ${NEW_SHA} @ v${NEW_VERSION} — nothing to do."
             exit 0
           fi
           git config user.name "jahns-workflow-ci"
           git config user.email "ci@users.noreply.github.com"
           git add -- "$f"
-          git commit -qm "chore(jahns-workflow): pin v${NEW_VERSION} @ ${NEW_SHA:0:7} (auto-sync from main)"
+          git commit -qm "chore(jahns-workflow): sync v${NEW_VERSION} @ ${NEW_SHA:0:7} (auto-sync from main)"
           git push origin HEAD:main
           echo "marketplace updated → v${NEW_VERSION} @ ${NEW_SHA:0:7}"
