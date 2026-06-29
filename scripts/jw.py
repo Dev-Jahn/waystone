@@ -7,6 +7,7 @@
 
 Groups:
   validate [tasks.yaml]              validate the task registry
+  task     list|show|add|set|drop|archive ...  structured registry access (don't read/edit it raw)
   roadmap  [root]                    regenerate ROADMAP.md
   ssot     split|digest|check [root] SSOT generated views
   status   [--project N]             cross-project dashboard
@@ -42,6 +43,9 @@ def main(argv: list[str]) -> int:
     group, rest = argv[0], argv[1:]
 
     # new-style modules expose main(argv)
+    if group == "task":
+        import jw_tasks
+        return jw_tasks.main(rest)
     if group == "review":
         import jw_review
         return jw_review.main(rest)

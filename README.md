@@ -25,12 +25,14 @@ Full convention: [references/conventions.md](references/conventions.md).
 | `/jahns-workflow:round` | Close a work round: sync registry → PROGRESS entry + archive → refresh views → write the round's markdown review request |
 | `/jahns-workflow:review` | Ingest an external review reply: preserve verbatim → verify each finding → register REAL ones as tasks |
 | `/jahns-workflow:status` | Cross-project terminal dashboard (branches, rounds, active/blocked tasks). Registry entries can be local (`path`) or remote (`repo: owner/name`, fetched via `gh api` — for projects not cloned on this machine) |
+| `jw task …` CLI | Structured registry access so a thousand-line `tasks.yaml` is never read/edited whole: `list`/`show` (filtered reads), `add`/`set`/`drop` (validated, comment-preserving mutations), `archive` (relocate old done/dropped tasks into `tasks.archive.yaml`) |
 | SessionStart hook | Injects digest + active tasks on startup/resume/clear/**compact** (capped ~8KB; no-ops in ~30ms in non-initialized projects) |
+| PreToolUse hook | Redirects a raw `Read` of the project's `tasks.yaml` to the `jw task` CLI (deny + hint); fires only for the canonical registry, `cat` remains an escape hatch |
 | PostToolUse hook | On `tasks.yaml` edits only: schema validation (exit-2 feedback) + deterministic `ROADMAP.md` regeneration. ~13ms no-op otherwise |
 
 All rendering/validation is plain Python (`scripts/jw_*.py`, run via `uv`) — zero LLM tokens.
 A unified front door `scripts/jw.py` dispatches `jw <group>`
-(validate/roadmap/ssot/status/remote/review/approve/round/lanes/resume).
+(validate/task/roadmap/ssot/status/remote/review/approve/round/lanes/resume).
 
 ## Round closeout & resume (v0.2.1)
 

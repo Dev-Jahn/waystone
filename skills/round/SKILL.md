@@ -21,10 +21,11 @@ rather than duplicating).
 
 ## Step 2 — Sync the task registry
 
-First register any newly discovered work as new tasks (proper `<type>/<slug>` IDs + explanatory
-titles; set `anchor:` to the governing SSOT §-anchor when known). Unresolved
-questions for the user become `decision/...` tasks; when a `decision/...` is answered, record the
-ruling in its `ruling:` field.
+First register any newly discovered work as new tasks via the CLI — `uv run <plugin-root>/scripts/jw.py
+task add <type>/<slug> . --title "..." [--severity ...] [--deps a,b]` (proper IDs + explanatory
+titles; set `anchor:` to the governing SSOT §-anchor when known) — rather than hand-editing the
+registry. Unresolved questions for the user become `decision/...` tasks; when a `decision/...` is
+answered, record the ruling with `jw task set <id> ruling "..."`.
 
 Then close the round in one atomic, deterministic step instead of hand-editing each field:
 
@@ -39,6 +40,11 @@ the registry, regenerates `ROADMAP.md` (and SSOT views if configured), and advan
 A `gate/...` task goes in `--done` only if the bar actually passed (link evidence in PROGRESS).
 If `round close` reports the registry invalid, fix the reported issues before continuing.
 If lanes were used this round, first verify them: `uv run <plugin-root>/scripts/jw.py lanes verify .`.
+
+Then keep the registry small: `uv run <plugin-root>/scripts/jw.py task archive .` relocates old
+done/dropped tasks into `tasks.archive.yaml` once the registry crosses a size threshold (it keeps
+the most-recent few for decision context, and never archives a task a live one still depends on).
+It is a safe no-op below the threshold, so run it every round.
 
 ## Step 3 — PROGRESS entry + archive
 

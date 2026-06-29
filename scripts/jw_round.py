@@ -72,7 +72,15 @@ def _task_item_span(text: str, task_id: str) -> tuple[int, int]:
         raise WorkflowError(f"ambiguous registry: duplicate task id {task_id!r}")
     if not matches:
         raise KeyError(f"task id not found in registry: {task_id}")
-    return matches[0]
+    start, end = matches[0]
+    # PyYAML reports end_mark.line one short for the FINAL node of a document with no trailing
+    # newline (it lands ON the task's last content line instead of past it). Left uncorrected, the
+    # consumers' `range(start+1, end)` / `del lines[s:e]` would skip that last line — silently
+    # dropping a field update or orphaning a field onto the previous task. Extend the span to EOF.
+    lines = text.splitlines(keepends=True)
+    if lines and end == len(lines) - 1 and not lines[-1].endswith("\n"):
+        end = len(lines)
+    return (start, end)
 
 
 def set_task_field(text: str, task_id: str, field: str, value: str) -> str:

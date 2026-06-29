@@ -46,7 +46,7 @@ Reviewer findings are claims, not facts. For each distinct finding:
    - `REAL` — confirmed against evidence,
    - `REJECTED` — demonstrably wrong (state the evidence),
    - `NEEDS-RULING` — turns on an SSOT interpretation → register a `decision/...` task instead of acting.
-2. Register each REAL finding in `tasks.yaml`: appropriate type (`fix`/`perf`/`docs`), explanatory title, `severity: blocker|major|minor`, `origin: review-<round-id>`, and `anchor:` when the finding binds to an SSOT section. The guard hook validates on save.
+2. Register each REAL finding via the CLI — `uv run <plugin-root>/scripts/jw.py task add <fix|perf|docs>/<slug> . --title "..." --severity <blocker|major|minor> --origin review-<round-id> [--anchor §...]` — not by editing `tasks.yaml`. The add is validated and comment-preserving.
 
 If ingest parsed a `JW-GPT-NNN` triage-skeleton table, fill each row (in the user's configured
 language; quoted reviewer text verbatim): verdict → evidence → task id. A free-form reply has no

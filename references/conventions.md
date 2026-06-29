@@ -8,7 +8,10 @@ rewritten retroactively.
 ## 1. Task IDs — `<type>/<kebab-slug>`
 
 Every unit of work gets one globally unique ID, registered in `tasks.yaml` **before first use**
-in commits, docs, or conversation. Grammar (machine-enforced by the tasks guard):
+in commits, docs, or conversation. Read and mutate the registry through the `jw task` CLI
+(`list`/`show` to read; `add`/`set`/`drop` to mutate — validated and comment-preserving; `archive`
+to relocate old done/dropped tasks) rather than reading or editing the file whole; a PreToolUse hook
+redirects raw reads there. Grammar (machine-enforced by the tasks guard):
 
 ```
 <type>/<slug>     type ∈ feat|fix|perf|gate|spike|decision|docs|chore
@@ -64,7 +67,8 @@ Used on review findings (a `severity:` field on the task, never part of the ID):
 | Artifact | Home | Notes |
 |---|---|---|
 | Design / theory | SSOT file (path in `.jahns-workflow.yml`) | single file, ADR-gated changes |
-| Task registry | `tasks.yaml` | the ONLY codename registry |
+| Task registry | `tasks.yaml` | the ONLY codename registry — read/mutate via `jw task`, not raw (a hook redirects whole-file reads) |
+| Archived tasks | `tasks.archive.yaml` | old done/dropped tasks relocated by `jw task archive` to keep the live registry small |
 | Roadmap view | `ROADMAP.md` | generated — never edit |
 | Work log | `PROGRESS.md` | current rounds + pointers; older months archived to `docs/progress/` |
 | Decisions | ADR dir | MADR-lite template |
