@@ -31,7 +31,7 @@ Scan before creating anything:
 ## Step 2 — Confirm the one decision that matters
 
 Ask the user ONE question (AskUserQuestion): which file is the SSOT — listing detected
-candidates with size/role, plus options "no SSOT yet — create a DESIGN.md skeleton" and
+candidates with size/role, plus options "no SSOT yet — create an SSOT.md skeleton" and
 "this project has no single design doc" (then SSOT features are disabled: omit `ssot:` from
 config; everything else still works). Map all other detected structures automatically and
 report the mapping instead of asking.

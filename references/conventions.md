@@ -35,7 +35,7 @@ IDs share one mental model. Branch names may reuse the task ID verbatim (`feat/s
 Every task carries a `title`: one explanatory phrase a person seeing the repo for the first
 time can understand. Titles, not IDs, are what roadmap nodes and dashboards display alongside
 the ID. A task that governs a specific SSOT section also carries an `anchor:` field
-(§-anchor string such as `"DESIGN §5.6"`) — it documents the binding section, surfaces in the
+(§-anchor string such as `"SSOT §5.6"`) — it documents the binding section, surfaces in the
 roadmap view, and scopes review findings, so set it whenever the binding section is known.
 
 **Banned:** bare letter-number codenames (`P0`, `E3`, `Q1`, `T7`, `P-3`, …) as identifiers of
