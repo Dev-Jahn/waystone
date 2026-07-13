@@ -21,7 +21,9 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 
+import jw_cclog  # noqa: E402
 import jw_common  # noqa: E402
+import jw_improve  # noqa: E402
 import jw_lanes  # noqa: E402
 import jw_merge  # noqa: E402
 import jw_resume  # noqa: E402
@@ -1604,6 +1606,442 @@ class TaskRegressionTests(unittest.TestCase):
                                      "tool_input": {"file_path": str(root / "tasks.yaml")}})
             self.assertIsNotNone(out)
             self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+
+# ============================================================ v0.7.0 M1: jw_cclog / jw_improve
+import json as _json  # noqa: E402
+
+_UUID = "0123abcd-1234-1234-1234-0123456789ab"
+
+
+def _write_jsonl(path: Path, records, trailing_newline: bool = True) -> None:
+    """Write records (dicts or raw strings) as JSONL. The final line omits its newline when
+    trailing_newline=False (simulating a truncated active-session tail)."""
+    parts = [r if isinstance(r, str) else _json.dumps(r) for r in records]
+    text = "\n".join(parts)
+    if trailing_newline:
+        text += "\n"
+    path.write_text(text, encoding="utf-8")
+
+
+def _parse(path: Path, **kw):
+    defaults = dict(file_id="f1", server=None, project="proj", session_id="sess",
+                    agent_id=None, workflow_id=None, is_sidechain_file=False)
+    defaults.update(kw)
+    return jw_cclog.parse_transcript_file(path, **defaults)
+
+
+def _run_with_home(home: Path, fn):
+    import os
+    bak = os.environ.get("HOME")
+    os.environ["HOME"] = str(home)
+    try:
+        return fn()
+    finally:
+        if bak is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = bak
+
+
+class CclogParseTests(unittest.TestCase):
+    """Ported parse-core behavior + real-format quirks (synthetic fixtures only)."""
+
+    def test_replay_uuid_dedup(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "s.jsonl"
+            rec = {"type": "user", "uuid": "u1", "message": {"role": "user", "content": "hi"}}
+            _write_jsonl(f, [rec, rec])
+            out = _parse(f)
+            self.assertEqual(out["replayed_skipped"], 1)
+            self.assertEqual(sum(1 for e in out["events"] if e["uuid"] == "u1"), 1)
+
+    def test_tool_result_actor_correction(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "s.jsonl"
+            _write_jsonl(f, [{"type": "user", "uuid": "t1", "toolUseResult": {"stdout": "x"},
+                              "message": {"role": "user", "content": [
+                                  {"type": "tool_result", "tool_use_id": "toolu_1",
+                                   "content": "x", "is_error": False}]}}])
+            out = _parse(f)
+            tr = [e for e in out["events"] if e["event_type"] == "tool_result"]
+            self.assertEqual(len(tr), 1)
+            self.assertEqual(tr[0]["actor"], "tool")
+
+    def test_cli_control_and_injections_not_user_instruction(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "s.jsonl"
+            _write_jsonl(f, [
+                {"type": "user", "uuid": "a", "message": {"role": "user",
+                 "content": "<command-name>/effort</command-name>"}},
+                {"type": "user", "uuid": "b", "isCompactSummary": True,
+                 "message": {"role": "user", "content": "prior summary"}},
+                {"type": "user", "uuid": "c", "message": {"role": "user",
+                 "content": "<system-reminder>note</system-reminder>"}},
+                {"type": "user", "uuid": "d", "message": {"role": "user", "content": "real request"}},
+            ])
+            out = _parse(f)
+            ui = [e for e in out["events"] if e["event_type"] == "user_instruction"]
+            self.assertEqual([e["uuid"] for e in ui], ["d"])
+            cc = [e for e in out["events"] if e["event_type"] == "cli_control"]
+            self.assertEqual(cc[0]["event_subtype"], "slash_command")
+            self.assertTrue(any(e["event_subtype"] == "compact_summary" for e in out["events"]))
+            self.assertTrue(any(e["event_subtype"] == "system_reminder" for e in out["events"]))
+
+    def test_thinking_not_extracted_and_usage_group_dedup(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "s.jsonl"
+            base_u = {"input_tokens": 100, "cache_read_input_tokens": 10, "cache_creation_input_tokens": 0}
+            _write_jsonl(f, [
+                {"type": "assistant", "uuid": "a1", "requestId": "r",
+                 "message": {"id": "mA", "model": "claude-opus-4-8",
+                             "content": [{"type": "thinking", "thinking": "secret"}],
+                             "usage": {**base_u, "output_tokens": 5}}},
+                {"type": "assistant", "uuid": "a2", "requestId": "r",
+                 "message": {"id": "mA", "model": "claude-opus-4-8",
+                             "content": [{"type": "text", "text": "hello"}],
+                             "usage": {**base_u, "output_tokens": 5}}},
+                {"type": "assistant", "uuid": "a3", "requestId": "r",
+                 "message": {"id": "mA", "model": "claude-opus-4-8", "stop_reason": "tool_use",
+                             "content": [{"type": "tool_use", "id": "toolu_x", "name": "Bash",
+                                          "input": {"command": "ls"}}],
+                             "usage": {**base_u, "output_tokens": 20}}},
+            ])
+            out = _parse(f)
+            tf = [e for e in out["events"] if e["uuid"] == "a1"][0]
+            self.assertIsNone(tf["text"])  # thinking is an opaque stub
+            self.assertEqual(tf["event_subtype"], "thinking_marker")
+            g = [x for x in jw_cclog.coalesce_messages(out["events"], out["tool_calls"])
+                 if x["message_id"] == "mA"][0]
+            self.assertEqual(g["fragment_count"], 3)
+            self.assertEqual(g["output_tokens"], 20)   # last representative, NOT 5+5+20
+            self.assertEqual(g["input_tokens"], 100)   # NOT summed to 300
+            self.assertTrue(g["has_thinking"])
+            self.assertEqual(g["content_sequence"], "thinking_marker+text+tool_use")
+
+    def test_polymorphic_content_and_session_id_casings(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "s.jsonl"
+            _write_jsonl(f, [
+                {"type": "user", "uuid": "p1", "message": {"role": "user", "content": "stringform"}},
+                {"type": "assistant", "uuid": "p2", "sessionId": "S",
+                 "message": {"id": "m", "model": "claude-opus-4-8",
+                             "content": [{"type": "text", "text": "blockform"}]}},
+                {"type": "user", "uuid": "p3", "session_id": "S",
+                 "message": {"role": "user", "content": [{"type": "text", "text": "blockuser"}]}},
+            ])
+            out = _parse(f)  # both id casings must not crash
+            self.assertEqual(len(out["events"]), 3)
+            self.assertEqual([e for e in out["events"] if e["uuid"] == "p1"][0]["text"], "stringform")
+            self.assertEqual([e for e in out["events"] if e["uuid"] == "p3"][0]["text"], "blockuser")
+
+    def test_synthetic_model_without_request_id(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "s.jsonl"
+            _write_jsonl(f, [{"type": "assistant", "uuid": "s1",
+                              "message": {"id": "m1", "model": "<synthetic>",
+                                          "content": [{"type": "text", "text": "x"}]}}])
+            e = _parse(f)["events"][0]
+            self.assertEqual(e["model_norm"], "synthetic")
+            self.assertIsNone(e["request_id"])
+
+    def test_unknown_type_preserved(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "s.jsonl"
+            _write_jsonl(f, [{"type": "totally-new-thing", "uuid": "z"}])
+            e = _parse(f)["events"][0]
+            self.assertEqual(e["event_type"], "unknown_raw")
+            self.assertEqual(e["event_subtype"], "totally-new-thing")
+
+    def test_lightweight_state_records_classified(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "s.jsonl"
+            _write_jsonl(f, [
+                {"type": "mode", "mode": "default"},
+                {"type": "last-prompt", "lastPrompt": "hey"},
+                {"type": "queue-operation"},
+                {"type": "ai-title", "title": "t"},
+                {"type": "permission-mode", "permissionMode": "plan"},
+                {"type": "agent-setting"},
+            ])
+            out = _parse(f)  # no uuid/parentUuid -> must not crash
+            self.assertEqual(len(out["events"]), 6)
+            self.assertTrue(all(e["event_type"] == "session_state" for e in out["events"]))
+
+    def test_partial_tail_vs_parse_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "s.jsonl"
+            lines = [
+                _json.dumps({"type": "user", "uuid": "g1", "message": {"role": "user", "content": "ok"}}),
+                "{ this is broken json",  # mid-file (gets a trailing newline) -> parse_error
+                _json.dumps({"type": "assistant", "uuid": "g2",
+                             "message": {"id": "m", "model": "claude-opus-4-8", "content": []}}),
+                '{"type":"assistant","uuid":"g3"',  # truncated tail, NO trailing newline
+            ]
+            f.write_text("\n".join(lines), encoding="utf-8")
+            out = _parse(f)
+            self.assertEqual(out["partial_tail_lines"], 1)
+            pe = [e for e in out["events"] if e["event_subtype"] == "parse_error"]
+            self.assertEqual(len(pe), 1)
+
+
+class CclogLayoutTests(unittest.TestCase):
+    """New real-layout detectors: detect_kind + scope_of."""
+
+    def _k(self, *parts):
+        return jw_cclog.detect_kind(parts)
+
+    def _s(self, *parts):
+        return jw_cclog.scope_of(parts)
+
+    def test_main_transcript(self):
+        parts = ("-Users-jahn-x", f"{_UUID}.jsonl")
+        self.assertEqual(self._k(*parts), "main_transcript")
+        sc = self._s(*parts)
+        self.assertEqual(sc["project"], "-Users-jahn-x")  # leading-dash slug preserved
+        self.assertEqual(sc["session_id"], _UUID)
+
+    def test_subagent_and_meta(self):
+        t = ("slug", _UUID, "subagents", "agent-a0ebe0ed54597e120.jsonl")
+        self.assertEqual(self._k(*t), "subagent_transcript")
+        sc = self._s(*t)
+        self.assertEqual(sc["agent_id"], "a0ebe0ed54597e120")
+        self.assertEqual(sc["session_id"], _UUID)
+        m = ("slug", _UUID, "subagents", "agent-a0ebe0ed54597e120.meta.json")
+        self.assertEqual(self._k(*m), "subagent_meta")
+        self.assertEqual(self._s(*m)["agent_id"], "a0ebe0ed54597e120")
+
+    def test_workflow_subagent(self):
+        t = ("slug", _UUID, "subagents", "workflows", "wf_abc123", "agent-a1b2c3.jsonl")
+        self.assertEqual(self._k(*t), "workflow_subagent_transcript")
+        sc = self._s(*t)
+        self.assertEqual(sc["workflow_id"], "wf_abc123")
+        self.assertEqual(sc["agent_id"], "a1b2c3")
+
+    def test_workflow_json_and_script(self):
+        self.assertEqual(self._k("slug", _UUID, "workflows", "wf_abc123.json"), "workflow_json")
+        self.assertEqual(self._s("slug", _UUID, "workflows", "wf_abc123.json")["workflow_id"], "wf_abc123")
+        self.assertEqual(self._k("slug", _UUID, "workflows", "scripts", "run.js"), "workflow_script")
+        # a workflow journal is a known manifest-only kind, NOT unknown_jsonl
+        self.assertEqual(self._k("slug", _UUID, "subagents", "workflows", "wf_x", "journal.jsonl"),
+                         "workflow_journal")
+
+    def test_tool_result_and_memory(self):
+        self.assertEqual(self._k("slug", _UUID, "tool-results", "toolu_x.txt"), "tool_result")
+        self.assertEqual(self._k("slug", "memory", "note.md"), "memory")
+        self.assertIsNone(self._s("slug", "memory", "note.md")["session_id"])
+
+    def test_unknown(self):
+        self.assertEqual(self._k("slug", "random.jsonl"), "unknown_jsonl")  # non-uuid stem
+        self.assertEqual(self._k("slug", _UUID, "weird.bin"), "unknown_other")
+
+
+class ImproveDiscoveryTests(unittest.TestCase):
+    """Discovery over a fake projects tree: layout mapping + --source/--project filters."""
+
+    def _tree(self, src: Path):
+        (src / "slug-a").mkdir(parents=True)
+        _write_jsonl(src / "slug-a" / f"{_UUID}.jsonl",
+                     [{"type": "user", "uuid": "x", "message": {"role": "user", "content": "hi"}}])
+        # a spurious project: a dir with no transcript (only a tool-result artifact)
+        (src / "slug-b" / _UUID / "tool-results").mkdir(parents=True)
+        (src / "slug-b" / _UUID / "tool-results" / "toolu_1.txt").write_text("data")
+
+    def test_discover_all_and_project_filter(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "projects"
+            self._tree(src)
+            kinds_all = sorted(k for _, _, k in jw_improve.discover([src], set()))
+            self.assertIn("main_transcript", kinds_all)
+            self.assertIn("tool_result", kinds_all)
+            only_a = jw_improve.discover([src], {"slug-a"})
+            self.assertEqual([k for _, _, k in only_a], ["main_transcript"])
+            # a spurious project surfaces as zero transcripts, no special-casing
+            only_b = jw_improve.discover([src], {"slug-b"})
+            self.assertEqual([k for _, _, k in only_b], ["tool_result"])
+
+    def test_cli_default_out_honors_home(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "projects"
+            self._tree(src)
+            home = Path(d) / "home"
+            home.mkdir()
+
+            def run():
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = jw_improve.main(["trace", "--source", str(src)])
+                return rc
+
+            rc = _run_with_home(home, run)
+            self.assertEqual(rc, 0)
+            out_dir = home / ".claude" / "jahns-workflow" / "improve"
+            self.assertTrue((out_dir / "sessions.jsonl").is_file())
+            self.assertTrue((out_dir / "parse_coverage.json").is_file())
+
+
+class ImproveTraceTests(unittest.TestCase):
+    """End-to-end trace: schema, provenance, verification/retry classification, determinism."""
+
+    def _fixture(self, src: Path):
+        slug = src / "-Users-jahn-demo"
+        (slug / _UUID / "subagents").mkdir(parents=True)
+        aid = "a1b2c3d4e5f6a7b8c"
+
+        def asst(uuid, req, blocks, model="claude-opus-4-8", ts=None):
+            msg = {"model": model, "content": blocks, "usage": {"input_tokens": 10, "output_tokens": 5}}
+            r = {"type": "assistant", "uuid": uuid, "requestId": req, "message": msg}
+            if ts:
+                r["timestamp"] = ts
+            return r
+
+        def bash(uuid, req, tuid, cmd, ts=None):
+            return asst(uuid, req, [{"type": "tool_use", "id": tuid, "name": "Bash",
+                                     "input": {"command": cmd}}], ts=ts)
+
+        def result(uuid, tuid, is_error=False, tur=None):
+            r = {"type": "user", "uuid": uuid,
+                 "message": {"role": "user", "content": [
+                     {"type": "tool_result", "tool_use_id": tuid, "content": "out", "is_error": is_error}]}}
+            if tur is not None:
+                r["toolUseResult"] = tur
+            return r
+
+        main_records = [
+            {"type": "user", "uuid": "u1", "cwd": "/repo", "gitBranch": "dev",
+             "timestamp": "2026-07-01T00:00:00Z",
+             "message": {"role": "user", "content": "please implement"}},               # 1 turn
+            bash("a1", "r1", "toolu_pytest", "uv run pytest tests/ -x"),                  # 2 verification
+            result("t1", "toolu_pytest", is_error=False),                                # 3
+            bash("a2", "r2", "toolu_build", "make build"),                               # 4 build
+            result("t2", "toolu_build", is_error=False),                                 # 5
+            bash("a3", "r3", "toolu_rt1", "python run_thing.py"),                        # 6 retry chain
+            result("t3", "toolu_rt1", is_error=True),                                    # 7
+            bash("a4", "r4", "toolu_rt2", "python run_thing.py"),                        # 8
+            result("t4", "toolu_rt2", is_error=True),                                    # 9
+            bash("a5", "r5", "toolu_rt3", "python run_thing.py"),                        # 10
+            result("t5", "toolu_rt3", is_error=True),                                    # 11
+            asst("a6", "r6", [{"type": "tool_use", "id": "toolu_agent", "name": "Agent",
+                               "input": {"subagent_type": "Explore", "model": "sonnet",
+                                         "prompt": "go explore"}}], ts="2026-07-01T00:05:00Z"),  # 12
+            result("t6", "toolu_agent", is_error=False,
+                   tur={"agentId": aid, "resolvedModel": "claude-sonnet-4-5",
+                        "status": "completed", "isAsync": False}),                       # 13
+            {"type": "user", "uuid": "usr", "message": {"role": "user",
+             "content": "<system-reminder>ignore me</system-reminder>"}},               # 14 not a turn
+            {"type": "mode", "mode": "default"},                                          # 15 state record
+        ]
+        # append a truncated (partial) tail line, no trailing newline
+        parts = [_json.dumps(r) for r in main_records] + ['{"type":"assistant","uuid":"trunc"']
+        (slug / f"{_UUID}.jsonl").write_text("\n".join(parts), encoding="utf-8")
+
+        # linked subagent transcript + meta (so linked_transcript resolves and agent_meta populates)
+        sub = slug / _UUID / "subagents" / f"agent-{aid}.jsonl"
+        _write_jsonl(sub, [
+            {"type": "user", "uuid": "s1", "isSidechain": True,
+             "message": {"role": "user", "content": "do explore"}},
+            {"type": "assistant", "uuid": "s2", "isSidechain": True, "requestId": "sr",
+             "message": {"id": "sm", "model": "claude-sonnet-4-5",
+                         "content": [{"type": "text", "text": "done"}],
+                         "usage": {"input_tokens": 5, "output_tokens": 5}}},
+        ])
+        (slug / _UUID / "subagents" / f"agent-{aid}.meta.json").write_text(
+            _json.dumps({"agentType": "Explore", "description": "exploring", "spawnDepth": 1}),
+            encoding="utf-8")
+        return aid
+
+    def _load(self, out_dir: Path):
+        sessions = [_json.loads(ln) for ln in
+                    (out_dir / "sessions.jsonl").read_text().splitlines() if ln]
+        dels = [_json.loads(ln) for ln in
+                (out_dir / "delegations.jsonl").read_text().splitlines() if ln]
+        cov = _json.loads((out_dir / "parse_coverage.json").read_text())
+        return sessions, dels, cov
+
+    def test_trace_schema_and_provenance(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "projects"
+            src.mkdir()
+            aid = self._fixture(src)
+            out = Path(d) / "out"
+            jw_improve.run_trace([src], set(), out)
+            sessions, dels, cov = self._load(out)
+
+            self.assertEqual(cov["row_totals"], {"sessions": 2, "delegations": 1})
+            main = [s for s in sessions if s["kind"] == "main"][0]
+            sub = [s for s in sessions if s["kind"] == "subagent"][0]
+
+            # explicit reads
+            self.assertEqual(main["project"], "-Users-jahn-demo")
+            self.assertEqual(main["session_id"], _UUID)
+            self.assertEqual(main["cwd"], "/repo")
+            self.assertEqual(main["git_branch"], "dev")
+            self.assertEqual(main["started_at"], "2026-07-01T00:00:00Z")
+            self.assertEqual(main["ended_at"], "2026-07-01T00:05:00Z")
+            self.assertIn("opus-4-8", main["models"])
+            self.assertEqual(main["errors"], {"api": 0, "tool": 3, "parse": 0})
+            self.assertEqual(main["delegations"], 1)
+
+            # inferred labels carry rule + provenance
+            self.assertEqual(main["turns"], {"value": 1, "provenance": "inferred", "rule": "turn-index-v1"})
+            self.assertEqual(main["tools"]["provenance"], "inferred")
+            self.assertEqual(main["tools"]["rule"], "tool-category-v1")
+
+            # verification: pytest classified, evidence pointer line accurate
+            self.assertEqual(main["verification"]["runs"], 1)
+            self.assertEqual(main["verification"]["failed"], 0)
+            self.assertEqual(main["verification"]["provenance"], "inferred")
+            self.assertEqual(main["verification"]["examples"][0]["line"], 2)
+            self.assertEqual(main["verification"]["examples"][0]["head"], "uv run pytest tests/ -x")
+            # build tracked separately
+            self.assertEqual(main["build"]["runs"], 1)
+            # non-matching shell counted, never force-classified
+            self.assertEqual(main["unclassified_shell"], 3)
+
+            # retry loop: 3 same-cmd re-runs after is_error
+            self.assertEqual(main["retry_loops"]["count"], 1)
+            self.assertEqual(main["retry_loops"]["rule"], "same-cmd-refail-v1")
+            self.assertEqual(main["retry_loops"]["examples"][0]["line"], 6)
+
+            # subagent agent_meta from meta.json (explicit)
+            self.assertEqual(sub["agent_id"], aid)
+            self.assertEqual(sub["agent_meta"],
+                             {"agentType": "Explore", "description": "exploring", "spawnDepth": 1})
+            self.assertIsNone(main["agent_meta"])
+
+            # delegation row
+            self.assertEqual(len(dels), 1)
+            dl = dels[0]
+            self.assertEqual(dl["tool"], "Agent")
+            self.assertEqual(dl["subagent_type"], "Explore")
+            self.assertEqual(dl["model_requested"], "sonnet")
+            self.assertEqual(dl["resolved_model"], "claude-sonnet-4-5")
+            self.assertEqual(dl["agent_id"], aid)
+            self.assertEqual(dl["status"], "completed")
+            self.assertEqual(dl["is_async"], False)
+            self.assertEqual(dl["line"], 12)
+            self.assertTrue(dl["linked_transcript"].endswith(f"agent-{aid}.jsonl"))
+
+            # coverage: partial tail counted separately from parse errors
+            self.assertGreaterEqual(cov["partial_tail_lines"], 1)
+            self.assertEqual(cov["record_parse_errors"], 0)
+            self.assertEqual(cov["files_by_kind"]["main_transcript"], 1)
+            self.assertEqual(cov["files_by_kind"]["subagent_transcript"], 1)
+            self.assertEqual(cov["parser_version"], jw_cclog.PARSER_VERSION)
+
+    def test_byte_identical_reruns(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "projects"
+            src.mkdir()
+            self._fixture(src)
+            out1, out2 = Path(d) / "o1", Path(d) / "o2"
+            jw_improve.run_trace([src], set(), out1)
+            jw_improve.run_trace([src], set(), out2)
+            for name in ("sessions.jsonl", "delegations.jsonl", "parse_coverage.json"):
+                self.assertEqual((out1 / name).read_bytes(), (out2 / name).read_bytes(),
+                                 f"{name} not byte-identical across re-runs")
 
 
 if __name__ == "__main__":

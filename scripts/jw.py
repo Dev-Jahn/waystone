@@ -15,6 +15,7 @@ Groups:
   review   freeze|status|ingest ...  SHA-bound review cycles (PR mode); ingest = byte-exact reply copy
   approve  --pr N --sha X            SHA-bound human approval
   round    merge --pr N ...          deterministic merge guard
+  improve  trace [--source D] ...    parse CC session logs -> sessions/delegations/coverage
 
 Existing hook/skill call sites that invoke jw_<name>.py directly keep working; this is an
 additive convenience front door (GPT review: consolidate under one `jw` CLI).
@@ -49,6 +50,9 @@ def main(argv: list[str]) -> int:
     if group == "review":
         import jw_review
         return jw_review.main(rest)
+    if group == "improve":
+        import jw_improve
+        return jw_improve.main(rest)
     if group == "remote":
         import importlib
         mod = importlib.import_module("jw_remote")
