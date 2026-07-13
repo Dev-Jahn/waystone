@@ -8,6 +8,7 @@
   jw improve trace   [--source DIR]... [--project SLUG]... [--out DIR]
   jw improve reviews [--out DIR]
   jw improve audit   [--in DIR]
+  jw improve decide  <rec-id> accept|reject [--title T] [--note N] [--out DIR]
 
 `trace` walks each source (default `$CLAUDE_CONFIG_DIR/projects`, else `~/.claude/projects`),
 streams every transcript file line-by-line through jw_cclog, and emits three regenerable artifacts
@@ -28,7 +29,15 @@ re-implements review ingest) into --out:
   facts.json            8 lenses, each carrying rule id + provenance + <=5 evidence pointers;
                         missing inputs are reported in `skipped_lenses`.
 
-Outputs are byte-identical across re-runs of the same input (no run timestamp; stable ordering;
+`decide` appends the user's accept/reject on one recommendation to an append-only log (out dir default
+= trace's --out); it is the only `improve` output that carries a timestamp (a user-action log, not a
+derived projection):
+  decisions.jsonl       {rec_id, decision, at (ISO-8601), title?, note?} per line; re-decisions append
+                        (history preserved, latest row for a rec_id wins). rec_id must be
+                        <lens>/<kebab-gist>.
+
+The projection outputs (trace/reviews/audit) are byte-identical across re-runs of the same input
+(no run timestamp; stable ordering;
 sort_keys on every dump). Semantic labels carry provenance: rule-derived values are `inferred` with a
 versioned `rule` id, unresolvable values are `{"provenance": "unknown"}`, and structurally parsed
 severities are `explicit` (never keyword-guessed from prose). Content (prompts/commands/file bodies)
@@ -41,6 +50,7 @@ import os
 import re
 import sys
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -840,6 +850,29 @@ def run_audit(in_dir: Path) -> dict:
     return facts
 
 
+# ================================================================== decide (§11)
+# Append-only record of the user's accept/reject on each improve recommendation. Unlike the trace/
+# reviews/audit projections (byte-identical across re-runs), this is a user-action log, so an ISO-8601
+# `at` timestamp is intentional — it feeds the rejection-rate metric and the next improve cycle. A
+# re-decision appends a new row (history preserved; the latest row for a rec_id is the effective one).
+# rec_id is minted by the skill as `<lens>/<kebab-gist>` so the same recommendation keeps a stable id
+# across cycles; the pattern below enforces exactly that shape (conservative — one slash, snake_case
+# lens, kebab-case gist, all lowercase).
+_REC_ID_RE = re.compile(r"^[a-z][a-z0-9_]*/[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def run_decide(rec_id: str, decision: str, title: str | None, note: str | None, out_dir: Path) -> dict:
+    record = {"rec_id": rec_id, "decision": decision, "at": datetime.now(timezone.utc).isoformat()}
+    if title is not None:
+        record["title"] = title
+    if note is not None:
+        record["note"] = note
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with (out_dir / "decisions.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(_dumps(record) + "\n")
+    return record
+
+
 # ------------------------------------------------------------------ CLI
 def _parse_trace_args(argv: list[str]) -> tuple[list[str], set[str], str | None]:
     sources: list[str] = []
@@ -954,9 +987,58 @@ def _cli_audit(argv: list[str]) -> int:
     return 0
 
 
+def _parse_decide_args(argv: list[str]) -> tuple[str, str, str | None, str | None, str | None]:
+    positionals: list[str] = []
+    title = note = out = None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--title", "--note", "--out"):
+            if i + 1 >= len(argv):
+                raise WorkflowError(f"{a} requires a value")
+            val = argv[i + 1]
+            if a == "--title":
+                title = val
+            elif a == "--note":
+                note = val
+            else:
+                out = val
+            i += 2
+        elif a.startswith("--"):
+            raise WorkflowError(f"unexpected argument {a!r}")
+        else:
+            positionals.append(a)
+            i += 1
+    if len(positionals) != 2:
+        raise WorkflowError("expected <rec-id> accept|reject")
+    rec_id, decision = positionals
+    if decision not in ("accept", "reject"):
+        raise WorkflowError(f"decision must be accept|reject, got {decision!r}")
+    if not _REC_ID_RE.match(rec_id):
+        raise WorkflowError(f"invalid rec-id {rec_id!r} (expected <lens>/<kebab-gist>)")
+    return rec_id, decision, title, note, out
+
+
+def _cli_decide(argv: list[str]) -> int:
+    try:
+        rec_id, decision, title, note, out = _parse_decide_args(argv)
+    except WorkflowError as e:
+        print(f"jw improve decide: {e}", file=sys.stderr)
+        return 1
+    out_dir = Path(out).expanduser() if out else _default_out()
+    try:
+        rec = run_decide(rec_id, decision, title, note, out_dir)
+    except OSError as e:
+        print(f"jw improve decide: cannot write decision — {e}", file=sys.stderr)
+        return 2
+    print(f"jw improve decide: recorded {rec['decision']} for {rec['rec_id']} "
+          f"-> {out_dir / 'decisions.jsonl'}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     if not argv:
-        print("jw improve: expected subcommand (trace|reviews|audit)\n" + __doc__, file=sys.stderr)
+        print("jw improve: expected subcommand (trace|reviews|audit|decide)\n" + __doc__, file=sys.stderr)
         return 1
     sub, rest = argv[0], argv[1:]
     if sub == "trace":
@@ -965,7 +1047,9 @@ def main(argv: list[str]) -> int:
         return _cli_reviews(rest)
     if sub == "audit":
         return _cli_audit(rest)
-    print(f"jw improve: unknown subcommand {sub!r} (expected trace|reviews|audit)\n" + __doc__,
+    if sub == "decide":
+        return _cli_decide(rest)
+    print(f"jw improve: unknown subcommand {sub!r} (expected trace|reviews|audit|decide)\n" + __doc__,
           file=sys.stderr)
     return 1
 

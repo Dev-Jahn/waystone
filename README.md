@@ -21,6 +21,7 @@ Full convention: [references/conventions.md](references/conventions.md).
 | `/jahns-workflow:round` | Close a round: sync the registry, append PROGRESS, regenerate views, write the review request. |
 | `/jahns-workflow:review` | Ingest a reviewer's reply verbatim, verify each finding, register the real ones as tasks. |
 | `/jahns-workflow:status` | Cross-project dashboard (branches, rounds, active/blocked tasks); projects can be local or remote. |
+| `/jahns-workflow:improve` | Advisory report over your Claude Code history + review evidence: provenance-labeled recommendations you accept or reject (recorded, never auto-applied). |
 | `jw task` CLI | Read and mutate the registry without opening the whole file: `list`/`show`, `add`/`set`/`drop` (validated, comment-preserving), `archive` (move old done/dropped tasks to `tasks.archive.yaml`). |
 | SessionStart hook | Injects the digest + active tasks on start/resume/compact. No-op outside an initialized project. |
 | PreToolUse hook | Redirects a raw read of `tasks.yaml` to the `jw task` CLI; `cat` stays as an escape hatch. |

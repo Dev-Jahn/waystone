@@ -2337,5 +2337,95 @@ class ImproveAuditTests(unittest.TestCase):
             self.assertEqual(first, (d / "facts.json").read_bytes())
 
 
+class ImproveDecideTests(unittest.TestCase):
+    """Append-only user-decision log for improve recommendations (synthetic fixtures)."""
+
+    def _lines(self, path: Path):
+        return [_json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+    def test_append_shape(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "improve"
+            rc = jw_improve.main(
+                ["decide", "main_direct_work/heavy-mains", "accept",
+                 "--title", "delegate heavy mains", "--note", "seen in 3 sessions", "--out", str(out)])
+            self.assertEqual(rc, 0)
+            lines = self._lines(out / "decisions.jsonl")
+            self.assertEqual(len(lines), 1)
+            rec = lines[0]
+            self.assertEqual(rec["rec_id"], "main_direct_work/heavy-mains")
+            self.assertEqual(rec["decision"], "accept")
+            self.assertEqual(rec["title"], "delegate heavy mains")
+            self.assertEqual(rec["note"], "seen in 3 sessions")
+            # `at` is an ISO-8601 timestamp (allowed here — user-action log, not a derived artifact)
+            from datetime import datetime
+            datetime.fromisoformat(rec["at"])
+
+    def test_optional_fields_omitted(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "improve"
+            rc = jw_improve.main(["decide", "retry_loops/same-cmd", "reject", "--out", str(out)])
+            self.assertEqual(rc, 0)
+            rec = self._lines(out / "decisions.jsonl")[0]
+            self.assertNotIn("title", rec)
+            self.assertNotIn("note", rec)
+            self.assertEqual(rec["decision"], "reject")
+
+    def test_redecision_appends_history_latest_wins(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "improve"
+            rid = "verification_debt/add-verify"
+            self.assertEqual(jw_improve.main(["decide", rid, "reject", "--out", str(out)]), 0)
+            self.assertEqual(jw_improve.main(["decide", rid, "accept", "--out", str(out)]), 0)
+            lines = self._lines(out / "decisions.jsonl")
+            self.assertEqual(len(lines), 2)  # both preserved (append-only history)
+            self.assertEqual([l["decision"] for l in lines], ["reject", "accept"])
+            self.assertTrue(all(l["rec_id"] == rid for l in lines))
+            latest = [l for l in lines if l["rec_id"] == rid][-1]
+            self.assertEqual(latest["decision"], "accept")  # latest row is the effective decision
+
+    def test_missing_and_invalid_args(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "improve"
+            # missing decision verb
+            self.assertEqual(jw_improve.main(["decide", "main_direct_work/x", "--out", str(out)]), 1)
+            # decision must be accept|reject
+            self.assertEqual(jw_improve.main(["decide", "main_direct_work/x", "maybe", "--out", str(out)]), 1)
+            # rec-id must be <lens>/<kebab-gist> (single slash)
+            self.assertEqual(jw_improve.main(["decide", "noslash", "accept", "--out", str(out)]), 1)
+            # no uppercase / non-kebab gist
+            self.assertEqual(jw_improve.main(["decide", "Lens/Bad_Gist", "accept", "--out", str(out)]), 1)
+            # gist may not end in a hyphen
+            self.assertEqual(jw_improve.main(["decide", "lens/bad-", "accept", "--out", str(out)]), 1)
+            # unknown flag rejected
+            self.assertEqual(jw_improve.main(["decide", "lens/ok", "accept", "--bogus", "x", "--out", str(out)]), 1)
+            # a precondition failure never creates the log
+            self.assertFalse((out / "decisions.jsonl").exists())
+
+    def test_out_override_and_home_default(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            home = d / "home"
+            (home / ".claude" / "jahns-workflow").mkdir(parents=True)
+
+            def run():
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    return jw_improve.main(["decide", "context_heavy/trim", "accept"])
+            rc = _run_with_home(home, run)
+            self.assertEqual(rc, 0)
+            default_log = home / ".claude" / "jahns-workflow" / "improve" / "decisions.jsonl"
+            self.assertTrue(default_log.is_file())  # default --out honors HOME
+
+            explicit = d / "elsewhere"
+            rc2 = _run_with_home(home, lambda: jw_improve.main(
+                ["decide", "context_heavy/trim", "reject", "--out", str(explicit)]))
+            self.assertEqual(rc2, 0)
+            self.assertTrue((explicit / "decisions.jsonl").is_file())  # override lands elsewhere
+            self.assertEqual(len(self._lines(default_log)), 1)  # default log untouched by the override
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
