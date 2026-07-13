@@ -113,6 +113,14 @@ def validate(data: object) -> list[str]:
             v = t.get(field)
             if v is not None and not isinstance(v, str):
                 errs.append(f"{loc}.{field}: must be a string")
+        acc = t.get("accept")
+        if acc is not None:
+            if not isinstance(acc, list):
+                errs.append(f"{loc}.accept: must be a list of free-text acceptance criteria (strings)")
+            else:
+                for a in acc:
+                    if not isinstance(a, str):
+                        errs.append(f"{loc}.accept: each criterion must be a string, got {a!r}")
         lane = t.get("lane")
         if lane is not None:
             if not isinstance(lane, dict):

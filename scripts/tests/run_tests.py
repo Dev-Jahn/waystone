@@ -2909,5 +2909,51 @@ class ImproveM1DefectTests(unittest.TestCase):
             self.assertEqual(ch["max_result_bytes"], len(big.encode("utf-8")))
 
 
+class AcceptFieldTests(unittest.TestCase):
+    """0.8.0 M1: the optional task `accept` field (YAML list of acceptance criteria) — validated by
+    jw_validate, but NOT settable via `jw task add/set` (comma-split would distort free text)."""
+
+    def test_validate_accepts_string_list(self):
+        data = {"version": 1, "project": "x", "tasks": [
+            {"id": "feat/alpha", "title": "a valid task here", "status": "active",
+             "accept": ["uv run pytest passes", "no new ruff findings"]}]}
+        self.assertEqual(jw_validate.validate(data), [])
+
+    def test_validate_rejects_non_list_accept(self):
+        data = {"version": 1, "project": "x", "tasks": [
+            {"id": "feat/alpha", "title": "a valid task here", "status": "active",
+             "accept": "just a string"}]}
+        errs = jw_validate.validate(data)
+        self.assertTrue(any("accept" in e for e in errs))
+
+    def test_validate_rejects_non_str_element(self):
+        data = {"version": 1, "project": "x", "tasks": [
+            {"id": "feat/alpha", "title": "a valid task here", "status": "active",
+             "accept": ["ok", 42]}]}
+        errs = jw_validate.validate(data)
+        self.assertTrue(any("accept" in e for e in errs))
+
+    def test_task_add_rejects_accept_flag(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / "tasks.yaml").write_text(TASKS_FIXTURE)
+            before = (root / "tasks.yaml").read_text()
+            rc = jw_tasks.main(["add", "feat/new", str(root), "--title",
+                                "a fresh task here", "--accept", "some criterion"])
+            self.assertEqual(rc, 1)
+            self.assertEqual((root / "tasks.yaml").read_text(), before)  # nothing written
+
+    def test_task_set_rejects_accept_field(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / "tasks.yaml").write_text(TASKS_FIXTURE)
+            before = (root / "tasks.yaml").read_text()
+            rc = jw_tasks.main(["set", "feat/alpha", "accept", "some criterion", str(root)])
+            self.assertEqual(rc, 1)
+            self.assertEqual((root / "tasks.yaml").read_text(), before)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -45,6 +45,12 @@ _FIELD_ORDER = ("title", "status", "severity", "milestone", "deps",
 # task fields whose value is a YAML list, set from a comma-separated CLI value (like `add --deps`)
 _LIST_FIELDS = ("deps",)
 
+# `accept` is a YAML list of free-text acceptance criteria (0.8.0 delegation). It is NOT settable
+# through add/set: comma-splitting a free-text criterion would silently distort it, so the registry's
+# `accept` is edited in tasks.yaml directly (writes are validated) or supplied via `jw delegate --accept`.
+ACCEPT_REJECT_MSG = ("accept is a YAML list of free-text criteria — edit tasks.yaml directly "
+                     "(writes are validated) or pass --accept at delegation time")
+
 
 # ---- pure helpers ------------------------------------------------------------
 def _tasks(data: dict) -> list[dict]:
@@ -274,7 +280,8 @@ def cmd_archive(root: Path, threshold: int, keep: int) -> int:
 
 # ---- arg parsing + dispatch --------------------------------------------------
 _VALUE_FLAGS = {"title", "status", "severity", "deps", "milestone", "anchor", "origin",
-                "branch", "notes", "round", "ruling", "result", "type", "threshold", "keep"}
+                "branch", "notes", "round", "ruling", "result", "type", "threshold", "keep",
+                "accept"}  # accept is recognized only to reject it cleanly (see ACCEPT_REJECT_MSG)
 
 
 def _split(rest: list[str]) -> tuple[list[str], dict]:
@@ -340,6 +347,9 @@ def main(argv: list[str]) -> int:
         if not pos:
             print("jw task add: <id> required", file=sys.stderr)
             return 1
+        if "accept" in opts:
+            print(f"jw task add: {ACCEPT_REJECT_MSG}", file=sys.stderr)
+            return 1
         if not opts.get("title"):
             print("jw task add: --title is required", file=sys.stderr)
             return 1
@@ -356,6 +366,9 @@ def main(argv: list[str]) -> int:
     if sub == "set":
         if len(pos) < 3:
             print("jw task set: <id> <field> <value> required", file=sys.stderr)
+            return 1
+        if pos[1] == "accept":
+            print(f"jw task set: {ACCEPT_REJECT_MSG}", file=sys.stderr)
             return 1
         root = need_root(pos[3] if len(pos) > 3 else None)
         if root is None:
