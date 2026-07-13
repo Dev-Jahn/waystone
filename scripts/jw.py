@@ -15,10 +15,10 @@ Groups:
   review   freeze|status|ingest ...  SHA-bound review cycles (PR mode); ingest = byte-exact reply copy
   approve  --pr N --sha X            SHA-bound human approval
   round    merge --pr N ...          deterministic merge guard
-  improve  trace|reviews|audit|decide|evidence ...  parse CC logs / review evidence / audit / decisions
-  delegate run|status|show|apply|discard|verify ...  hand a task to an external runner in a worktree
+  improve  trace|reviews|evidence|audit|decide ...  project logs + reviews + task-id evidence / decisions
+  delegate run|status|show|verify|apply|discard ...  worktree runner + independent verifier evidence
   overlay  add|list|show|promote|demote|suspend|retire|replay ...  project-local adaptive warn deltas
-  check    [--root]                   evaluate active overlay deltas at an explicit boundary (never blocks)
+  check    [--root DIR]               evaluate active overlay deltas at an explicit boundary (never blocks)
 
 Existing hook/skill call sites that invoke jw_<name>.py directly keep working; this is an
 additive convenience front door (GPT review: consolidate under one `jw` CLI).

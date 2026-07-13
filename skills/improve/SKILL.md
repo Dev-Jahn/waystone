@@ -7,34 +7,38 @@ argument-hint: "[--source DIR] [--project SLUG] (optional — defaults to all yo
 # jahns-workflow: improve
 
 Produce an **advisory** workflow-improvement report grounded in the user's actual Claude Code
-history and review evidence. This version only advises: it shows recommendations with their
-evidence and records each accept/reject — it never changes config or code automatically.
+history and review evidence. Record each accept/reject. For the small finite set of mapped
+recommendations, separately offer an observation-only overlay; never materialize one without a
+second explicit consent.
 
 Plugin root = two directories above this skill's base directory. `improve` reads global logs and
 the project registry, so it does **not** require the current directory to be an initialized project.
 
 ## Step 1 — Collect the evidence (deterministic)
 
-Run the three deterministic projections in order (each writes into the improve out dir, default
+Run the four deterministic projections in order (each writes into the improve out dir, default
 `~/.claude/jahns-workflow/improve/`):
 
 ```bash
 uv run <plugin-root>/scripts/jw.py improve trace
 uv run <plugin-root>/scripts/jw.py improve reviews
+uv run <plugin-root>/scripts/jw.py improve evidence
 uv run <plugin-root>/scripts/jw.py improve audit
 ```
 
 - Default source is every Claude Code log (`$CLAUDE_CONFIG_DIR/projects`, else `~/.claude/projects`).
   When the user names targets, pass them through unchanged:
-  `improve trace --source <DIR> --project <SLUG>` (both repeatable). `reviews`/`audit` follow.
+  `improve trace --source <DIR> --project <SLUG>` (both repeatable), and pass each selected project
+  to `improve evidence --project <SLUG>`. `reviews` scans the registry; `audit` reads the shared out dir.
 - These are free, deterministic, and re-runnable — do **not** re-implement any of their parsing in
   the model; run the scripts and read their outputs.
 - `reviews` scans the registered projects; any it cannot reach are listed in
   `reviews_coverage.json` (not silently dropped) — carry that into the report's coverage note.
 - If a prior `decisions.jsonl` already exists in the out dir, read it now — Step 4 needs it.
 
-The audit step writes `facts.json`: 8 lenses, each carrying a rule id, provenance, per-project
-numbers, and ≤5 evidence pointers. That file is your **only** source of claims. If trace found no
+The audit step writes `facts.json`: the 8 audit lenses plus `evidence_link` when evidence.jsonl is
+present, each carrying a rule id, provenance, per-project numbers, and ≤5 evidence pointers. That
+file is your **only** source of claims. If trace found no
 sessions (empty corpus) or audit reports `skipped_lenses`, say so plainly rather than inventing
 findings — an empty history is a finding in itself.
 
@@ -50,9 +54,12 @@ Read `facts.json` and derive recommendations. HARD rules (invariant #11):
 - **State report-confidence limits.** When `coverage_caveats` is non-trivial (parse errors, skipped
   files, partial tails, unknown record types), say so up front — the report is only as complete as
   the coverage allows.
-- **Open with an honest maturity framing.** When round/review evidence is thin (Bootstrap /
-  Calibrate), say so at the top and keep every recommendation **soft** — observation and suggestion,
-  not a rule to adopt. Do not manufacture personalization the data can't support.
+- **Open with an honest maturity framing.** Per project, when `review_association` reports
+  `rounds_with_feedback >= 5` and `findings_total >= 20`, label it
+  **"Tune — overlay proposals available"**. Otherwise retain Bootstrap / Calibrate framing and keep
+  every recommendation **soft** — observation and suggestion, not a rule to adopt. Do not
+  manufacture personalization the data can't support. Tune eligibility does not promote a delta;
+  the CLI still requires replay before warning.
 - **Context discipline.** Read `facts.json` (and the two small coverage jsons) ONLY. Never open
   `sessions.jsonl`/`delegations.jsonl` (multi-MB aggregates, not model input) and never open the raw
   transcripts behind evidence pointers — cite pointers as-is; the user inspects them on demand. If a
@@ -69,9 +76,37 @@ decision deterministically:
 uv run <plugin-root>/scripts/jw.py improve decide <rec-id> accept|reject [--title "..."] [--note "..."]
 ```
 
-**Approval is recording, nothing more.** This version applies nothing automatically. When the user
-accepts a recommendation, tell them concretely what *applying* it would involve — which file, which
-command, which habit to change — and stop there. The user applies it.
+**Approval is recording.** It does not itself materialize or apply anything. When the user accepts a
+recommendation, explain the concrete action. Then apply Step 3.5 only when the recommendation matches
+the finite mapping below.
+
+## Step 3.5 — Separately offer observation-only materialization
+
+For each accepted recommendation that matches this table, use a separate **AskUserQuestion**:
+"Store this as an overlay delta? It starts in observing (records only, no warning)." Ask once per
+recommendation. A no does nothing; the Step 3 decision is already recorded.
+
+| recommendation lens | overlay rule |
+|---|---|
+| `verification_debt/*` | `delegation-verification-evidence-v1` |
+| `review_association/*` only for an unresolved severe-finding pattern | `round-close-open-findings-v1` |
+
+This mapping is exhaustive. HARD: never map another lens or infer a new rule. On yes, fill every
+flag from facts already read and use the CLI only:
+
+```bash
+uv run <plugin-root>/scripts/jw.py overlay add <rec-id> --rule <mapped-rule> \
+  --summary "<observed numbers>" --pointers "<evidence pointer>" --from-rec <rec-id> \
+  --expected-effect "<bounded expectation>" --risk "<known friction>" \
+  --candidate-scope <project_candidate|user_candidate|unresolved> --observed-in <project-slug>
+```
+
+Never write delta JSON directly. After creation, explain that the delta can be considered for warning
+only after `jw overlay replay <rec-id>` and then `jw overlay promote <rec-id>`; do not run promotion
+as part of improve.
+
+When citing replay, report only that it "would have fired" and the estimated nuisance rate (which is
+null while unlabeled). Never use the quality-claim words **prevented**, **improved**, or **benefit**.
 
 ## Step 4 — Suppress re-nagging (stable rec ids)
 
@@ -84,13 +119,15 @@ re-ran the audit.
 
 ## Step 5 — Report
 
-Report in the user's configured language. Lead with the maturity framing, then list recommendations
+Report in the user's configured language. Lead with the per-project maturity framing, then list recommendations
 ordered by evidence strength and impact — each with its lens, numbers, evidence pointer, and
-strength label — and note any coverage caveats. Close by summarizing what was accepted vs rejected
-and where the decision log lives (`~/.claude/jahns-workflow/improve/decisions.jsonl`).
+strength label — and note any coverage caveats. Close by summarizing what was accepted vs rejected,
+which observation-only deltas (if any) were separately created, and where the decision log lives
+(`~/.claude/jahns-workflow/improve/decisions.jsonl`).
 
 End with the **next-step reminder**:
 
-> These are recommendations, not changes — nothing was applied. To act on an accepted item, do it
-> yourself (the report says exactly what each involves). Re-run `/jahns-workflow:improve` after a few
-> more rounds; your accept/reject decisions are remembered, so the next report focuses on what's new.
+> Recommendations were recorded, not applied. Any separately accepted overlay starts in observing
+> (records only, no warning); replay is required before warning promotion. Re-run
+> `/jahns-workflow:improve` after a few more rounds; decisions are remembered, so the next report
+> focuses on what's new.

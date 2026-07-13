@@ -22,15 +22,20 @@ Full convention: [references/conventions.md](references/conventions.md).
 | `/jahns-workflow:review` | Ingest a reviewer's reply verbatim, verify each finding, register the real ones as tasks. |
 | `/jahns-workflow:status` | Cross-project dashboard (branches, rounds, active/blocked tasks); projects can be local or remote. |
 | `/jahns-workflow:improve` | Advisory report over your Claude Code history + review evidence: provenance-labeled recommendations you accept or reject (recorded, never auto-applied). |
+| `/jahns-workflow:delegate` | Guided delegation: select a task, inspect labeled evidence, optionally run the independent verifier, then ask you to apply or discard. |
 | `jw task` CLI | Read and mutate the registry without opening the whole file: `list`/`show`, `add`/`set`/`drop` (validated, comment-preserving), `archive` (move old done/dropped tasks to `tasks.archive.yaml`). |
 | `jw delegate` CLI | Hand one task to an external runner in an isolated git worktree cut from an immutable snapshot of your current (even dirty) tree: `run`/`status`/`show`/`apply`/`discard`. The harness computes the patch from git; the runner's own report is carried through labeled as a claim; you `apply` (plain `git apply`) or `discard` after review. |
-| SessionStart hook | Injects the digest + active tasks on start/resume/compact. No-op outside an initialized project. |
+| `jw delegate verify` | Normalize the preserved worktree to the delegation base + result patch, then collect read-only `independent-verifier` evidence through the bound codex-companion model; state remains `needs-review`. |
+| `jw overlay` | Store project-local adaptive deltas and manage `observing`/`warning`/`suspended`/`retired`; warning promotion requires deterministic shadow replay. |
+| `jw check` | Evaluate all active overlay rules against current project state; warnings and evaluation errors are visible but never block the host command. |
+| `jw improve evidence` | Deterministically join review findings and delegation records by explicit task ID into plugin-local `evidence.jsonl`. |
+| SessionStart hook | Injects the main operating contract, digest, active tasks, and live delegation/overlay summary on start/resume/compact. No-op outside an initialized project. |
 | PreToolUse hook | Redirects a raw read of `tasks.yaml` to the `jw task` CLI; `cat` stays as an escape hatch. |
 | PostToolUse hook | Validates `tasks.yaml` on every edit and regenerates `ROADMAP.md`. |
 
 Rendering and validation are plain Python (`scripts/jw_*.py`, run with `uv`) — no LLM tokens. One
 front door, `jw <group>`, dispatches them
-(`validate/task/roadmap/ssot/status/remote/review/approve/round/lanes/resume/improve/delegate`).
+(`validate/task/roadmap/ssot/status/remote/review/approve/round/lanes/resume/improve/delegate/overlay/check`).
 
 ## Rounds
 
@@ -101,5 +106,6 @@ runtime only.
 ## Token cost
 
 Skills load only when invoked. Hooks are plain commands, no LLM. The one recurring cost is the
-SessionStart injection (digest capped at 150 lines, task summary at 8 per state), which replaces
-re-reading a large SSOT after every compaction.
+SessionStart injection (operating contract capped at 1200 characters, task summary at 8 per state,
+and the generated digest within the overall cap), which replaces re-reading a large SSOT after every
+compaction.

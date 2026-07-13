@@ -4936,5 +4936,55 @@ class ContractInjectTests(unittest.TestCase):
             self.assertLessEqual(len("\n".join(block)), 1200)
 
 
+class M2DocsTests(unittest.TestCase):
+    """0.8.0 M2 C7 — guided skills and public operating-surface documentation."""
+
+    def test_delegate_skill_preserves_provenance_and_user_acceptance(self):
+        text = (SCRIPTS.parent / "skills" / "delegate" / "SKILL.md").read_text()
+        self.assertIn("name: delegate", text)
+        self.assertIn("/jahns-workflow:delegate", text)
+        self.assertIn("delegate-claimed", text)
+        self.assertIn("independent-verifier", text)
+        self.assertIn("AskUserQuestion", text)
+        self.assertIn("delegate verify", text)
+        self.assertIn("apply", text)
+        self.assertIn("discard", text)
+        self.assertIn("runner.jsonl", text)
+
+    def test_improve_skill_has_finite_materialization_map_and_tune_gate(self):
+        text = (SCRIPTS.parent / "skills" / "improve" / "SKILL.md").read_text()
+        self.assertIn("Step 3.5", text)
+        self.assertIn("verification_debt/*", text)
+        self.assertIn("delegation-verification-evidence-v1", text)
+        self.assertIn("review_association/*", text)
+        self.assertIn("round-close-open-findings-v1", text)
+        self.assertIn("rounds_with_feedback >= 5", text)
+        self.assertIn("findings_total >= 20", text)
+        self.assertIn("Tune", text)
+        self.assertIn("jw.py overlay add", text)
+        self.assertIn("Never write delta JSON", text)
+        self.assertIn("prevented", text)
+        self.assertIn("improved", text)
+        self.assertIn("benefit", text)
+
+    def test_readme_and_front_door_name_all_new_surfaces(self):
+        readme = (SCRIPTS.parent / "README.md").read_text()
+        for surface in ("jw overlay", "jw check", "jw improve evidence", "jw delegate verify"):
+            self.assertIn(f"`{surface}`", readme)
+        import jw
+        for surface in ("improve", "evidence", "delegate", "verify", "overlay", "check"):
+            self.assertIn(surface, jw.__doc__)
+
+    def test_conventions_state_overlay_evidence_invariants_and_residence(self):
+        text = (SCRIPTS.parent / "references" / "conventions.md").read_text()
+        for phrase in (
+            "non-blocking", "least-restrictive", "task-id", "estimated nuisance rate",
+            "workspace-write", "read-only", "independent-verifier",
+            "~/.claude/jahns-workflow/overlay/", "~/.claude/jahns-workflow/exposure/",
+            "~/.claude/jahns-workflow/improve/evidence.jsonl",
+        ):
+            self.assertIn(phrase, text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

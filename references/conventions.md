@@ -154,6 +154,10 @@ brought back through an explicit artifact contract. The invariants:
   computed by the harness from git directly (explicit provenance). The runner's own report —
   verification it ran, limitations, risks, escalations (written to `JW_REPORT.yaml`) — is carried
   through the contract labeled *delegate-claimed* and is never promoted to fact.
+- **Role sandboxes are fixed, not user knobs.** The implementer runs `workspace-write`; the verifier
+  runs `read-only` through codex-companion. `jw delegate verify` records its payload as
+  *independent-verifier* evidence and leaves the delegation `needs-review` — only the user chooses
+  apply or discard.
 - **You accept or discard.** A finished delegation is `needs-review`, its worktree preserved so a
   verifier can run the acceptance criteria against the same base. `jw delegate apply` lands the
   patch on the live tree with plain `git apply` (it fails atomically if the tree has drifted from
@@ -171,3 +175,27 @@ Artifacts live plugin-local (`~/.claude/jahns-workflow/delegations/…`, worktre
 `~/.claude/jahns-workflow/worktrees/…`), never committed to the repo. The runner backend (model)
 is bound per role in `~/.claude/jahns-workflow/profile.yml`; a missing binding fails loud rather
 than guessing a default.
+
+## 9. Adaptive overlays, warnings, and evidence
+
+Adaptive policy is project-local and evidence-bearing:
+
+- **Exposure is recorded at execution time.** Delegation and round exposure records capture the
+  active profile binding and overlays that governed that event; they do not infer retrospective
+  policy.
+- **Evidence does not become a causal claim.** `jw improve evidence` joins review findings and
+  delegation records only through their explicit `task-id`. Unlinked findings remain reported as
+  provenance unknown. Shadow replay reports only how often a rule *would have fired*; the
+  **estimated nuisance rate** stays null until examples are labeled, and replay never claims a
+  prevented defect or benefit.
+- **Warnings are non-blocking.** `observing` records rule fires without stderr; `warning` records and
+  prints them. Neither a fire nor an evaluation error changes the host command's exit code. Promotion
+  to warning requires replay; enforcement is not part of this lifecycle.
+- **Relaxation is always open.** A delta may be demoted, suspended, or retired without a promotion
+  gate. If active deltas conflict on the same rule, the effective stage is **least-restrictive** and
+  the conflict is recorded as evidence for the next improve cycle.
+
+All artifacts remain plugin-local and are never committed: deltas and warning events under
+`~/.claude/jahns-workflow/overlay/`, per-event policy exposure under
+`~/.claude/jahns-workflow/exposure/`, and the deterministic join projection at
+`~/.claude/jahns-workflow/improve/evidence.jsonl`.
