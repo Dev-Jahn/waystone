@@ -53,6 +53,11 @@ Read `facts.json` and derive recommendations. HARD rules (invariant #11):
 - **Open with an honest maturity framing.** When round/review evidence is thin (Bootstrap /
   Calibrate), say so at the top and keep every recommendation **soft** — observation and suggestion,
   not a rule to adopt. Do not manufacture personalization the data can't support.
+- **Context discipline.** Read `facts.json` (and the two small coverage jsons) ONLY. Never open
+  `sessions.jsonl`/`delegations.jsonl` (multi-MB aggregates, not model input) and never open the raw
+  transcripts behind evidence pointers — cite pointers as-is; the user inspects them on demand. If a
+  fact seems to need more detail than facts.json carries, that is a lens-improvement finding to
+  report, not a license to read the lake.
 
 ## Step 3 — Present and record (approval = RECORDING only)
 
