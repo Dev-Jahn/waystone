@@ -20,6 +20,128 @@ from jw_common import git_branch_info, git_full_sha, load_config, load_tasks, ne
 MAX_CHARS = 8000
 MAX_TASK_LINES = 8
 MAX_START_HERE = 2560  # ~2.5KB cap on the injected re-entry narrative (read-time, never truncates the file)
+MAX_CONTRACT = 1200
+CONTRACT_PATH = Path(__file__).resolve().parents[2] / "references" / "main-contract.md"
+
+
+def _routing_line() -> str:
+    import jw_delegate
+
+    path = jw_delegate._profile_path()
+    if not path.is_file():
+        return "routing: no profile — jw delegate will guide setup"
+    try:
+        profile, _fingerprint = jw_delegate._load_profile()
+        bindings = profile.get("bindings")
+        if not isinstance(bindings, dict):
+            raise ValueError("bindings is not a mapping")
+        roles = sorted(bindings, key=lambda role: (role != "implementer", role))
+        rendered = []
+        for role in roles:
+            binding = bindings[role]
+            if isinstance(binding, dict) and isinstance(binding.get("backend"), str):
+                rendered.append(f"{role}→{binding['backend']}")
+        if not rendered:
+            raise ValueError("no readable bindings")
+        return "routing: " + " · ".join(rendered)
+    except Exception:  # noqa: BLE001 — one damaged live input must not break SessionStart
+        return "routing: — unreadable"
+
+
+def _overlay_line(root: Path) -> str:
+    try:
+        import jw_overlay
+        deltas = jw_overlay.list_deltas(root)
+        unreadable = any(d.get("corrupt") for d in deltas)
+        active = [d for d in deltas if not d.get("corrupt")
+                  and d.get("status") in ("observing", "warning")]
+        budget = 5
+        parts = []
+        for status in ("warning", "observing"):
+            ids = sorted(d["id"] for d in active if d.get("status") == status)
+            shown = ids[:budget]
+            budget -= len(shown)
+            suffix = f" ({' '.join(shown)}{' …' if len(ids) > len(shown) else ''})" if shown else ""
+            parts.append(f"{status} {len(ids)}{suffix}")
+        return "overlay: " + " · ".join(parts) + (" · — unreadable" if unreadable else "")
+    except Exception:  # noqa: BLE001
+        return "overlay: — unreadable"
+
+
+def _delegation_summary(root: Path) -> str:
+    try:
+        import jw_delegate
+        ids = []
+        unreadable = False
+        for did, rec in jw_delegate._iter_delegations(root):
+            status = jw_delegate._read_status_raw(rec)
+            if status is None:
+                unreadable = True
+            elif status.get("state") == "needs-review":
+                ids.append(did)
+        ids.sort()
+        shown = ids[:5]
+        suffix = f" ({' '.join(shown)}{' …' if len(ids) > len(shown) else ''})" if shown else ""
+        return f"needs-review delegations {len(ids)}{suffix}" + (" · — unreadable" if unreadable else "")
+    except Exception:  # noqa: BLE001
+        return "needs-review delegations — unreadable"
+
+
+def _evidence_summary(root: Path) -> str | None:
+    path = Path.home() / ".claude" / "jahns-workflow" / "improve" / "evidence.jsonl"
+    if not path.is_file():
+        return None
+    try:
+        aliases = {root.name}
+        data = load_tasks(root)
+        if isinstance(data.get("project"), str):
+            aliases.add(data["project"])
+        registry = Path.home() / ".claude" / "jahns-workflow" / "projects.json"
+        if registry.is_file():
+            reg = json.loads(registry.read_text(encoding="utf-8"))
+            for entry in reg.get("projects", []):
+                if (isinstance(entry, dict) and entry.get("path")
+                        and Path(entry["path"]).expanduser().resolve() == root.resolve()
+                        and isinstance(entry.get("name"), str)):
+                    aliases.add(entry["name"])
+        count = 0
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict) or not row.get("task_id") or row.get("project") not in aliases:
+                continue
+            if row.get("findings") and any(
+                    d.get("verification_present") is False
+                    for d in row.get("delegations") or [] if isinstance(d, dict)):
+                count += 1
+        return f"evidence.jsonl: unverified+finding tasks {count}"
+    except Exception:  # noqa: BLE001
+        return "evidence.jsonl: — unreadable"
+
+
+def _operating_contract(root: Path) -> list[str]:
+    """Bounded best-effort contract block. Constitution absence omits the block; each live input is
+    independently degradable, and an unexpected assembly failure returns no block (R10a)."""
+    try:
+        if not CONTRACT_PATH.is_file():
+            return []
+        constitution = CONTRACT_PATH.read_text(encoding="utf-8").strip()
+        if not constitution:
+            return []
+        lines = ["◆ OPERATING CONTRACT (jahns-workflow)", *constitution.splitlines(),
+                 _routing_line(), _overlay_line(root)]
+        live = "live: " + _delegation_summary(root)
+        evidence = _evidence_summary(root)
+        if evidence:
+            live += " · " + evidence
+        lines.append(live)
+        text = "\n".join(lines)
+        if len(text) > MAX_CONTRACT:
+            text = text[:MAX_CONTRACT - 1].rstrip() + "…"
+        return text.splitlines()
+    except Exception:  # noqa: BLE001 — hook availability outranks the optional block
+        return []
 
 
 def main() -> int:
@@ -46,6 +168,7 @@ def main() -> int:
         f"[jahns-workflow] project: {data.get('project', root.name)} | branch: {g['branch']}"
         f" ({'dirty +' + str(g['dirty']) if g['dirty'] else 'clean'}) | tasks: {done}/{len(tasks)} done",
     ]
+    lines.extend(_operating_contract(root))
 
     # persistent re-entry pointer (model-authored at round close / after review) — surfaced FIRST so a
     # new or post-compaction session picks up the live frontier without a manual "pick up". Read-time

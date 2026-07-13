@@ -4807,5 +4807,134 @@ class UvCacheTests(unittest.TestCase):
             self.assertEqual(after, before)
 
 
+class ContractInjectTests(unittest.TestCase):
+    """0.8.0 M2 §10 — bounded, best-effort main operating contract injection."""
+
+    def _module(self):
+        sys.path.insert(0, str(SCRIPTS.parent / "hooks" / "scripts"))
+        import session_context
+        return session_context
+
+    def _project(self, d):
+        root = Path(d) / "repo"
+        root.mkdir()
+        init_repo(root)
+        (root / ".jahns-workflow.yml").write_text("version: 1\nproject: demo\n")
+        (root / "tasks.yaml").write_text(
+            "version: 1\nproject: demo\ntasks:\n"
+            "  - id: feat/active\n    title: active task here\n    status: active\n")
+        home = Path(d) / "home"
+        home.mkdir()
+        return root, home
+
+    def _context(self, module, root, home):
+        import contextlib
+        import io
+        old_argv = sys.argv
+        try:
+            sys.argv = ["session_context.py", str(root)]
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = _run_with_home(home, module.main)
+            payload = _json.loads(out.getvalue())
+            return rc, payload["hookSpecificOutput"]["additionalContext"]
+        finally:
+            sys.argv = old_argv
+
+    def _delegation(self, root, home, did, state):
+        rec = _run_with_home(home, lambda: jw_delegate._record_dir(root, did))
+        rec.mkdir(parents=True)
+        (rec / "exposure.json").write_text(_json.dumps({"task_id": "feat/active"}))
+        (rec / "status.json").write_text(_json.dumps({"state": state}))
+        return rec
+
+    def test_block_precedes_start_here_and_summarizes_live_inputs(self):
+        module = self._module()
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            _write_profile(home, DelegateVerifyTests._PROFILE)
+            _run_with_home(home, lambda: jw_overlay.add_delta(
+                root, "verification_debt/warn", rule="delegation-verification-evidence-v1",
+                summary="s"))
+            _run_with_home(home, lambda: jw_overlay.add_delta(
+                root, "review_association/observe", rule="round-close-open-findings-v1",
+                summary="s"))
+            _force_status(root, home, "verification_debt/warn", "warning")
+            self._delegation(root, home, "did-one", "needs-review")
+            self._delegation(root, home, "did-two", "needs-review")
+            self._delegation(root, home, "did-done", "applied")
+            evidence = home / ".claude" / "jahns-workflow" / "improve" / "evidence.jsonl"
+            evidence.parent.mkdir(parents=True)
+            _write_jsonl(evidence, [
+                {"task_id": "feat/active", "project": "demo", "findings": [{"severity": "major"}],
+                 "delegations": [{"verification_present": False}]},
+                {"coverage": {"projects_scanned": ["demo"]}},
+            ])
+            sh = _run_with_home(home, lambda: jw_common.start_here_path(root))
+            sh.parent.mkdir(parents=True, exist_ok=True)
+            sh.write_text("FRONTIER")
+
+            rc, ctx = self._context(module, root, home)
+            self.assertEqual(rc, 0)
+            self.assertLess(ctx.index("◆ OPERATING CONTRACT"), ctx.index("▶ START HERE"))
+            self.assertIn("implementer→codex:gpt-5.6-sol", ctx)
+            self.assertIn("verifier→codex:gpt-5.6-sol", ctx)
+            self.assertIn("warning 1 (verification_debt/warn)", ctx)
+            self.assertIn("observing 1 (review_association/observe)", ctx)
+            self.assertIn("needs-review delegations 2 (did-one did-two)", ctx)
+            self.assertIn("unverified+finding tasks 1", ctx)
+
+    def test_profile_absent_is_explicit_and_constitution_absence_omits_block(self):
+        module = self._module()
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            rc, ctx = self._context(module, root, home)
+            self.assertEqual(rc, 0)
+            self.assertIn("no profile", ctx)
+            original = module.CONTRACT_PATH
+            module.CONTRACT_PATH = Path(d) / "missing-contract.md"
+            try:
+                rc, missing = self._context(module, root, home)
+            finally:
+                module.CONTRACT_PATH = original
+            self.assertEqual(rc, 0)
+            self.assertNotIn("◆ OPERATING CONTRACT", missing)
+
+    def test_corrupt_inputs_are_field_local_and_never_break_session_start(self):
+        module = self._module()
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            profile = home / ".claude" / "jahns-workflow" / "profile.yml"
+            profile.parent.mkdir(parents=True)
+            profile.write_text("bindings: [\n")
+            delta = _run_with_home(home, lambda: jw_overlay._deltas_dir(root)) / "bad.json"
+            delta.parent.mkdir(parents=True)
+            delta.write_text("{bad")
+            rec = self._delegation(root, home, "did-corrupt", "needs-review")
+            (rec / "status.json").write_text("{bad")
+            evidence = home / ".claude" / "jahns-workflow" / "improve" / "evidence.jsonl"
+            evidence.parent.mkdir(parents=True)
+            evidence.write_text("{bad\n")
+            rc, ctx = self._context(module, root, home)
+            self.assertEqual(rc, 0)
+            self.assertIn("◆ OPERATING CONTRACT", ctx)
+            self.assertIn("unreadable", ctx)
+            self.assertNotIn("config/tasks unreadable", ctx)
+
+    def test_contract_has_its_own_1200_character_cap(self):
+        module = self._module()
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            long_contract = Path(d) / "contract.md"
+            long_contract.write_text("\n".join("X" * 400 for _ in range(8)))
+            original = module.CONTRACT_PATH
+            module.CONTRACT_PATH = long_contract
+            try:
+                block = _run_with_home(home, lambda: module._operating_contract(root))
+            finally:
+                module.CONTRACT_PATH = original
+            self.assertLessEqual(len("\n".join(block)), 1200)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
