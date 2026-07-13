@@ -73,6 +73,7 @@ run fetches `pyyaml` once).
 ## Install
 
 ```bash
+/plugin marketplace add Dev-Jahn/jahns-cc-marketplace
 /plugin install jahns-workflow                   # from a marketplace listing it
 claude --plugin-dir ~/workspace/jahns-workflow   # or for local dev
 ```
