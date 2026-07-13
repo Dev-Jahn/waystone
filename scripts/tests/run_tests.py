@@ -2044,5 +2044,298 @@ class ImproveTraceTests(unittest.TestCase):
                                  f"{name} not byte-identical across re-runs")
 
 
+# feedback file exactly as jw_review.ingest writes it: metadata header, byte-exact reviewer body
+# (which itself contains `### JW-GPT-NNN` blocks + `- Severity:` lines we must NOT parse), then an
+# APPENDED triage table under `## Findings (triage skeleton …)` — the only thing improve reviews reads.
+_TRIAGE_FEEDBACK = """<!-- jahns-workflow feedback: verbatim body below; triage skeleton appended. -->
+round: 2026-07-01-alpha
+reviewer: gpt-5.5-pro
+ingested: 2026-07-01
+source: /tmp/review.md
+
+---
+
+### JW-GPT-001 — some finding
+- Severity: blocker
+
+### JW-GPT-002 — another finding
+- Severity: minor
+
+
+---
+
+## Findings (triage skeleton — verify each before registering)
+
+| finding | severity | verdict (REAL/REJECTED/NEEDS-RULING) | evidence | task id |
+|---|---|---|---|---|
+| JW-GPT-001 — some finding | blocker | REAL | confirmed in code | fix/thing |
+| JW-GPT-002 — another finding | minor | REJECTED | wrong, see SSOT | |
+| JW-GPT-003 — unscored finding | ? |  |  |  |
+"""
+
+
+class ImproveReviewsTests(unittest.TestCase):
+    """Registry-driven review projection: triage-table + finding-task join, provenance, skips."""
+
+    def _fixture(self, d: Path) -> Path:
+        proj = d / "projA"
+        proj.mkdir()
+        (proj / ".jahns-workflow.yml").write_text("version: 1\nproject: a\n")  # reviews_dir=docs/reviews
+        rdir = proj / "docs" / "reviews"
+        rdir.mkdir(parents=True)
+        (rdir / "2026-07-01-alpha-request.md").write_text("# Review Request — alpha\n")
+        (rdir / "2026-07-01-alpha-feedback.md").write_text(_TRIAGE_FEEDBACK)
+        (rdir / "2026-07-02-beta-request.md").write_text("# Review Request — beta\n")  # no feedback yet
+        # finding-derived tasks: linked to the REVIEW round via `origin: review-<round-id>`
+        (proj / "tasks.yaml").write_text(
+            "version: 1\nproject: a\ntasks:\n"
+            "  - id: fix/thing\n    title: 'fix the thing'\n    status: pending\n"
+            "    severity: major\n    origin: review-2026-07-01-alpha\n"
+            "  - id: feat/unrelated\n    title: 'not a finding'\n    status: active\n")
+        (proj / "tasks.archive.yaml").write_text(
+            "version: 1\nproject: a\ntasks:\n"
+            "  - id: fix/old\n    title: 'archived finding'\n    status: done\n"
+            "    severity: blocker\n    origin: review-2026-07-01-alpha\n")
+        registry = d / "projects.json"
+        registry.write_text(_json.dumps({"projects": [
+            {"name": "proj-a", "path": str(proj)},
+            {"name": "remote-only", "repo": "owner/x"},
+            {"name": "gone", "path": str(d / "missing")},
+        ]}))
+        return registry
+
+    def _load(self, out: Path):
+        rows = [_json.loads(ln) for ln in (out / "reviews.jsonl").read_text().splitlines() if ln]
+        cov = _json.loads((out / "reviews_coverage.json").read_text())
+        return rows, cov
+
+    def test_reviews_projection(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            registry = self._fixture(d)
+            out = d / "out"
+            jw_improve.run_reviews(registry, out)
+            rows, cov = self._load(out)
+
+            # coverage: one scanned, remote-only + missing-path skipped (fail-loud, not fatal)
+            self.assertEqual(cov["projects_scanned"], ["proj-a"])
+            self.assertEqual(cov["projects_total"], 3)
+            self.assertEqual([s["project"] for s in cov["projects_skipped"]], ["gone", "remote-only"])
+            self.assertEqual(cov["row_totals"], {"reviews": 2, "findings": 5})
+
+            # rows sorted by (project, round_id)
+            self.assertEqual([r["round_id"] for r in rows], ["2026-07-01-alpha", "2026-07-02-beta"])
+            alpha = rows[0]
+            self.assertEqual(alpha["project"], "proj-a")
+            self.assertTrue(alpha["request_file"].endswith("2026-07-01-alpha-request.md"))
+            self.assertTrue(alpha["feedback_file"].endswith("2026-07-01-alpha-feedback.md"))
+
+            byid = {f["id"]: f for f in alpha["findings"]}
+            # triage findings: severity read structurally from the table cell (explicit)
+            self.assertEqual(byid["JW-GPT-001"],
+                             {"id": "JW-GPT-001", "severity": "blocker", "status": "REAL",
+                              "source": "triage", "provenance": "explicit"})
+            self.assertEqual(byid["JW-GPT-002"]["status"], "REJECTED")
+            self.assertEqual(byid["JW-GPT-002"]["severity"], "minor")
+            # `?` severity is unparseable → provenance unknown, NOT keyword-guessed from prose
+            self.assertEqual(byid["JW-GPT-003"]["severity"], None)
+            self.assertEqual(byid["JW-GPT-003"]["provenance"], "unknown")
+            # finding-derived tasks joined by origin (live + archived); non-finding task excluded
+            self.assertEqual(byid["fix/thing"],
+                             {"id": "fix/thing", "severity": "major", "status": "pending",
+                              "source": "task", "provenance": "explicit"})
+            self.assertEqual(byid["fix/old"]["source"], "task")
+            self.assertNotIn("feat/unrelated", byid)
+            # counts across both sources
+            self.assertEqual(alpha["counts"], {"blocker": 2, "major": 1, "minor": 1, "unknown": 1})
+
+            # beta: request only, no findings
+            beta = rows[1]
+            self.assertIsNone(beta["feedback_file"])
+            self.assertEqual(beta["findings"], [])
+            self.assertEqual(beta["counts"], {"blocker": 0, "major": 0, "minor": 0, "unknown": 0})
+
+    def test_triage_ignores_verbatim_body(self):
+        # the verbatim body's `### JW-GPT-*` blocks must not be parsed — only the appended table
+        findings = jw_improve._parse_triage(_TRIAGE_FEEDBACK)
+        self.assertEqual([f["id"] for f in findings], ["JW-GPT-001", "JW-GPT-002", "JW-GPT-003"])
+        # a feedback body with NO appended skeleton yields nothing
+        self.assertEqual(jw_improve._parse_triage("just prose, no table\n### JW-GPT-9 — x"), [])
+
+    def test_byte_identical_reruns(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            registry = self._fixture(d)
+            o1, o2 = d / "o1", d / "o2"
+            jw_improve.run_reviews(registry, o1)
+            jw_improve.run_reviews(registry, o2)
+            for name in ("reviews.jsonl", "reviews_coverage.json"):
+                self.assertEqual((o1 / name).read_bytes(), (o2 / name).read_bytes(),
+                                 f"{name} not byte-identical across re-runs")
+
+    def test_cli_default_out_honors_home(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            home = d / "home"
+            (home / ".claude" / "jahns-workflow").mkdir(parents=True)
+            # place the registry where the runtime path resolves it under the fake HOME
+            reg = self._fixture(d)
+            (home / ".claude" / "jahns-workflow" / "projects.json").write_text(reg.read_text())
+
+            def run():
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = jw_improve.main(["reviews"])
+                return rc
+
+            rc = _run_with_home(home, run)
+            self.assertEqual(rc, 0)
+            out_dir = home / ".claude" / "jahns-workflow" / "improve"
+            self.assertTrue((out_dir / "reviews.jsonl").is_file())
+            self.assertTrue((out_dir / "reviews_coverage.json").is_file())
+
+
+class ImproveAuditTests(unittest.TestCase):
+    """Deterministic audit facts over the four projection artifacts (synthetic fixtures)."""
+
+    def _sessions(self):
+        return [
+            {"project": "-p", "kind": "main", "session_id": "s1", "file": "/x/s1.jsonl",
+             "tools": {"by_category": {"file_write": 5, "shell": 3, "agent_spawn": 1}},
+             "delegations": 1, "verification": {"runs": 0}, "unclassified_shell": 2,
+             "retry_loops": {"count": 2, "examples": [{"line": 10, "head": "cmd"}]},
+             "context_heavy": {"tool_results_over_100kb": 1, "max_result_bytes": 200000},
+             "errors": {"api": 0, "tool": 2, "parse": 0}},
+            {"project": "-p", "kind": "main", "session_id": "s2", "file": "/x/s2.jsonl",
+             "tools": {"by_category": {"file_write": 0, "shell": 1}},
+             "delegations": 0, "verification": {"runs": 1}, "unclassified_shell": 0,
+             "retry_loops": {"count": 0, "examples": []},
+             "context_heavy": {"tool_results_over_100kb": 0, "max_result_bytes": 50},
+             "errors": {"api": 1, "tool": 0, "parse": 0}},
+        ]
+
+    def _delegations(self):
+        return [
+            {"project": "-p", "session_id": "s1", "file": "/x/s1.jsonl", "line": 12, "tool": "Agent",
+             "subagent_type": "Explore", "model_requested": "sonnet",
+             "resolved_model": "claude-sonnet-4-5", "agent_id": "a", "status": "completed",
+             "is_async": False, "linked_transcript": None},
+            {"project": "-p", "session_id": "s1", "file": "/x/s1.jsonl", "line": 20, "tool": "Workflow",
+             "subagent_type": None, "model_requested": None,
+             "resolved_model": {"provenance": "unknown"}, "agent_id": {"provenance": "unknown"},
+             "status": {"provenance": "unknown"}, "is_async": {"provenance": "unknown"},
+             "linked_transcript": None},
+        ]
+
+    def _reviews(self):
+        return [
+            {"project": "proj-a", "root": "/r", "round_id": "2026-07-01-alpha",
+             "request_file": "/r/req.md", "feedback_file": "/r/fb.md",
+             "findings": [
+                 {"id": "JW-GPT-001", "severity": "blocker", "status": "REAL",
+                  "source": "triage", "provenance": "explicit"},
+                 {"id": "fix/x", "severity": "major", "status": "done",
+                  "source": "task", "provenance": "explicit"}],
+             "counts": {"blocker": 1, "major": 1, "minor": 0, "unknown": 0}},
+        ]
+
+    def _coverage(self):
+        return {"parser_version": "jw-trace-1", "generated_from": ["/x"],
+                "files_by_kind": {"main_transcript": 2}, "files_skipped": 0,
+                "event_type_counts": {}, "unknown_raw_types": {"weird": 1},
+                "record_parse_errors": 0, "replayed_records_skipped": 1,
+                "partial_tail_lines": 1, "row_totals": {"sessions": 2, "delegations": 2}}
+
+    def _write_inputs(self, d: Path, *, sessions=True, delegations=True, reviews=True, coverage=True):
+        if sessions:
+            _write_jsonl(d / "sessions.jsonl", self._sessions())
+        if delegations:
+            _write_jsonl(d / "delegations.jsonl", self._delegations())
+        if reviews:
+            _write_jsonl(d / "reviews.jsonl", self._reviews())
+        if coverage:
+            (d / "parse_coverage.json").write_text(_json.dumps(self._coverage()))
+
+    def test_all_lenses(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            self._write_inputs(d)
+            facts = jw_improve.run_audit(d)
+            self.assertEqual(facts["skipped_lenses"], [])
+            lenses = {l["lens"]: l for l in facts["lenses"]}
+            self.assertEqual(sorted(lenses), [
+                "context_heavy", "coverage_caveats", "delegation_pattern", "error_landscape",
+                "main_direct_work", "retry_loops", "review_association", "verification_debt"])
+            # every fact carries a versioned rule + provenance
+            for l in facts["lenses"]:
+                self.assertRegex(l["rule"], r"-v1$")
+                self.assertIn(l["provenance"], ("inferred", "explicit"))
+                self.assertLessEqual(len(l["examples"]), 5)
+
+            mdw = lenses["main_direct_work"]["per_project"]["-p"]
+            self.assertEqual((mdw["main_sessions"], mdw["file_write"], mdw["shell"],
+                              mdw["direct_work"]), (2, 5, 4, 9))
+            self.assertEqual(mdw["sessions_delegation_zero_direct"], 1)  # s2: deleg 0, direct 1
+            self.assertEqual(lenses["main_direct_work"]["provenance"], "inferred")
+
+            vd = lenses["verification_debt"]["per_project"]["-p"]
+            self.assertEqual((vd["file_write_sessions"], vd["debt_sessions"],
+                              vd["unclassified_shell_total"]), (1, 1, 2))
+
+            rl = lenses["retry_loops"]["per_project"]["-p"]
+            self.assertEqual((rl["sessions_with_retry"], rl["retry_loops_total"]), (1, 2))
+            self.assertEqual(lenses["retry_loops"]["examples"][0]["line"], 10)
+
+            ch = lenses["context_heavy"]["per_project"]["-p"]
+            self.assertEqual((ch["sessions_over_100kb"], ch["max_result_bytes"]), (1, 200000))
+
+            dp = lenses["delegation_pattern"]["per_project"]["-p"]
+            self.assertEqual(dp["delegations"], 2)
+            self.assertEqual(dp["by_tool"], {"Agent": 1, "Workflow": 1})
+            self.assertEqual(dp["workflow_delegations"], 1)
+            self.assertEqual(dp["by_resolved_model"], {"claude-sonnet-4-5": 1, "unknown": 1})
+            self.assertEqual(dp["async_count"], 0)
+
+            el = lenses["error_landscape"]["per_project"]["-p"]
+            self.assertEqual((el["api"], el["tool"], el["parse"], el["sessions_with_errors"]),
+                             (1, 2, 0, 2))
+
+            ra = lenses["review_association"]["per_project"]["proj-a"]
+            self.assertEqual(ra["rounds"], 1)
+            self.assertEqual(ra["findings_total"], 2)
+            self.assertEqual(ra["severity_counts"], {"blocker": 1, "major": 1, "minor": 0, "unknown": 0})
+            self.assertEqual(ra["by_source"], {"task": 1, "triage": 1})
+            self.assertEqual(ra["round_session_mapping"], {"provenance": "unknown"})
+
+            cc = lenses["coverage_caveats"]["summary"]
+            self.assertEqual(cc["partial_tail_lines"], 1)
+            self.assertEqual(cc["unknown_raw_types"], {"weird": 1})
+
+    def test_missing_inputs_skip_lenses(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            self._write_inputs(d, delegations=False, reviews=False, coverage=False)  # sessions only
+            facts = jw_improve.run_audit(d)
+            self.assertEqual({s["lens"] for s in facts["skipped_lenses"]},
+                             {"delegation_pattern", "review_association", "coverage_caveats"})
+            self.assertEqual({l["lens"] for l in facts["lenses"]},
+                             {"main_direct_work", "verification_debt", "retry_loops",
+                              "context_heavy", "error_landscape"})
+            self.assertEqual(facts["inputs"],
+                             {"sessions": True, "delegations": False, "reviews": False,
+                              "parse_coverage": False})
+
+    def test_byte_identical_reruns(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            self._write_inputs(d)
+            jw_improve.run_audit(d)
+            first = (d / "facts.json").read_bytes()
+            jw_improve.run_audit(d)
+            self.assertEqual(first, (d / "facts.json").read_bytes())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

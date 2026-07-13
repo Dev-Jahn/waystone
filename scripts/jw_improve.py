@@ -3,22 +3,36 @@
 # requires-python = ">=3.10"
 # dependencies = ["pyyaml"]
 # ///
-"""`jw improve` — mine Claude Code session logs into deterministic trace tables.
+"""`jw improve` — mine Claude Code evidence into deterministic, local-only projection tables.
 
-  jw improve trace [--source DIR]... [--project SLUG]... [--out DIR]
+  jw improve trace   [--source DIR]... [--project SLUG]... [--out DIR]
+  jw improve reviews [--out DIR]
+  jw improve audit   [--in DIR]
 
-Discovery walks each source (default `$CLAUDE_CONFIG_DIR/projects`, else `~/.claude/projects`),
-streams every transcript file line-by-line through jw_cclog, and emits three regenerable, local-only
-artifacts into --out (default `~/.claude/jahns-workflow/improve/`):
+`trace` walks each source (default `$CLAUDE_CONFIG_DIR/projects`, else `~/.claude/projects`),
+streams every transcript file line-by-line through jw_cclog, and emits three regenerable artifacts
+into --out (default `~/.claude/jahns-workflow/improve/`):
   sessions.jsonl        one row per transcript (main/subagent/workflow-subagent)
   delegations.jsonl     one row per agent_spawn tool_use
   parse_coverage.json   files-by-kind, event-type counts, unknown/skip/error tallies
 
+`reviews` reads the registered projects (`~/.claude/jahns-workflow/projects.json`), resolves each
+`reviews_dir` via `.jahns-workflow.yml`, and projects the review evidence already on disk (it never
+re-implements review ingest) into --out:
+  reviews.jsonl         one row per review round (findings from the feedback triage table + the
+                        finding-derived tasks joined by their `origin: review-<round-id>`)
+  reviews_coverage.json projects scanned / skipped (inaccessible roots are reported, not fatal)
+
+`audit` reads ONLY the four projection artifacts above (never raw logs) from --in (default = trace's
+--out) and emits deterministic per-lens facts (no model interpretation — that is the skill's job):
+  facts.json            8 lenses, each carrying rule id + provenance + <=5 evidence pointers;
+                        missing inputs are reported in `skipped_lenses`.
+
 Outputs are byte-identical across re-runs of the same input (no run timestamp; stable ordering;
 sort_keys on every dump). Semantic labels carry provenance: rule-derived values are `inferred` with a
-versioned `rule` id, unresolvable values are `{"provenance": "unknown"}`, and unmatched shell
-commands are counted (never force-classified). Content (prompts/commands/file bodies) is never
-stored; only bounded 120-char `head` snippets for evidence pointers.
+versioned `rule` id, unresolvable values are `{"provenance": "unknown"}`, and structurally parsed
+severities are `explicit` (never keyword-guessed from prose). Content (prompts/commands/file bodies)
+is never stored; only bounded 120-char `head` snippets for evidence pointers.
 """
 from __future__ import annotations
 
@@ -30,6 +44,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import yaml  # noqa: E402
 
 from jw_cclog import (  # noqa: E402
     PARSER_VERSION,
@@ -41,7 +56,14 @@ from jw_cclog import (  # noqa: E402
     scope_of,
     stable_id,
 )
-from jw_common import WorkflowError  # noqa: E402
+from jw_common import (  # noqa: E402
+    CONFIG_NAME,
+    SEVERITIES,
+    WorkflowError,
+    load_config,
+    load_tasks,
+    load_yaml,
+)
 
 HEAD_LEN = 120
 CONTEXT_HEAVY_BYTES = 100 * 1024
@@ -371,6 +393,453 @@ def run_trace(sources: list[Path], projects: set[str], out_dir: Path) -> dict:
     return coverage
 
 
+# ================================================================== reviews (§8)
+# Project review evidence, projected — NOT re-implemented. The on-disk feedback format is exactly
+# what `jw_review.ingest` writes: a metadata header, the byte-exact reviewer body, then an APPENDED
+# markdown triage table under `## Findings (triage skeleton …)` whose rows are
+#   | JW-GPT-NNN — title | <severity> | <verdict> | <evidence> | <task id> |
+# We parse ONLY that appended table (the last such heading), never the verbatim body (§3.8: no
+# defensive multi-format guessing). Finding-derived tasks carry the review-round link in their
+# `origin` field (`review-<round-id>`), set by `jw task add --origin` in skills/review/SKILL.md — the
+# `round` field records the FIXING round (stamped at close), so origin is the correct join key.
+_TRIAGE_HEADING = "## Findings (triage skeleton"
+_FINDING_ID_RE = re.compile(r"JW-GPT-\d+")
+_VERDICT_RE = re.compile(r"\b(REAL|REJECTED|NEEDS-RULING)\b", re.IGNORECASE)
+
+
+def _parse_triage(feedback_text: str) -> list[dict]:
+    """Structured findings from the appended triage table only. Severity is read from the table
+    cell (explicit) or left None (unknown) — never keyword-guessed from prose. Returns
+    [{id, severity, status}] where status is the triage verdict (REAL/REJECTED/NEEDS-RULING) or None."""
+    idx = feedback_text.rfind(_TRIAGE_HEADING)
+    if idx < 0:
+        return []
+    out: list[dict] = []
+    for line in feedback_text[idx:].splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        m = _FINDING_ID_RE.search(cells[0]) if cells else None
+        if not m:
+            continue  # header row, separator row, or a non-finding table line
+        sev = cells[1].strip().strip("`").lower() if len(cells) > 1 else ""
+        severity = sev if sev in SEVERITIES else None
+        status = None
+        if len(cells) > 2:
+            vm = _VERDICT_RE.search(cells[2])
+            status = vm.group(1).upper() if vm else None
+        out.append({"id": m.group(0), "severity": severity, "status": status})
+    return out
+
+
+def _finding_tasks_by_round(root: Path) -> dict[str, list[dict]]:
+    """Finding-derived tasks grouped by REVIEW round (from `origin: review-<round-id>`), read from
+    tasks.yaml + tasks.archive.yaml. Severity comes structurally from the task's `severity` field."""
+    docs: list[dict] = []
+    try:
+        docs.append(load_tasks(root))
+    except (OSError, yaml.YAMLError):
+        pass
+    arch = root / "tasks.archive.yaml"
+    if arch.is_file():
+        try:
+            data = load_yaml(arch)
+            if isinstance(data, dict):
+                docs.append(data)
+        except (OSError, yaml.YAMLError):
+            pass
+    by_round: dict[str, list[dict]] = {}
+    for doc in docs:
+        for t in doc.get("tasks", []) or []:
+            if not isinstance(t, dict):
+                continue
+            origin = t.get("origin")
+            if not (isinstance(origin, str) and origin.startswith("review-")):
+                continue
+            rid = origin[len("review-"):]
+            sev = t.get("severity")
+            severity = sev if sev in SEVERITIES else None
+            by_round.setdefault(rid, []).append({
+                "id": t.get("id"),
+                "severity": severity,
+                "status": t.get("status"),
+                "source": "task",
+                "provenance": "explicit" if severity else "unknown",
+            })
+    return by_round
+
+
+def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
+    rdir = root / cfg["reviews_dir"]
+    request_files: dict[str, Path] = {}
+    feedback_files: dict[str, Path] = {}
+    if rdir.is_dir():
+        for p in sorted(rdir.glob("*-request.md")):
+            request_files[p.stem[: -len("-request")]] = p
+        for p in sorted(rdir.glob("*-feedback.md")):
+            feedback_files[p.stem[: -len("-feedback")]] = p
+    tasks_by_round = _finding_tasks_by_round(root)
+    round_ids = sorted(set(request_files) | set(feedback_files) | set(tasks_by_round))
+
+    rows: list[dict] = []
+    for rid in round_ids:
+        findings: list[dict] = []
+        fb = feedback_files.get(rid)
+        if fb is not None:
+            try:
+                text = fb.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            for f in _parse_triage(text):
+                findings.append({
+                    "id": f["id"], "severity": f["severity"], "status": f["status"],
+                    "source": "triage",
+                    "provenance": "explicit" if f["severity"] else "unknown",
+                })
+        findings.extend(tasks_by_round.get(rid, []))
+        findings.sort(key=lambda x: (x["source"], x["id"] or ""))
+        counts = {"blocker": 0, "major": 0, "minor": 0, "unknown": 0}
+        for f in findings:
+            counts[f["severity"] if f["severity"] in SEVERITIES else "unknown"] += 1
+        req = request_files.get(rid)
+        rows.append({
+            "project": name,
+            "root": str(root),
+            "round_id": rid,
+            "request_file": str(req) if req else None,
+            "feedback_file": str(fb) if fb else None,
+            "findings": findings,
+            "counts": counts,
+        })
+    return rows
+
+
+def _registry_path() -> Path:
+    """Runtime-resolved global registry (honours HOME so tests can override it), matching
+    jw_common.REGISTRY_PATH's location without freezing it at import time."""
+    return Path.home() / ".claude" / "jahns-workflow" / "projects.json"
+
+
+def run_reviews(registry_path: Path, out_dir: Path) -> dict:
+    entries: list = []
+    if registry_path.is_file():
+        try:
+            reg = json.loads(registry_path.read_text(encoding="utf-8"))
+            if isinstance(reg, dict):
+                entries = [e for e in reg.get("projects", []) if isinstance(e, dict)]
+        except (OSError, json.JSONDecodeError):
+            entries = []
+
+    rows: list[dict] = []
+    scanned: list[str] = []
+    skipped: list[dict] = []
+    for entry in entries:
+        name = entry.get("name") or "(unnamed)"
+        path = entry.get("path")
+        if not path:  # remote-only registry entry — no local tree to read review artifacts from
+            skipped.append({"project": name, "reason": "no local path (remote-only registry entry)"})
+            continue
+        root = Path(path).expanduser()
+        if not (root / CONFIG_NAME).is_file():
+            skipped.append({"project": name, "reason": "project root or .jahns-workflow.yml inaccessible"})
+            continue
+        try:
+            cfg = load_config(root)
+        except (OSError, yaml.YAMLError, ValueError) as e:
+            skipped.append({"project": name, "reason": f"config unreadable: {type(e).__name__}"})
+            continue
+        rows.extend(_project_review_rows(name, root, cfg))
+        scanned.append(name)
+
+    rows.sort(key=lambda r: (r["project"], r["round_id"]))
+    coverage = {
+        "generated_from": str(registry_path),
+        "projects_total": len(entries),
+        "projects_scanned": sorted(scanned),
+        "projects_skipped": sorted(skipped, key=lambda s: s["project"]),
+        "row_totals": {"reviews": len(rows), "findings": sum(len(r["findings"]) for r in rows)},
+    }
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "reviews.jsonl").write_text(
+        "".join(_dumps(r) + "\n" for r in rows), encoding="utf-8")
+    (out_dir / "reviews_coverage.json").write_text(_dumps(coverage) + "\n", encoding="utf-8")
+    return coverage
+
+
+# ================================================================== audit (§9)
+# Deterministic facts over the four projection artifacts ONLY (never raw logs — layer separation).
+# Each lens carries a versioned rule id + provenance; <=5 examples with evidence pointers. No model
+# interpretation. round<->session mapping is left provenance:"unknown" (no timestamp heuristics).
+_AUDIT_INPUTS = {
+    "sessions": "sessions.jsonl",
+    "delegations": "delegations.jsonl",
+    "reviews": "reviews.jsonl",
+    "parse_coverage": "parse_coverage.json",
+}
+
+
+def _load_jsonl(path: Path) -> list[dict]:
+    return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def _load_json(path: Path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _ratio(n: int, d: int) -> float:
+    return round(n / d, 4) if d else 0.0
+
+
+def _by_project(rows: list[dict]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        groups.setdefault(r.get("project") or "", []).append(r)
+    return groups
+
+
+def _cat(s: dict, name: str) -> int:
+    return (s.get("tools") or {}).get("by_category", {}).get(name, 0)
+
+
+def _direct_work(s: dict) -> int:
+    return _cat(s, "file_write") + _cat(s, "shell")
+
+
+def _lens(name: str, rule: str, provenance: str, per_project: dict, examples: list, **extra) -> dict:
+    d = {"lens": name, "rule": rule, "provenance": provenance,
+         "per_project": per_project, "examples": examples[:5]}
+    d.update(extra)
+    return d
+
+
+def _lens_main_direct_work(sessions: list[dict]) -> dict:
+    mains = [s for s in sessions if s.get("kind") == "main"]
+    per: dict[str, dict] = {}
+    for proj, rows in _by_project(mains).items():
+        fw = sum(_cat(s, "file_write") for s in rows)
+        sh = sum(_cat(s, "shell") for s in rows)
+        tool_total = sum(sum((s.get("tools") or {}).get("by_category", {}).values()) for s in rows)
+        per[proj] = {
+            "main_sessions": len(rows),
+            "file_write": fw,
+            "shell": sh,
+            "direct_work": fw + sh,
+            "direct_work_ratio": _ratio(fw + sh, tool_total),
+            "sessions_delegation_zero_direct":
+                sum(1 for s in rows if s.get("delegations", 0) == 0 and _direct_work(s) > 0),
+        }
+    top = sorted(mains, key=lambda s: (-_direct_work(s), s.get("file") or ""))[:5]
+    examples = [{"file": s.get("file"), "session_id": s.get("session_id"),
+                 "file_write": _cat(s, "file_write"), "shell": _cat(s, "shell"),
+                 "delegations": s.get("delegations", 0)} for s in top if _direct_work(s) > 0]
+    return _lens("main_direct_work", "main-direct-work-v1", "inferred", per, examples)
+
+
+def _lens_verification_debt(sessions: list[dict]) -> dict:
+    def runs(s: dict) -> int:
+        return (s.get("verification") or {}).get("runs", 0)
+    per: dict[str, dict] = {}
+    for proj, rows in _by_project(sessions).items():
+        fw_rows = [s for s in rows if _cat(s, "file_write") > 0]
+        debt = [s for s in fw_rows if runs(s) == 0]
+        per[proj] = {
+            "sessions": len(rows),
+            "file_write_sessions": len(fw_rows),
+            "debt_sessions": len(debt),
+            "debt_ratio": _ratio(len(debt), len(fw_rows)),
+            "unclassified_shell_total": sum(s.get("unclassified_shell", 0) for s in rows),
+        }
+    debt_all = [s for s in sessions if _cat(s, "file_write") > 0 and runs(s) == 0]
+    top = sorted(debt_all, key=lambda s: (-_cat(s, "file_write"), s.get("file") or ""))[:5]
+    examples = [{"file": s.get("file"), "session_id": s.get("session_id"),
+                 "file_write": _cat(s, "file_write")} for s in top]
+    return _lens("verification_debt", "verification-debt-v1", "inferred", per, examples)
+
+
+def _lens_retry_loops(sessions: list[dict]) -> dict:
+    def cnt(s: dict) -> int:
+        return (s.get("retry_loops") or {}).get("count", 0)
+    per: dict[str, dict] = {}
+    for proj, rows in _by_project(sessions).items():
+        per[proj] = {
+            "sessions": len(rows),
+            "sessions_with_retry": sum(1 for s in rows if cnt(s) > 0),
+            "retry_loops_total": sum(cnt(s) for s in rows),
+        }
+    top = sorted([s for s in sessions if cnt(s) > 0],
+                 key=lambda s: (-cnt(s), s.get("file") or ""))[:5]
+    examples = []
+    for s in top:
+        ex = {"file": s.get("file"), "session_id": s.get("session_id"), "count": cnt(s)}
+        rexs = (s.get("retry_loops") or {}).get("examples") or []
+        if rexs and isinstance(rexs[0], dict) and "line" in rexs[0]:
+            ex["line"] = rexs[0]["line"]
+        examples.append(ex)
+    return _lens("retry_loops", "retry-loops-v1", "inferred", per, examples)
+
+
+def _lens_context_heavy(sessions: list[dict]) -> dict:
+    def ch(s: dict, k: str) -> int:
+        return (s.get("context_heavy") or {}).get(k, 0)
+    per: dict[str, dict] = {}
+    for proj, rows in _by_project(sessions).items():
+        per[proj] = {
+            "sessions": len(rows),
+            "sessions_over_100kb": sum(1 for s in rows if ch(s, "tool_results_over_100kb") > 0),
+            "results_over_100kb_total": sum(ch(s, "tool_results_over_100kb") for s in rows),
+            "max_result_bytes": max((ch(s, "max_result_bytes") for s in rows), default=0),
+        }
+    top = sorted(sessions, key=lambda s: (-ch(s, "max_result_bytes"), s.get("file") or ""))[:5]
+    examples = [{"file": s.get("file"), "session_id": s.get("session_id"),
+                 "max_result_bytes": ch(s, "max_result_bytes"),
+                 "tool_results_over_100kb": ch(s, "tool_results_over_100kb")}
+                for s in top if ch(s, "max_result_bytes") > 0]
+    return _lens("context_heavy", "context-heavy-v1", "explicit", per, examples)
+
+
+def _deleg_val(v) -> str:
+    if isinstance(v, dict):
+        return "unknown"  # {"provenance": "unknown"} — no result record joined
+    if v is None:
+        return "unspecified"
+    return str(v)
+
+
+def _lens_delegation_pattern(delegations: list[dict]) -> dict:
+    per: dict[str, dict] = {}
+    for proj, rows in _by_project(delegations).items():
+        by_tool = Counter(_deleg_val(r.get("tool")) for r in rows)
+        async_count = sum(1 for r in rows if r.get("is_async") is True)
+        per[proj] = {
+            "delegations": len(rows),
+            "by_tool": dict(sorted(by_tool.items())),
+            "by_subagent_type": dict(sorted(Counter(_deleg_val(r.get("subagent_type")) for r in rows).items())),
+            "by_model_requested": dict(sorted(Counter(_deleg_val(r.get("model_requested")) for r in rows).items())),
+            "by_resolved_model": dict(sorted(Counter(_deleg_val(r.get("resolved_model")) for r in rows).items())),
+            "by_status": dict(sorted(Counter(_deleg_val(r.get("status")) for r in rows).items())),
+            "async_count": async_count,
+            "async_ratio": _ratio(async_count, len(rows)),
+            "workflow_delegations": by_tool.get("Workflow", 0),
+        }
+    top = sorted(delegations,
+                 key=lambda r: (r.get("project") or "", r.get("file") or "", r.get("line") or 0))[:5]
+    examples = [{"file": r.get("file"), "line": r.get("line"), "session_id": r.get("session_id"),
+                 "subagent_type": r.get("subagent_type"), "model_requested": r.get("model_requested"),
+                 "resolved_model": _deleg_val(r.get("resolved_model")),
+                 "status": _deleg_val(r.get("status"))} for r in top]
+    return _lens("delegation_pattern", "delegation-pattern-v1", "explicit", per, examples)
+
+
+def _lens_error_landscape(sessions: list[dict]) -> dict:
+    def err(s: dict, k: str) -> int:
+        return (s.get("errors") or {}).get(k, 0)
+
+    def total(s: dict) -> int:
+        return err(s, "api") + err(s, "tool") + err(s, "parse")
+    per: dict[str, dict] = {}
+    for proj, rows in _by_project(sessions).items():
+        api = sum(err(s, "api") for s in rows)
+        tool = sum(err(s, "tool") for s in rows)
+        parse = sum(err(s, "parse") for s in rows)
+        per[proj] = {
+            "sessions": len(rows),
+            "api": api, "tool": tool, "parse": parse,
+            "sessions_with_errors": sum(1 for s in rows if total(s) > 0),
+            "errors_per_session": _ratio(api + tool + parse, len(rows)),
+        }
+    top = sorted(sessions, key=lambda s: (-total(s), s.get("file") or ""))[:5]
+    examples = [{"file": s.get("file"), "session_id": s.get("session_id"),
+                 "api": err(s, "api"), "tool": err(s, "tool"), "parse": err(s, "parse")}
+                for s in top if total(s) > 0]
+    return _lens("error_landscape", "error-landscape-v1", "explicit", per, examples)
+
+
+def _lens_review_association(reviews: list[dict]) -> dict:
+    per: dict[str, dict] = {}
+    for proj, rows in _by_project(reviews).items():
+        sev = {"blocker": 0, "major": 0, "minor": 0, "unknown": 0}
+        by_source: Counter = Counter()
+        findings_total = 0
+        for r in rows:
+            for k in sev:
+                sev[k] += (r.get("counts") or {}).get(k, 0)
+            for f in r.get("findings") or []:
+                findings_total += 1
+                by_source[f.get("source") or "unknown"] += 1
+        per[proj] = {
+            "rounds": len(rows),
+            "rounds_with_feedback": sum(1 for r in rows if r.get("feedback_file")),
+            "findings_total": findings_total,
+            "severity_counts": sev,
+            "by_source": dict(sorted(by_source.items())),
+            # 0.7: reviews are project-level only — no timestamp heuristic to bind a round to a session
+            "round_session_mapping": {"provenance": "unknown"},
+        }
+    top = sorted(reviews, key=lambda r: (r.get("project") or "", r.get("round_id") or ""))[:5]
+    examples = [{"file": r.get("feedback_file") or r.get("request_file"),
+                 "round_id": r.get("round_id"), "session_id": {"provenance": "unknown"}}
+                for r in top]
+    return _lens("review_association", "review-association-v1", "explicit", per, examples)
+
+
+def _lens_coverage_caveats(coverage: dict) -> dict:
+    summary = {
+        "parser_version": coverage.get("parser_version"),
+        "files_skipped": coverage.get("files_skipped", 0),
+        "record_parse_errors": coverage.get("record_parse_errors", 0),
+        "replayed_records_skipped": coverage.get("replayed_records_skipped", 0),
+        "partial_tail_lines": coverage.get("partial_tail_lines", 0),
+        "unknown_raw_types": coverage.get("unknown_raw_types", {}),
+        "row_totals": coverage.get("row_totals", {}),
+    }
+    return _lens("coverage_caveats", "coverage-caveats-v1", "explicit", {}, [], summary=summary)
+
+
+def run_audit(in_dir: Path) -> dict:
+    present: dict[str, bool] = {}
+    data: dict[str, object] = {}
+    for key, fname in _AUDIT_INPUTS.items():
+        p = in_dir / fname
+        ok = False
+        if p.is_file():
+            try:
+                data[key] = _load_json(p) if fname.endswith(".json") else _load_jsonl(p)
+                ok = True
+            except (OSError, json.JSONDecodeError):
+                ok = False
+        present[key] = ok
+
+    lens_specs = [
+        ("main_direct_work", "sessions", lambda: _lens_main_direct_work(data["sessions"])),
+        ("verification_debt", "sessions", lambda: _lens_verification_debt(data["sessions"])),
+        ("retry_loops", "sessions", lambda: _lens_retry_loops(data["sessions"])),
+        ("context_heavy", "sessions", lambda: _lens_context_heavy(data["sessions"])),
+        ("delegation_pattern", "delegations", lambda: _lens_delegation_pattern(data["delegations"])),
+        ("error_landscape", "sessions", lambda: _lens_error_landscape(data["sessions"])),
+        ("review_association", "reviews", lambda: _lens_review_association(data["reviews"])),
+        ("coverage_caveats", "parse_coverage", lambda: _lens_coverage_caveats(data["parse_coverage"])),
+    ]
+    lenses: list[dict] = []
+    skipped: list[dict] = []
+    for name, req, builder in lens_specs:
+        if present.get(req):
+            lenses.append(builder())
+        else:
+            skipped.append({"lens": name, "reason": f"missing {_AUDIT_INPUTS[req]}"})
+    lenses.sort(key=lambda x: x["lens"])
+    skipped.sort(key=lambda x: x["lens"])
+
+    facts = {
+        "generated_from": str(in_dir),
+        "inputs": {k: present.get(k, False) for k in _AUDIT_INPUTS},
+        "skipped_lenses": skipped,
+        "lenses": lenses,
+    }
+    (in_dir / "facts.json").write_text(_dumps(facts) + "\n", encoding="utf-8")
+    return facts
+
+
 # ------------------------------------------------------------------ CLI
 def _parse_trace_args(argv: list[str]) -> tuple[list[str], set[str], str | None]:
     sources: list[str] = []
@@ -395,12 +864,29 @@ def _parse_trace_args(argv: list[str]) -> tuple[list[str], set[str], str | None]
     return sources, projects, out
 
 
-def main(argv: list[str]) -> int:
-    if not argv or argv[0] != "trace":
-        print("jw improve: expected subcommand 'trace'\n" + __doc__, file=sys.stderr)
-        return 1
+def _parse_single_opt(argv: list[str], flag: str) -> str | None:
+    """Parse a lone optional value flag (`--out`/`--in`); reject any other argument."""
+    val: str | None = None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == flag:
+            if i + 1 >= len(argv):
+                raise WorkflowError(f"{flag} requires a value")
+            val = argv[i + 1]
+            i += 2
+        else:
+            raise WorkflowError(f"unexpected argument {a!r}")
+    return val
+
+
+def _default_out() -> Path:
+    return Path.home() / ".claude" / "jahns-workflow" / "improve"
+
+
+def _cli_trace(argv: list[str]) -> int:
     try:
-        raw_sources, projects, out = _parse_trace_args(argv[1:])
+        raw_sources, projects, out = _parse_trace_args(argv)
     except WorkflowError as e:
         print(f"jw improve trace: {e}", file=sys.stderr)
         return 1
@@ -415,7 +901,7 @@ def main(argv: list[str]) -> int:
     seen: set[str] = set()
     sources = [s for s in sources if not (str(s) in seen or seen.add(str(s)))]
 
-    out_dir = Path(out).expanduser() if out else Path.home() / ".claude" / "jahns-workflow" / "improve"
+    out_dir = Path(out).expanduser() if out else _default_out()
 
     try:
         cov = run_trace(sources, projects, out_dir)
@@ -426,6 +912,62 @@ def main(argv: list[str]) -> int:
     print(f"jw improve trace: {cov['row_totals']['sessions']} session(s), "
           f"{cov['row_totals']['delegations']} delegation(s) -> {out_dir}")
     return 0
+
+
+def _cli_reviews(argv: list[str]) -> int:
+    try:
+        out = _parse_single_opt(argv, "--out")
+    except WorkflowError as e:
+        print(f"jw improve reviews: {e}", file=sys.stderr)
+        return 1
+    out_dir = Path(out).expanduser() if out else _default_out()
+    try:
+        cov = run_reviews(_registry_path(), out_dir)
+    except OSError as e:
+        print(f"jw improve reviews: cannot write outputs — {e}", file=sys.stderr)
+        return 2
+    print(f"jw improve reviews: {cov['row_totals']['reviews']} review round(s), "
+          f"{cov['row_totals']['findings']} finding(s), "
+          f"{len(cov['projects_scanned'])} project(s) scanned, "
+          f"{len(cov['projects_skipped'])} skipped -> {out_dir}")
+    return 0
+
+
+def _cli_audit(argv: list[str]) -> int:
+    try:
+        inp = _parse_single_opt(argv, "--in")
+    except WorkflowError as e:
+        print(f"jw improve audit: {e}", file=sys.stderr)
+        return 1
+    in_dir = Path(inp).expanduser() if inp else _default_out()
+    if not in_dir.is_dir():
+        print(f"jw improve audit: input dir does not exist: {in_dir} "
+              f"(run `jw improve trace`/`reviews` first)", file=sys.stderr)
+        return 1
+    try:
+        facts = run_audit(in_dir)
+    except OSError as e:
+        print(f"jw improve audit: cannot write outputs — {e}", file=sys.stderr)
+        return 2
+    print(f"jw improve audit: {len(facts['lenses'])} lens(es), "
+          f"{len(facts['skipped_lenses'])} skipped -> {in_dir / 'facts.json'}")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        print("jw improve: expected subcommand (trace|reviews|audit)\n" + __doc__, file=sys.stderr)
+        return 1
+    sub, rest = argv[0], argv[1:]
+    if sub == "trace":
+        return _cli_trace(rest)
+    if sub == "reviews":
+        return _cli_reviews(rest)
+    if sub == "audit":
+        return _cli_audit(rest)
+    print(f"jw improve: unknown subcommand {sub!r} (expected trace|reviews|audit)\n" + __doc__,
+          file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

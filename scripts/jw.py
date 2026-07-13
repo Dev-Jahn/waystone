@@ -15,7 +15,7 @@ Groups:
   review   freeze|status|ingest ...  SHA-bound review cycles (PR mode); ingest = byte-exact reply copy
   approve  --pr N --sha X            SHA-bound human approval
   round    merge --pr N ...          deterministic merge guard
-  improve  trace [--source D] ...    parse CC session logs -> sessions/delegations/coverage
+  improve  trace|reviews|audit ...   parse CC logs / project review evidence / emit audit facts
 
 Existing hook/skill call sites that invoke jw_<name>.py directly keep working; this is an
 additive convenience front door (GPT review: consolidate under one `jw` CLI).
