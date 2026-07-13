@@ -3409,6 +3409,38 @@ class DelegateRunTests(unittest.TestCase):
                 rc = _run_with_home(home, lambda: jw_delegate.discard_delegation(root, rec.name))
             self.assertEqual(rc, 0)
 
+    def test_same_second_did_gets_suffix(self):
+        # H4: two delegations minted in the same second must land in two independent records —
+        # deterministic -2/-3... suffix, no state transitions appended to the first record.
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            (root / "tasks.yaml").write_text(
+                "version: 1\nproject: demo\ntasks:\n"
+                '  - id: feat/xyz\n    title: "implement xyz feature"\n    status: active\n'
+                '    accept:\n      - "criterion alpha here"\n'
+                '  - id: feat/two\n    title: "the second task here"\n    status: active\n'
+                '    accept:\n      - "criterion beta here"\n')
+            orig = jw_delegate._make_did
+            jw_delegate._make_did = lambda tid: "20260713T120000Z-fixed"
+            import contextlib
+            import io
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc1 = self._run(root, home, self._fake_runner({"a.py": "x\n"}), task="feat/xyz")
+                    rc2 = self._run(root, home, self._fake_runner({"b.py": "y\n"}), task="feat/two")
+            finally:
+                jw_delegate._make_did = orig
+            self.assertEqual((rc1, rc2), (0, 0))
+            ddir = _run_with_home(home, lambda: jw_delegate._delegations_dir(root))
+            names = sorted(p.name for p in ddir.iterdir())
+            self.assertEqual(names, ["20260713T120000Z-fixed", "20260713T120000Z-fixed-2"])
+            st1 = jw_delegate._read_status(ddir / names[0])
+            self.assertEqual(st1["state"], "needs-review")
+            self.assertEqual(len(st1["at_transitions"]), 2)  # running -> needs-review only, untouched
+            import json as _json
+            exp2 = _json.loads((ddir / names[1] / "exposure.json").read_text())
+            self.assertEqual(exp2["task_id"], "feat/two")
+
     def test_owner_lock_refuses_second_delegation_from_failed_state(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(d)

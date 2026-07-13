@@ -504,6 +504,10 @@ def run_delegation(root: Path, task_id: str, role: str, accept_flags: list[str])
             f"apply or discard it first")
 
     did = _make_did(task_id)
+    base_did, n = did, 2
+    while _record_dir(root, did).exists():  # same-second collision: deterministic suffix, never a
+        did = f"{base_did}-{n}"             # transition appended to an existing record (H4)
+        n += 1
     record_dir = _record_dir(root, did)
     artifact_dir = record_dir / "artifact"
     worktree_path = _worktree_path(root, did)
