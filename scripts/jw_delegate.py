@@ -100,6 +100,11 @@ def _check_snapshot_preconditions(root: Path) -> None:
         raise WorkflowError("repository has no commits yet (unborn HEAD) — commit something before delegating")
     if (root / ".gitmodules").exists():
         raise WorkflowError("submodules are not supported in M1 (.gitmodules present) — refusing a partial snapshot")
+    if (root / "JW_REPORT.yaml").exists():
+        # H2: it would be baked into the base, consumed as the delegate's report, and phantom-deleted
+        # from the user's tree by the resulting patch.
+        raise WorkflowError("JW_REPORT.yaml is a reserved delegation-protocol filename — "
+                            "remove or rename it and retry")
     rc, out, _ = _git(root, "ls-files", "-u")
     if rc == 0 and out:
         raise WorkflowError("repository has unmerged paths — resolve the conflict before delegating")

@@ -3065,6 +3065,16 @@ class DelegateSnapshotTests(unittest.TestCase):
             root = self._repo(d)
             jw_delegate._check_snapshot_preconditions(root)  # no raise
 
+    def test_precondition_reserved_report_filename(self):
+        # H2: a pre-existing JW_REPORT.yaml would be baked into the base, then consumed as the
+        # delegate's report and phantom-deleted by the patch — refuse up front.
+        with tempfile.TemporaryDirectory() as d:
+            root = self._repo(d)
+            (root / "JW_REPORT.yaml").write_text("stale: report\n")
+            with self.assertRaises(jw_delegate.WorkflowError) as cm:
+                jw_delegate._check_snapshot_preconditions(root)
+            self.assertIn("reserved", str(cm.exception))
+
     def test_make_did_shape(self):
         did = jw_delegate._make_did("feat/xyz")
         self.assertRegex(did, r"^\d{8}T\d{6}Z-feat-xyz$")
@@ -3320,6 +3330,17 @@ class DelegateRunTests(unittest.TestCase):
             rec = self._record_dir(root, home)
             self.assertEqual(jw_delegate._read_status(rec)["state"], "failed-runner")
             self.assertTrue((rec / "exposure.json").exists())  # exposure recorded before runner
+
+    def test_run_refuses_preexisting_jw_report(self):
+        # H2 repro: an untracked JW_REPORT.yaml in the user's tree must refuse the run entirely —
+        # before any record is created (no phantom deletion via the patch).
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            (root / "JW_REPORT.yaml").write_text("stale: report\n")  # untracked user file
+            with self.assertRaises(jw_delegate.WorkflowError) as cm:
+                self._run(root, home, self._fake_runner({"impl.py": "x\n"}))
+            self.assertIn("JW_REPORT.yaml", str(cm.exception))
+            self.assertFalse(_run_with_home(home, lambda: jw_delegate._delegations_dir(root)).exists())
 
     def test_non_utf8_text_change_roundtrip(self):
         # H1 repro: latin-1 content (0xE9, no NUL -> git classifies it as text) must not crash the
