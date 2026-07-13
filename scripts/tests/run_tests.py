@@ -4322,5 +4322,96 @@ class RoundExposureTests(unittest.TestCase):
             self.assertIn("exposure", err.getvalue().lower())
 
 
+class ReplayTests(unittest.TestCase):
+    """0.8.0 M2 §5 — deterministic shadow replay and the replay-backed promote gate."""
+
+    def _delegation_corpus(self, root, home):
+        ddir = _run_with_home(home, lambda: jw_delegate._delegations_dir(root))
+        verified = ddir / "d-verified" / "artifact"
+        missing = ddir / "d-missing" / "artifact"
+        corrupt = ddir / "d-corrupt" / "artifact"
+        failed = ddir / "d-failed" / "artifact"
+        for p in (verified, missing, corrupt, failed):
+            p.mkdir(parents=True)
+        (verified / "contract.yaml").write_text(
+            "delegate_report:\n  present: true\n  verification:\n    - {cmd: pytest, rc: 0}\n")
+        (missing / "contract.yaml").write_text(
+            "delegate_report:\n  present: false\n")
+        (corrupt / "contract.yaml").write_text("delegate_report: [\n")
+        # d-failed models failed-env/-runner/-artifact: record dir exists, contract does not.
+
+    def test_delegation_replay_counts_only_evaluable_contracts(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _overlay_project(d)
+            _add_delta(root, home)
+            self._delegation_corpus(root, home)
+            report = _run_with_home(
+                home, lambda: jw_overlay.replay(root, "verification_debt/skip"))
+            self.assertEqual(report["corpus"], "delegations")
+            self.assertEqual(report["corpus_size"], 3)  # contract-bearing records, corrupt included
+            self.assertEqual(report["opportunities"], 2)  # corrupt excluded from the denominator
+            self.assertEqual(report["fires"], 1)
+            self.assertEqual(report["fire_rate"], 0.5)
+            self.assertEqual(report["evaluation_errors"], 1)
+            self.assertEqual(report["examples"], ["d-missing/artifact/contract.yaml"])
+            self.assertIsNone(report["estimated_nuisance_rate"])
+            self.assertEqual(report["nuisance_provenance"], "unlabeled")
+            delta = _run_with_home(home, lambda: jw_overlay.load_delta(root, "verification_debt/skip"))
+            self.assertIn("replayed_at", delta["replay"])
+            self.assertNotIn("replayed_at", report)
+
+    def test_replay_stdout_is_byte_identical_and_uses_neutral_vocabulary(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _overlay_project(d)
+            _add_delta(root, home)
+            self._delegation_corpus(root, home)
+            import contextlib
+            import io
+
+            def run_once():
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = _run_with_home(home, lambda: jw_overlay.main(
+                        ["replay", "verification_debt/skip", "--root", str(root)]))
+                self.assertEqual(rc, 0)
+                return out.getvalue().encode()
+
+            first, second = run_once(), run_once()
+            self.assertEqual(first, second)
+            text = first.decode().lower()
+            self.assertIn("would have fired 1/2 times", text)
+            self.assertIn("nuisance rate requires labeling", text)
+            for forbidden in ("prevented", "improved", "benefit"):
+                self.assertNotIn(forbidden, text)
+
+    def test_empty_corpus_has_null_rate_and_explicit_marker(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _overlay_project(d)
+            _add_delta(root, home)
+            report = _run_with_home(
+                home, lambda: jw_overlay.replay(root, "verification_debt/skip"))
+            self.assertEqual(report["corpus_size"], 0)
+            self.assertEqual(report["opportunities"], 0)
+            self.assertIsNone(report["fire_rate"])
+            self.assertEqual(report["status"], "empty-corpus")
+
+    def test_review_replay_is_round_based_and_promote_accepts_real_result(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _rule2_project(d)
+            _add_delta(root, home, delta_id="review_association/open",
+                       rule="round-close-open-findings-v1")
+            report = _run_with_home(
+                home, lambda: jw_overlay.replay(root, "review_association/open"))
+            self.assertEqual(report["corpus"], "reviews")
+            self.assertEqual(report["corpus_size"], 1)
+            self.assertEqual(report["opportunities"], 1)
+            self.assertEqual(report["fires"], 1)
+            self.assertEqual(report["unlinked_findings"], 1)
+            self.assertEqual(report["resolution_provenance"], "current-task-state-approximation")
+            promoted = _run_with_home(
+                home, lambda: jw_overlay.promote(root, "review_association/open"))
+            self.assertEqual(promoted["status"], "warning")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

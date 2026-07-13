@@ -286,6 +286,96 @@ def retire(root: Path, delta_id: str, note: str | None = None) -> dict:
     return _transition(root, delta_id, "retired", note=note)
 
 
+# ---- shadow replay (§5 — deterministic projection; timestamp only in the delta event) ----
+def _replay_delegations(root: Path) -> dict:
+    import jw_delegate
+
+    base = jw_delegate._delegations_dir(root)
+    candidates = []
+    if base.is_dir():
+        candidates = [p.parent.parent for p in sorted(base.glob("*/artifact/contract.yaml"))]
+    fires: list[str] = []
+    errors = 0
+    opportunities = 0
+    for rec in candidates:
+        try:
+            contract = jw_delegate._load_contract(rec)
+        except WorkflowError:
+            errors += 1
+            continue
+        opportunities += 1
+        if rule1_fires(contract):
+            fires.append(f"{rec.name}/artifact/contract.yaml")
+    return {
+        "corpus": "delegations",
+        "corpus_size": len(candidates),
+        "opportunities": opportunities,
+        "fires": len(fires),
+        "examples": fires[:5],
+        "evaluation_errors": errors,
+    }
+
+
+def _replay_reviews(root: Path, params: dict) -> dict:
+    import jw_improve
+
+    cfg = load_config(root)
+    rows = jw_improve._project_review_rows(_project_slug(root), root, cfg)
+    opportunities = 0
+    fired_rounds: list[str] = []
+    errors = 0
+    unlinked = 0
+    severities = params.get("severities") or ["blocker", "major"]
+    for row in rows:
+        out = evaluate_rule2(root, cfg, severities, round_filter=row["round_id"])
+        errors += out["evaluation_errors"]
+        unlinked += out["unlinked"]
+        if out["evaluation_errors"]:
+            continue
+        opportunities += 1
+        if out["fires"]:
+            fired_rounds.append(row["round_id"])
+    return {
+        "corpus": "reviews",
+        "corpus_size": len(rows),
+        "opportunities": opportunities,
+        "fires": len(fired_rounds),
+        "examples": fired_rounds[:5],
+        "evaluation_errors": errors,
+        "unlinked_findings": unlinked,
+        "resolution_provenance": "current-task-state-approximation",
+    }
+
+
+def replay(root: Path, delta_id: str) -> dict:
+    """Replay one delta's fixed rule over its declared historical corpus. The returned projection
+    has no timestamp and is therefore byte-stable for identical inputs. `replayed_at` is added only
+    to the persisted delta event, where time is intentional (S7)."""
+    delta = load_delta(root, delta_id)
+    rule_id = delta.get("rule")
+    rule = RULES.get(rule_id)
+    if rule is None:
+        raise WorkflowError(f"unknown rule {rule_id!r}")
+    if rule["corpus"] == "delegations":
+        report = _replay_delegations(root)
+    elif rule["corpus"] == "reviews":
+        report = _replay_reviews(root, delta.get("params") or {})
+    else:
+        raise WorkflowError(f"rule {rule_id!r} declares unknown replay corpus {rule['corpus']!r}")
+    opportunities = report["opportunities"]
+    report["fire_rate"] = round(report["fires"] / opportunities, 4) if opportunities else None
+    report["estimated_nuisance_rate"] = None
+    report["nuisance_provenance"] = "unlabeled"
+    if not opportunities:
+        report["status"] = "empty-corpus"
+
+    persisted = dict(report)
+    persisted["replayed_at"] = _now_iso()
+    delta["replay"] = persisted
+    _write_delta(root, delta)
+    return report
+
+
 # ---- boundary warn engine (§6 — S5/S6/S9; never blocks the host, never changes exit) ----
 def _append_warning(root: Path, row: dict) -> None:
     p = _warnings_path(root)
@@ -573,6 +663,19 @@ def _cli_retire(rest: list[str]) -> int:
     return 0
 
 
+def _cli_replay(rest: list[str]) -> int:
+    pos, opts = _parse_opts(rest, value=("root",))
+    if not pos:
+        raise WorkflowError("replay requires a <delta-id>")
+    report = replay(_resolve_root(opts.get("root")), pos[0])
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    rate = "null" if report["fire_rate"] is None else f"{report['fire_rate']:.4f}"
+    print(f"would have fired {report['fires']}/{report['opportunities']} times (fire rate {rate}). "
+          "Nuisance rate requires labeling — inspect examples. "
+          "estimated nuisance rate (unlabeled: null)")
+    return 0
+
+
 def _cli_check(rest: list[str]) -> int:
     """The explicit `check` boundary: evaluate every active delta against current state. Firing does
     NOT change the exit code — a successful evaluation is exit 0 even with warnings (S5)."""
@@ -592,7 +695,7 @@ def _cli_check(rest: list[str]) -> int:
 
 _HANDLERS = {"add": _cli_add, "list": _cli_list, "show": _cli_show, "promote": _cli_promote,
              "demote": _cli_demote, "suspend": _cli_suspend, "retire": _cli_retire,
-             "check": _cli_check}
+             "replay": _cli_replay, "check": _cli_check}
 
 
 def main(argv: list[str]) -> int:
