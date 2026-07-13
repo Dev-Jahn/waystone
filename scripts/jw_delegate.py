@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
 from jw_common import (  # noqa: E402
-    WorkflowError, _project_slug, git_full_sha, load_config, load_tasks,
+    WorkflowError, _project_slug, find_project_root, git_full_sha, load_config, load_tasks,
 )
 
 DELEG_REF_NS = "refs/jw/delegations"
@@ -500,3 +500,201 @@ def run_delegation(root: Path, task_id: str, role: str, accept_flags: list[str])
     _set_state(record_dir, "needs-review", env=env_rec)
     print(f"artifact: {artifact_dir / 'contract.yaml'}")
     return 0
+
+
+# ---- evaluation path (§12 — apply/discard/show/status) ------------------------
+def _load_delegation(root: Path, did: str) -> Path:
+    rec = _record_dir(root, did)
+    if not (rec / "exposure.json").exists():
+        raise WorkflowError(f"unknown delegation {did}")
+    return rec
+
+
+def _cleanup(root: Path, did: str) -> None:
+    """Remove the worktree and both gc-survival refs; the record dir (history evidence) is kept."""
+    worktree_path = _worktree_path(root, did)
+    if worktree_path.exists():
+        _git(root, "worktree", "remove", "--force", str(worktree_path))
+    if worktree_path.exists():
+        shutil.rmtree(worktree_path, ignore_errors=True)
+    _git(root, "update-ref", "-d", f"{DELEG_REF_NS}/{did}")
+    _git(root, "update-ref", "-d", f"{DELEG_REF_NS}/{did}-result")
+    _git(root, "worktree", "prune")
+
+
+def apply_delegation(root: Path, did: str) -> int:
+    """Accept a delegation onto the live tree with plain `git apply` (§12/R2 — not 3-way). An empty
+    patch is a no-op success. On drift the apply fails atomically (no partial write) and state stays
+    needs-review; the raw git rc never leaks (exit 1)."""
+    rec = _load_delegation(root, did)
+    state = _read_status(rec).get("state")
+    if state != "needs-review":
+        raise WorkflowError(f"delegation {did} is {state} — only a needs-review delegation can be applied")
+    contract = yaml.safe_load((rec / "artifact" / "contract.yaml").read_text(encoding="utf-8"))
+    if not contract.get("empty"):
+        rc, out, err = _git(root, "apply", str(rec / "artifact" / "changes.patch"))
+        if rc != 0:
+            raise WorkflowError(
+                f"cannot apply {did}: live tree has drifted from the delegation base — commit/stash "
+                f"your changes and retry, or resolve the patch manually\n{err or out}")
+    _cleanup(root, did)
+    _set_state(rec, "applied")
+    print(f"applied {did}" + (" (empty patch — no-op)" if contract.get("empty") else ""))
+    return 0
+
+
+def discard_delegation(root: Path, did: str) -> int:
+    """Reject a delegation: state=discarded + worktree/ref cleanup (record dir kept). Accepts any
+    non-terminal state, including a crash-remnant `running` (§4/R1)."""
+    rec = _load_delegation(root, did)
+    state = _read_status(rec).get("state")
+    if state in TERMINAL_STATES:
+        raise WorkflowError(f"delegation {did} is already {state}")
+    _cleanup(root, did)
+    _set_state(rec, "discarded")
+    print(f"discarded {did}")
+    return 0
+
+
+def _status_row(root: Path, did: str, rec: Path) -> str:
+    st = _read_status(rec)
+    exposure = json.loads((rec / "exposure.json").read_text(encoding="utf-8"))
+    base7 = (exposure.get("base", {}).get("snapshot_sha") or "")[:7]
+    at = (st.get("at_transitions") or [{}])[0].get("at", "?")
+    return f"{did}  {exposure.get('task_id', '?')}  [{st.get('state', '?')}]  {base7}  {at}"
+
+
+def status(root: Path, did: str | None) -> int:
+    if did:
+        rec = _load_delegation(root, did)
+        print(_status_row(root, did, rec))
+        return 0
+    for name, rec in _iter_delegations(root):
+        print(_status_row(root, name, rec))
+    return 0
+
+
+def show(root: Path, did: str, opt: str | None) -> int:
+    rec = _load_delegation(root, did)
+    state = _read_status(rec).get("state")
+    if opt == "exposure":
+        print((rec / "exposure.json").read_text(encoding="utf-8").rstrip())
+        return 0
+    if opt in ("patch", "report"):
+        contract_p = rec / "artifact" / "contract.yaml"
+        if not contract_p.exists():
+            raise WorkflowError(f"delegation {did} is {state} — no patch/contract was produced")
+        if opt == "report":
+            print(contract_p.read_text(encoding="utf-8").rstrip())
+            return 0
+        patch_p = rec / "artifact" / "changes.patch"
+        if patch_p.exists():
+            sys.stdout.write(patch_p.read_text(encoding="utf-8"))
+        return 0
+    # summary
+    print(_status_row(root, did, rec))
+    contract_p = rec / "artifact" / "contract.yaml"
+    if contract_p.exists():
+        contract = yaml.safe_load(contract_p.read_text(encoding="utf-8"))
+        rep = contract.get("delegate_report", {}).get("present")
+        rep_str = {True: "present", False: "absent", "invalid": "invalid"}.get(rep, str(rep))
+        print(f"changed_files: {len(contract.get('changed_files', []))}")
+        print("patch: " + ("empty" if contract.get("empty") else "changes.patch"))
+        print(f"delegate_report: {rep_str}")
+    return 0
+
+
+# ---- CLI (hand-rolled parsing; {0,1,2} exit contract, never a raw git rc) -----
+def _parse_opts(rest: list[str], *, value=(), boolean=(), repeat=()) -> tuple[list[str], dict]:
+    pos: list[str] = []
+    opts: dict = {r: [] for r in repeat}
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a.startswith("--"):
+            name = a[2:]
+            if name in repeat:
+                if i + 1 >= len(rest):
+                    raise WorkflowError(f"--{name} requires a value")
+                opts[name].append(rest[i + 1])
+                i += 2
+            elif name in value:
+                if i + 1 >= len(rest):
+                    raise WorkflowError(f"--{name} requires a value")
+                opts[name] = rest[i + 1]
+                i += 2
+            elif name in boolean:
+                opts[name] = True
+                i += 1
+            else:
+                raise WorkflowError(f"unknown option --{name}")
+        else:
+            pos.append(a)
+            i += 1
+    return pos, opts
+
+
+def _resolve_root(explicit: str | None) -> Path:
+    root = Path(explicit).resolve() if explicit else find_project_root(Path.cwd())
+    if root is None:
+        raise WorkflowError("no initialized project (run inside one, or pass --root DIR)")
+    return root
+
+
+def _cli_run(rest: list[str]) -> int:
+    pos, opts = _parse_opts(rest, value=("role", "root"), repeat=("accept",))
+    if not pos:
+        raise WorkflowError("run requires a <task-id>")
+    return run_delegation(_resolve_root(opts.get("root")), pos[0],
+                          opts.get("role", "implementer"), opts.get("accept", []))
+
+
+def _cli_status(rest: list[str]) -> int:
+    pos, opts = _parse_opts(rest, value=("root",))
+    return status(_resolve_root(opts.get("root")), pos[0] if pos else None)
+
+
+def _cli_show(rest: list[str]) -> int:
+    pos, opts = _parse_opts(rest, value=("root",), boolean=("patch", "report", "exposure"))
+    if not pos:
+        raise WorkflowError("show requires a <delegation-id>")
+    chosen = [o for o in ("patch", "report", "exposure") if opts.get(o)]
+    if len(chosen) > 1:
+        raise WorkflowError("show takes at most one of --patch/--report/--exposure")
+    return show(_resolve_root(opts.get("root")), pos[0], chosen[0] if chosen else None)
+
+
+def _cli_apply(rest: list[str]) -> int:
+    pos, opts = _parse_opts(rest, value=("root",))
+    if not pos:
+        raise WorkflowError("apply requires a <delegation-id>")
+    return apply_delegation(_resolve_root(opts.get("root")), pos[0])
+
+
+def _cli_discard(rest: list[str]) -> int:
+    pos, opts = _parse_opts(rest, value=("root",))
+    if not pos:
+        raise WorkflowError("discard requires a <delegation-id>")
+    return discard_delegation(_resolve_root(opts.get("root")), pos[0])
+
+
+_HANDLERS = {"run": _cli_run, "status": _cli_status, "show": _cli_show,
+             "apply": _cli_apply, "discard": _cli_discard}
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] not in _HANDLERS:
+        print("jw delegate: expected subcommand (run|status|show|apply|discard)", file=sys.stderr)
+        return 1
+    try:
+        return _HANDLERS[argv[0]](argv[1:])
+    except _RefusedWrite as e:
+        print(f"jw delegate: {e}", file=sys.stderr)
+        return 2
+    except WorkflowError as e:
+        print(f"jw delegate: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

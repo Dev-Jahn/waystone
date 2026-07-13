@@ -23,13 +23,14 @@ Full convention: [references/conventions.md](references/conventions.md).
 | `/jahns-workflow:status` | Cross-project dashboard (branches, rounds, active/blocked tasks); projects can be local or remote. |
 | `/jahns-workflow:improve` | Advisory report over your Claude Code history + review evidence: provenance-labeled recommendations you accept or reject (recorded, never auto-applied). |
 | `jw task` CLI | Read and mutate the registry without opening the whole file: `list`/`show`, `add`/`set`/`drop` (validated, comment-preserving), `archive` (move old done/dropped tasks to `tasks.archive.yaml`). |
+| `jw delegate` CLI | Hand one task to an external runner in an isolated git worktree cut from an immutable snapshot of your current (even dirty) tree: `run`/`status`/`show`/`apply`/`discard`. The harness computes the patch from git; the runner's own report is carried through labeled as a claim; you `apply` (plain `git apply`) or `discard` after review. |
 | SessionStart hook | Injects the digest + active tasks on start/resume/compact. No-op outside an initialized project. |
 | PreToolUse hook | Redirects a raw read of `tasks.yaml` to the `jw task` CLI; `cat` stays as an escape hatch. |
 | PostToolUse hook | Validates `tasks.yaml` on every edit and regenerates `ROADMAP.md`. |
 
 Rendering and validation are plain Python (`scripts/jw_*.py`, run with `uv`) — no LLM tokens. One
 front door, `jw <group>`, dispatches them
-(`validate/task/roadmap/ssot/status/remote/review/approve/round/lanes/resume`).
+(`validate/task/roadmap/ssot/status/remote/review/approve/round/lanes/resume/improve/delegate`).
 
 ## Rounds
 

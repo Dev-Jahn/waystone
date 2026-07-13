@@ -3335,5 +3335,216 @@ class DelegateRunTests(unittest.TestCase):
             self.assertIn("already has active delegation", str(cm.exception))
 
 
+def _deleg_project(d) -> tuple[Path, Path]:
+    root = Path(d) / "repo"
+    root.mkdir()
+    init_repo(root)
+    (root / ".jahns-workflow.yml").write_text("version: 1\nproject: demo\n")
+    (root / "tasks.yaml").write_text(
+        "version: 1\nproject: demo\ntasks:\n"
+        '  - id: feat/xyz\n    title: "implement xyz feature"\n    status: active\n'
+        '    accept:\n      - "criterion alpha here"\n')
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "setup")
+    home = Path(d) / "home"
+    _write_profile(home)
+    return root, home
+
+
+def _deleg_fake(changes, report=None, rc=0):
+    def fake(worktree, model, prompt_path, record_dir):
+        for name, content in changes.items():
+            (worktree / name).write_text(content)
+        (record_dir / "last_message.md").write_text("s", encoding="utf-8")
+        if report is not None:
+            (worktree / "JW_REPORT.yaml").write_text(report, encoding="utf-8")
+        return (rc, 0.1)
+    return fake
+
+
+def _deleg_run(root, home, fake, task="feat/xyz", accept=None):
+    import contextlib
+    import io
+    orig = jw_delegate._run_codex
+    jw_delegate._run_codex = fake
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            return _run_with_home(
+                home, lambda: jw_delegate.run_delegation(root, task, "implementer", accept or []))
+    finally:
+        jw_delegate._run_codex = orig
+
+
+def _latest_rec(root, home):
+    return _run_with_home(home, lambda: sorted(jw_delegate._delegations_dir(root).iterdir())[-1])
+
+
+class DelegateApplyTests(unittest.TestCase):
+    """0.8.0 M1 §12 — plain `git apply`, atomic drift failure, discard cleanup, re-apply refusal."""
+
+    def test_apply_success_and_cleanup(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            _deleg_run(root, home, _deleg_fake({"impl.py": "print('x')\n"}))
+            rec = _latest_rec(root, home)
+            wt = _run_with_home(home, lambda: jw_delegate._worktree_path(root, rec.name))
+            rc = _run_with_home(home, lambda: jw_delegate.apply_delegation(root, rec.name))
+            self.assertEqual(rc, 0)
+            self.assertTrue((root / "impl.py").exists())                     # patch landed on live tree
+            self.assertEqual(jw_delegate._read_status(rec)["state"], "applied")
+            self.assertFalse(wt.exists())                                    # worktree removed
+            self.assertTrue((rec / "artifact" / "contract.yaml").exists())   # record preserved
+            self.assertNotEqual(git(root, "rev-parse", "--verify",
+                                    f"refs/jw/delegations/{rec.name}").returncode, 0)  # ref gone
+
+    def test_apply_drift_is_atomic_exit1(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            _deleg_run(root, home, _deleg_fake({"a.py": "AAA\n", "b.py": "BBB\n"}))
+            rec = _latest_rec(root, home)
+            (root / "a.py").write_text("conflicting live content\n")  # drift on a patch target
+            import contextlib
+            import io
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = _run_with_home(home, lambda: jw_delegate.main(["apply", rec.name, "--root", str(root)]))
+            self.assertEqual(rc, 1)                                   # not a raw git rc
+            self.assertIn("drifted", err.getvalue())
+            self.assertFalse((root / "b.py").exists())               # atomic: other target untouched
+            self.assertEqual(jw_delegate._read_status(rec)["state"], "needs-review")  # unchanged
+
+    def test_apply_unrelated_dirty_ok(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            _deleg_run(root, home, _deleg_fake({"impl.py": "x\n"}))
+            rec = _latest_rec(root, home)
+            (root / "f.txt").write_text("locally dirtied but unrelated")
+            rc = _run_with_home(home, lambda: jw_delegate.apply_delegation(root, rec.name))
+            self.assertEqual(rc, 0)
+            self.assertTrue((root / "impl.py").exists())
+
+    def test_apply_empty_patch_noop(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            _deleg_run(root, home, _deleg_fake({}))  # no changes
+            rec = _latest_rec(root, home)
+            rc = _run_with_home(home, lambda: jw_delegate.apply_delegation(root, rec.name))
+            self.assertEqual(rc, 0)
+            self.assertEqual(jw_delegate._read_status(rec)["state"], "applied")
+
+    def test_reapply_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            _deleg_run(root, home, _deleg_fake({"impl.py": "x\n"}))
+            rec = _latest_rec(root, home)
+            _run_with_home(home, lambda: jw_delegate.apply_delegation(root, rec.name))
+            with self.assertRaises(jw_delegate.WorkflowError):
+                _run_with_home(home, lambda: jw_delegate.apply_delegation(root, rec.name))
+
+    def test_discard_cleanup_and_accepts_running(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            _deleg_run(root, home, _deleg_fake({"impl.py": "x\n"}))
+            rec = _latest_rec(root, home)
+            wt = _run_with_home(home, lambda: jw_delegate._worktree_path(root, rec.name))
+            jw_delegate._set_state(rec, "running")  # simulate a crash remnant (R1)
+            rc = _run_with_home(home, lambda: jw_delegate.discard_delegation(root, rec.name))
+            self.assertEqual(rc, 0)
+            self.assertEqual(jw_delegate._read_status(rec)["state"], "discarded")
+            self.assertFalse(wt.exists())
+            self.assertTrue((rec / "exposure.json").exists())  # record preserved
+
+
+class DelegateCliTests(unittest.TestCase):
+    """0.8.0 M1 §2 — arg parsing, exit codes, status/show surfaces (incl. R11 no-artifact refusal)."""
+
+    def test_run_via_main_and_status_list(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            import contextlib
+            import io
+            orig = jw_delegate._run_codex
+            jw_delegate._run_codex = _deleg_fake({"impl.py": "x\n"})
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = _run_with_home(home, lambda: jw_delegate.main(
+                        ["run", "feat/xyz", "--root", str(root), "--accept", "extra criterion"]))
+                self.assertEqual(rc, 0)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    _run_with_home(home, lambda: jw_delegate.main(["status", "--root", str(root)]))
+            finally:
+                jw_delegate._run_codex = orig
+            self.assertIn("feat/xyz", out.getvalue())
+            self.assertIn("needs-review", out.getvalue())
+
+    def test_unknown_subcommand(self):
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(jw_delegate.main(["frobnicate"]), 1)
+
+    def test_jw_dispatcher_routes_delegate(self):
+        import jw
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = _run_with_home(home, lambda: jw.main(["delegate", "status", "--root", str(root)]))
+            self.assertEqual(rc, 0)
+
+    def test_unknown_delegation_id(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            import contextlib
+            import io
+            with contextlib.redirect_stderr(io.StringIO()):
+                rc = _run_with_home(home, lambda: jw_delegate.main(
+                    ["show", "nope-not-real", "--root", str(root)]))
+            self.assertEqual(rc, 1)
+
+    def test_show_surfaces(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            report = "verification: []\nlimitations: []\nrisks: []\nescalations: []\n"
+            _deleg_run(root, home, _deleg_fake({"impl.py": "hello\n"}, report=report))
+            rec = _latest_rec(root, home)
+            import contextlib
+            import io
+            for opt, needle in (("--patch", "hello"), ("--report", "jw-artifact-1"),
+                                ("--exposure", "jw-exposure-1")):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = _run_with_home(home, lambda o=opt: jw_delegate.main(
+                        ["show", rec.name, o, "--root", str(root)]))
+                self.assertEqual(rc, 0)
+                self.assertIn(needle, buf.getvalue())
+
+    def test_show_patch_report_refused_when_no_artifact(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            (root / ".jahns-workflow.yml").write_text(
+                "version: 1\nproject: demo\ndelegation:\n  env_prep:\n    - \"false\"\n")
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(jw_delegate.WorkflowError):
+                    _deleg_run(root, home, _deleg_fake({"impl.py": "x\n"}))  # -> failed-env
+            rec = _latest_rec(root, home)
+            self.assertEqual(jw_delegate._read_status(rec)["state"], "failed-env")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(_run_with_home(home, lambda: jw_delegate.main(
+                    ["show", rec.name, "--patch", "--root", str(root)])), 1)
+                self.assertEqual(_run_with_home(home, lambda: jw_delegate.main(
+                    ["show", rec.name, "--report", "--root", str(root)])), 1)
+            # exposure + summary always available (recorded at start)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(_run_with_home(home, lambda: jw_delegate.main(
+                    ["show", rec.name, "--exposure", "--root", str(root)])), 0)
+                self.assertEqual(_run_with_home(home, lambda: jw_delegate.main(
+                    ["show", rec.name, "--root", str(root)])), 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

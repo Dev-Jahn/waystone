@@ -27,6 +27,10 @@ titles; set `anchor:` to the governing SSOT §-anchor when known) — rather tha
 registry. Unresolved questions for the user become `decision/...` tasks; when a `decision/...` is
 answered, record the ruling with `jw task set <id> ruling "..."`.
 
+An implementation task can be delegated to an external runner with `jw delegate run <task-id>` — it
+runs in an isolated worktree cut from a snapshot of your current tree and comes back as a reviewable
+patch you `apply` or `discard` (the guided flow arrives in a later milestone).
+
 Then close the round in one atomic, deterministic step instead of hand-editing each field:
 
 ```bash

@@ -138,3 +138,36 @@ The gate therefore guarantees *who is authorised*, not *that a human personally 
 solo developer driving agents, treat approval as a provenance record and merge speed-bump, not a
 hard human-in-the-loop control. A true human gate requires running the agent under a separate bot
 identity and reserving the approver credential for interactive use.
+
+## 8. Delegation (`jw delegate`)
+
+A single implementation task can be handed to an external runner in an isolated git worktree, then
+brought back through an explicit artifact contract. The invariants:
+
+- **Snapshot base = what you see now.** The delegation base is an immutable snapshot commit of your
+  current working tree — tracked modifications, staged changes, and untracked (non-`.gitignore`d)
+  files included. A dirty tree is delegated without polluting history: the snapshot is a detached
+  commit object under `refs/jw/delegations/<id>` (never pushed), not a commit on your branch. A
+  clean tree uses HEAD directly. Submodules, an unborn HEAD, or an in-progress merge/rebase/
+  cherry-pick are refused (they would bake a partial or conflicted state into the base).
+- **Harness computes; the runner claims.** The patch, changed-files list, and base/result SHAs are
+  computed by the harness from git directly (explicit provenance). The runner's own report —
+  verification it ran, limitations, risks, escalations (written to `JW_REPORT.yaml`) — is carried
+  through the contract labeled *delegate-claimed* and is never promoted to fact.
+- **You accept or discard.** A finished delegation is `needs-review`, its worktree preserved so a
+  verifier can run the acceptance criteria against the same base. `jw delegate apply` lands the
+  patch on the live tree with plain `git apply` (it fails atomically if the tree has drifted from
+  the base — nothing is partially applied); `jw delegate discard` throws it away. Both keep the
+  record directory as history. Until one of them runs, that task is locked against a second
+  delegation (single mutation owner) — a failed env/runner leaves the worktree as evidence and
+  holds the lock too, so `discard` is how you clear it.
+- **Acceptance criteria are required, never invented.** A delegated task must carry an `accept:`
+  field (a YAML list of free-text criteria, edited in `tasks.yaml` directly) or be given
+  `--accept` at delegation time. With neither, delegation is refused — the harness does not make up
+  the bar. `accept` is deliberately not settable through `jw task add/set` (comma-splitting free
+  text would distort it).
+
+Artifacts live plugin-local (`~/.claude/jahns-workflow/delegations/…`, worktrees under
+`~/.claude/jahns-workflow/worktrees/…`), never committed to the repo. The runner backend (model)
+is bound per role in `~/.claude/jahns-workflow/profile.yml`; a missing binding fails loud rather
+than guessing a default.
