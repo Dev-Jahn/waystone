@@ -18,6 +18,7 @@ Groups:
   improve  trace|reviews|audit|decide|evidence ...  parse CC logs / review evidence / audit / decisions
   delegate run|status|show|apply|discard|verify ...  hand a task to an external runner in a worktree
   overlay  add|list|show|promote|demote|suspend|retire|replay ...  project-local adaptive warn deltas
+  check    [--root]                   evaluate active overlay deltas at an explicit boundary (never blocks)
 
 Existing hook/skill call sites that invoke jw_<name>.py directly keep working; this is an
 additive convenience front door (GPT review: consolidate under one `jw` CLI).
@@ -61,6 +62,9 @@ def main(argv: list[str]) -> int:
     if group == "overlay":
         import jw_overlay
         return jw_overlay.main(rest)
+    if group == "check":
+        import jw_overlay
+        return jw_overlay.main(["check", *rest])
     if group == "remote":
         import importlib
         mod = importlib.import_module("jw_remote")

@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from jw_common import (  # noqa: E402
-    WorkflowError, _project_slug, find_project_root,
+    WorkflowError, _project_slug, find_project_root, load_config,
 )
 
 # delta-id grammar mirrors the improve rec_id (`<lens>/<kebab-gist>`, S2) so a rec materialises to a
@@ -50,7 +50,10 @@ RULES: dict[str, dict] = {
         "default_params": {},
     },
     "round-close-open-findings-v1": {
-        "boundaries": {"round-close", "check"},
+        # §6 boundary table (R4, "the single definition of evaluation targets") lists review-ingest as
+        # a rule-2 target too; §4's "round-close, check" under-lists it — include it so the jw_review
+        # ingest warn hook (§1) actually evaluates. Faithful minimal resolution of that inconsistency.
+        "boundaries": {"round-close", "review-ingest", "check"},
         "corpus": "reviews",
         "default_params": {"severities": ["blocker", "major"]},
     },
@@ -283,6 +286,180 @@ def retire(root: Path, delta_id: str, note: str | None = None) -> dict:
     return _transition(root, delta_id, "retired", note=note)
 
 
+# ---- boundary warn engine (§6 — S5/S6/S9; never blocks the host, never changes exit) ----
+def _append_warning(root: Path, row: dict) -> None:
+    p = _warnings_path(root)
+    _mkdir_or_refuse(p.parent)
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _emit(root: Path, boundary: str, delta_id: str, rule: str, delta_status: str, event: str,
+          message: str, context: dict) -> dict:
+    """Append a warnings.jsonl row and (only for a fire on a warning-stage delta) print to stderr.
+    Observing fires and conflict/evaluation-error events are logged silently (S6)."""
+    row = {"at": _now_iso(), "boundary": boundary, "delta_id": delta_id, "rule": rule,
+           "delta_status": delta_status, "event": event, "message": message, "context": context}
+    _append_warning(root, row)
+    if event == "fire" and delta_status == "warning":
+        print(f"jw warn [{delta_id}]: {message}", file=sys.stderr)
+    return row
+
+
+def _rule1_targets(root: Path, boundary: str, context: dict) -> tuple[list[str], list[str]]:
+    """(fired_dids, error_dids) for delegation-verification-evidence-v1 at this boundary. Records
+    without a contract (failed-env/-runner/-artifact) are excluded — they are not evaluable (R8)."""
+    import jw_delegate
+    targets: list[tuple[str, Path]] = []
+    if boundary in ("delegate-run", "delegate-apply"):
+        did = context.get("delegation_id")
+        if did:
+            rec = jw_delegate._record_dir(root, did)
+            if (rec / "artifact" / "contract.yaml").exists():
+                targets.append((did, rec))
+    elif boundary == "check":
+        for did, rec in jw_delegate._iter_delegations(root):
+            st = jw_delegate._read_status_raw(rec)
+            if st and st.get("state") == "needs-review" and (rec / "artifact" / "contract.yaml").exists():
+                targets.append((did, rec))
+    fired: list[str] = []
+    errors: list[str] = []
+    for did, rec in targets:
+        try:
+            contract = jw_delegate._load_contract(rec)
+        except WorkflowError:
+            errors.append(did)  # corrupt/unparseable = evaluation-error, never a fire (no invention)
+            continue
+        if rule1_fires(contract):
+            fired.append(did)
+    return fired, errors
+
+
+def _rule2_at_boundary(root: Path, boundary: str, context: dict, severities) -> dict | None:
+    """Evaluate round-close-open-findings-v1 for this boundary (None if the boundary carries no rule-2
+    target). Config is loaded here so a config read failure surfaces as an evaluation error, not a fire."""
+    cfg = load_config(root)
+    if boundary == "round-close":
+        return evaluate_rule2(root, cfg, severities,
+                              closing_done=set(context.get("closing_task_ids") or []))
+    if boundary == "review-ingest":
+        return evaluate_rule2(root, cfg, severities, round_filter=context.get("round_id"))
+    if boundary == "check":
+        return evaluate_rule2(root, cfg, severities)
+    return None
+
+
+_RULE1_MSG = ("delegation {did} carries no delegate-side verification evidence — verify independently "
+              "before apply (a delegate-claimed absence is a reporting gap, not proof of unverified work)")
+
+
+def evaluate_boundary(root: Path, boundary: str, context: dict) -> list[dict]:
+    """Evaluate active (observing/warning) deltas whose rule declares `boundary`, append fire/
+    evaluation-error/conflict rows to warnings.jsonl, and (warning stage only) print fires to stderr.
+    Wrapped so ANY exception is swallowed with one stderr notice — a warn-engine bug must never change
+    the host command's exit or abort its flow (S5, host-exit invariant)."""
+    try:
+        return _evaluate_boundary(root, boundary, context)
+    except Exception as e:  # noqa: BLE001 — never propagate into the host flow
+        print(f"jw warn: overlay evaluation error at {boundary}: {e}", file=sys.stderr)
+        return []
+
+
+def _evaluate_boundary(root: Path, boundary: str, context: dict) -> list[dict]:
+    relevant = [d for d in active_deltas(root)
+                if boundary in RULES.get(d.get("rule"), {}).get("boundaries", set())]
+    if not relevant:
+        return []
+    by_rule: dict[str, list[dict]] = {}
+    for d in relevant:
+        by_rule.setdefault(d["rule"], []).append(d)
+
+    events: list[dict] = []
+    for rule_id, group in sorted(by_rule.items()):
+        # S9 least-restrictive: observing overrides warning; a representative delta carries the fire id
+        observing = sorted((d for d in group if d["status"] == "observing"), key=lambda d: d["id"])
+        rep = observing[0] if observing else sorted(group, key=lambda d: d["id"])[0]
+        eff = "observing" if observing else "warning"
+        if len(group) > 1:
+            events.append(_emit(
+                root, boundary, rep["id"], rule_id, eff, "conflict",
+                f"{len(group)} active deltas reference {rule_id} — effective stage {eff} "
+                f"(least-restrictive)", {"delta_ids": sorted(d["id"] for d in group)}))
+        params = rep.get("params") or {}
+
+        if rule_id == "delegation-verification-evidence-v1":
+            fired, errors = _rule1_targets(root, boundary, context)
+            for did in fired:
+                events.append(_emit(root, boundary, rep["id"], rule_id, eff, "fire",
+                                    _RULE1_MSG.format(did=did), {"delegation_id": did}))
+            for did in errors:
+                events.append(_emit(root, boundary, rep["id"], rule_id, eff, "evaluation-error",
+                                    f"delegation {did} contract could not be evaluated",
+                                    {"delegation_id": did}))
+        elif rule_id == "round-close-open-findings-v1":
+            severities = params.get("severities") or ["blocker", "major"]
+            out = _rule2_at_boundary(root, boundary, context, severities)
+            if out is None:
+                continue
+            if out["fires"]:
+                desc = ", ".join(f"{f['task_id']} ({f['severity']}, review {f['review_round']})"
+                                 for f in out["fires"])
+                msg = f"round close leaves {len(out['fires'])} severe finding task(s) open: {desc}"
+                if out["unlinked"]:
+                    msg += f" · {out['unlinked']} unlinked finding(s) (provenance unknown)"
+                events.append(_emit(root, boundary, rep["id"], rule_id, eff, "fire", msg,
+                                    {"task_ids": [f["task_id"] for f in out["fires"]],
+                                     "round_id": context.get("round_id"), "unlinked": out["unlinked"]}))
+            if out["evaluation_errors"]:
+                events.append(_emit(root, boundary, rep["id"], rule_id, eff, "evaluation-error",
+                                    f"{out['evaluation_errors']} review file(s) could not be evaluated",
+                                    {"round_id": context.get("round_id")}))
+    return events
+
+
+# ---- exposure (§9 — round exposure record; delegation exposure lives in jw_delegate) ----
+def _exposure_dir(root: Path) -> Path:
+    return _plugin_base() / "exposure" / _project_slug(root)
+
+
+def _profile_summary() -> tuple[str | None, dict | None]:
+    """(profile_fingerprint, {role: backend}) from the delegation profile, or (None, None) when it is
+    absent — a round closes without any delegation, so the harness never guesses bindings."""
+    import jw_delegate
+    try:
+        profile, fp = jw_delegate._load_profile()
+    except WorkflowError:
+        return None, None
+    bindings: dict[str, str] = {}
+    for role, b in (profile.get("bindings") or {}).items():
+        if isinstance(b, dict) and isinstance(b.get("backend"), str):
+            bindings[role] = b["backend"]
+    return fp, (bindings or None)
+
+
+def write_round_exposure(root: Path, round_id: str, head_sha: str | None, watermark: str | None):
+    """Immutable per-round exposure record written at close (§9/#4). A re-close of the same round-id
+    gets a `-2`/`-3` suffix (H4 precedent — existing records are never overwritten)."""
+    fp, bindings = _profile_summary()
+    exposure = {
+        "schema": "jw-round-exposure-1", "round_id": round_id, "at": _now_iso(),
+        "project": {"pslug": _project_slug(root), "root": str(Path(root).resolve())},
+        "head_sha": head_sha, "config_watermark": watermark,
+        "profile_fingerprint": fp, "bindings": bindings,
+        "overlays_active": [{"id": d["id"], "status": d["status"]} for d in active_deltas(root)],
+        "guards": None, "waivers": [],
+    }
+    edir = _exposure_dir(root)
+    _mkdir_or_refuse(edir)
+    p = edir / f"round-{round_id}.json"
+    n = 2
+    while p.exists():
+        p = edir / f"round-{round_id}-{n}.json"
+        n += 1
+    p.write_text(json.dumps(exposure, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return p, exposure
+
+
 # ---- CLI (hand-rolled parsing; {0,1,2} exit contract) --------------------------
 def _parse_opts(rest: list[str], *, value=(), boolean=(), repeat=()) -> tuple[list[str], dict]:
     pos: list[str] = []
@@ -396,8 +573,26 @@ def _cli_retire(rest: list[str]) -> int:
     return 0
 
 
+def _cli_check(rest: list[str]) -> int:
+    """The explicit `check` boundary: evaluate every active delta against current state. Firing does
+    NOT change the exit code — a successful evaluation is exit 0 even with warnings (S5)."""
+    pos, opts = _parse_opts(rest, value=("root",))
+    root = _resolve_root(opts.get("root"))
+    events = evaluate_boundary(root, "check", {})
+    fires = [e for e in events if e["event"] == "fire"]
+    if not fires:
+        print("jw check: no active-delta warnings")
+    for e in fires:
+        marker = "warn" if e["delta_status"] == "warning" else "observe"
+        print(f"[{marker}] {e['rule']} [{e['delta_id']}]: {e['message']}")
+    for e in (e for e in events if e["event"] == "evaluation-error"):
+        print(f"[eval-error] {e['rule']}: {e['message']}")
+    return 0
+
+
 _HANDLERS = {"add": _cli_add, "list": _cli_list, "show": _cli_show, "promote": _cli_promote,
-             "demote": _cli_demote, "suspend": _cli_suspend, "retire": _cli_retire}
+             "demote": _cli_demote, "suspend": _cli_suspend, "retire": _cli_retire,
+             "check": _cli_check}
 
 
 def main(argv: list[str]) -> int:

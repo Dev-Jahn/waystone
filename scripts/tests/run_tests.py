@@ -4009,5 +4009,318 @@ class OverlayRuleTests(unittest.TestCase):
             self.assertEqual(out["fires"], [])  # a is being closed in this round
 
 
+# ==================================================== v0.8.0 M2: boundary warn engine + exposure (C2)
+def _force_status(root, home, delta_id, status):
+    p = _run_with_home(home, lambda: jw_overlay._delta_path(root, delta_id))
+    delta = _json.loads(p.read_text())
+    delta["status"] = status
+    p.write_text(_json.dumps(delta))
+
+
+def _read_warnings(root, home):
+    wp = _run_with_home(home, lambda: jw_overlay._warnings_path(root))
+    if not wp.exists():
+        return []
+    return [_json.loads(ln) for ln in wp.read_text().splitlines() if ln.strip()]
+
+
+_M2_TRIAGE_FEEDBACK = (
+    "meta\n\n## Findings (triage skeleton v1)\n"
+    "| Finding | Severity | Verdict | Evidence | Task |\n"
+    "| --- | --- | --- | --- | --- |\n"
+    "| JW-GPT-001 — a | `blocker` | REAL | ev | `fix/finding-a` |\n")
+
+
+def _check_project(d):
+    root = Path(d) / "repo"
+    root.mkdir()
+    init_repo(root)
+    (root / ".jahns-workflow.yml").write_text("version: 1\nproject: demo\nreviews_dir: docs/reviews\n")
+    (root / "tasks.yaml").write_text(
+        "version: 1\nproject: demo\ntasks:\n"
+        "  - id: feat/xyz\n    title: task one here\n    status: active\n    accept:\n      - c1\n"
+        "  - id: feat/two\n    title: task two here\n    status: active\n    accept:\n      - c2\n"
+        "  - id: feat/three\n    title: task three here\n    status: active\n    accept:\n      - c3\n"
+        "  - id: fix/finding-a\n    title: open severe finding\n    status: active\n"
+        "    severity: blocker\n    origin: review-2026-01-01-r1\n")
+    rdir = root / "docs" / "reviews"
+    rdir.mkdir(parents=True)
+    (rdir / "2026-01-01-r1-feedback.md").write_text(_M2_TRIAGE_FEEDBACK)
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "setup")
+    home = Path(d) / "home"
+    _write_profile(home)
+    return root, home
+
+
+def _round_review_project(d):
+    root = Path(d) / "repo"
+    root.mkdir()
+    init_repo(root)
+    (root / ".jahns-workflow.yml").write_text(
+        "version: 1\nproject: demo\nreviews_dir: docs/reviews\nstate:\n  last_round_commit: null\n")
+    (root / "tasks.yaml").write_text(
+        "version: 1\nproject: demo\ntasks:\n"
+        "  - id: chore/close-me\n    title: a task to close now\n    status: active\n    deps: []\n"
+        "  - id: fix/finding-a\n    title: open severe finding\n    status: active\n"
+        "    severity: blocker\n    origin: review-2026-01-01-r1\n")
+    rdir = root / "docs" / "reviews"
+    rdir.mkdir(parents=True)
+    (rdir / "2026-01-01-r1-feedback.md").write_text(_M2_TRIAGE_FEEDBACK)
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "setup")
+    home = Path(d) / "home"
+    home.mkdir()
+    return root, home
+
+
+class BoundaryWarnTests(unittest.TestCase):
+    """0.8.0 M2 §6 — boundary warn engine: observing logs silently, warning also stderr, host exit
+    never changes, engine exceptions never propagate, warnings.jsonl row schema, check pin (R4)."""
+
+    def _deleg_needs_review(self, d, report=None):
+        root, home = _deleg_project(d)
+        _deleg_run(root, home, _deleg_fake({"impl.py": "x\n"}, report=report))
+        return root, home, _latest_rec(root, home).name
+
+    def test_delegate_run_observing_logs_no_stderr(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home, did = self._deleg_needs_review(d, report=None)  # no verification -> fires
+            _run_with_home(home, lambda: jw_overlay.add_delta(
+                root, "verification_debt/skip", rule="delegation-verification-evidence-v1", summary="s"))
+            import contextlib
+            import io
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                events = _run_with_home(home, lambda: jw_overlay.evaluate_boundary(
+                    root, "delegate-run", {"delegation_id": did}))
+            fires = [e for e in events if e["event"] == "fire"]
+            self.assertEqual(len(fires), 1)
+            self.assertEqual(fires[0]["delta_status"], "observing")
+            self.assertEqual(err.getvalue(), "")  # observing suppresses stderr
+            rows = _read_warnings(root, home)
+            self.assertTrue(any(r["event"] == "fire" for r in rows))
+            # row schema
+            r = next(r for r in rows if r["event"] == "fire")
+            for key in ("at", "boundary", "delta_id", "rule", "delta_status", "event", "message", "context"):
+                self.assertIn(key, r)
+            self.assertEqual(r["context"]["delegation_id"], did)
+
+    def test_delegate_run_warning_emits_stderr(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home, did = self._deleg_needs_review(d, report=None)
+            _run_with_home(home, lambda: jw_overlay.add_delta(
+                root, "verification_debt/skip", rule="delegation-verification-evidence-v1", summary="s"))
+            _force_status(root, home, "verification_debt/skip", "warning")
+            import contextlib
+            import io
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                events = _run_with_home(home, lambda: jw_overlay.evaluate_boundary(
+                    root, "delegate-run", {"delegation_id": did}))
+            self.assertIn("jw warn", err.getvalue())
+            self.assertEqual([e for e in events if e["event"] == "fire"][0]["delta_status"], "warning")
+
+    def test_no_fire_when_verification_present(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = ("verification:\n  - {cmd: \"pytest\", rc: 0, summary: \"ok\"}\n"
+                      "limitations: []\nrisks: []\nescalations: []\n")
+            root, home, did = self._deleg_needs_review(d, report=report)
+            _run_with_home(home, lambda: jw_overlay.add_delta(
+                root, "verification_debt/skip", rule="delegation-verification-evidence-v1", summary="s"))
+            events = _run_with_home(home, lambda: jw_overlay.evaluate_boundary(
+                root, "delegate-run", {"delegation_id": did}))
+            self.assertEqual([e for e in events if e["event"] == "fire"], [])
+
+    def test_apply_exit_unchanged_despite_warning(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home, did = self._deleg_needs_review(d, report=None)
+            _run_with_home(home, lambda: jw_overlay.add_delta(
+                root, "verification_debt/skip", rule="delegation-verification-evidence-v1", summary="s"))
+            _force_status(root, home, "verification_debt/skip", "warning")
+            import contextlib
+            import io
+            with contextlib.redirect_stderr(io.StringIO()):
+                rc = _run_with_home(home, lambda: jw_delegate.apply_delegation(root, did))
+            self.assertEqual(rc, 0)  # warn never changes host exit (S5)
+            self.assertTrue((root / "impl.py").exists())
+
+    def test_engine_exception_does_not_propagate(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            orig = jw_overlay.active_deltas
+            jw_overlay.active_deltas = lambda r: (_ for _ in ()).throw(RuntimeError("boom"))
+            import contextlib
+            import io
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    events = _run_with_home(home, lambda: jw_overlay.evaluate_boundary(root, "check", {}))
+            finally:
+                jw_overlay.active_deltas = orig
+            self.assertEqual(events, [])  # swallowed, host flow protected
+
+    def test_conflict_least_restrictive(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home, did = self._deleg_needs_review(d, report=None)
+            _run_with_home(home, lambda: jw_overlay.add_delta(
+                root, "verification_debt/one", rule="delegation-verification-evidence-v1", summary="s"))
+            _run_with_home(home, lambda: jw_overlay.add_delta(
+                root, "verification_debt/two", rule="delegation-verification-evidence-v1", summary="s"))
+            _force_status(root, home, "verification_debt/one", "warning")  # two stays observing
+            events = _run_with_home(home, lambda: jw_overlay.evaluate_boundary(
+                root, "delegate-run", {"delegation_id": did}))
+            # effective status is least-restrictive (observing wins) + a conflict event recorded
+            self.assertTrue(any(e["event"] == "conflict" for e in events))
+            self.assertEqual([e for e in events if e["event"] == "fire"][0]["delta_status"], "observing")
+
+    def test_check_multi_delegation_multi_finding_pin(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _check_project(d)
+            report = ("verification:\n  - {cmd: \"pytest\", rc: 0, summary: \"ok\"}\n"
+                      "limitations: []\nrisks: []\nescalations: []\n")
+            _deleg_run(root, home, _deleg_fake({"a.py": "x\n"}, report=None), task="feat/xyz")     # fires
+            _deleg_run(root, home, _deleg_fake({"b.py": "y\n"}, report=report), task="feat/two")   # verified
+            with self.assertRaises(jw_delegate.WorkflowError):  # failed-runner -> no contract, excluded
+                _deleg_run(root, home, _deleg_fake({"c.py": "z\n"}, rc=3), task="feat/three")
+            _run_with_home(home, lambda: jw_overlay.add_delta(
+                root, "verification_debt/skip", rule="delegation-verification-evidence-v1", summary="s"))
+            _run_with_home(home, lambda: jw_overlay.add_delta(
+                root, "review_association/open", rule="round-close-open-findings-v1", summary="s"))
+            import contextlib
+            import io
+            with contextlib.redirect_stderr(io.StringIO()):
+                events = _run_with_home(home, lambda: jw_overlay.evaluate_boundary(root, "check", {}))
+            r1 = [e for e in events if e["rule"] == "delegation-verification-evidence-v1" and e["event"] == "fire"]
+            self.assertEqual(len(r1), 1)                        # only the unverified needs-review one
+            self.assertIn("feat-xyz", r1[0]["context"]["delegation_id"])
+            r2 = [e for e in events if e["rule"] == "round-close-open-findings-v1" and e["event"] == "fire"]
+            self.assertEqual(len(r2), 1)
+            self.assertIn("fix/finding-a", r2[0]["message"])
+
+    def test_check_cli_exit0_even_with_fires(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home, did = self._deleg_needs_review(d, report=None)
+            _run_with_home(home, lambda: jw_overlay.add_delta(
+                root, "verification_debt/skip", rule="delegation-verification-evidence-v1", summary="s"))
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = _run_with_home(home, lambda: jw_overlay.main(["check", "--root", str(root)]))
+            self.assertEqual(rc, 0)
+
+    def test_round_close_boundary_fires_and_records_exposure(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _round_review_project(d)
+            _run_with_home(home, lambda: jw_overlay.add_delta(
+                root, "review_association/open", rule="round-close-open-findings-v1", summary="s"))
+            _force_status(root, home, "review_association/open", "warning")
+            import contextlib
+            import io
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                rc = _run_with_home(home, lambda: jw_round.close(
+                    root, "2026-01-02-close", done=["chore/close-me"], touched=[], commit="HEAD"))
+            self.assertEqual(rc, 0)  # warn does not block close
+            self.assertIn("jw warn", err.getvalue())
+            rows = _read_warnings(root, home)
+            self.assertTrue(any(r["boundary"] == "round-close" and r["event"] == "fire" for r in rows))
+
+    def test_review_ingest_boundary(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _round_review_project(d)
+            _run_with_home(home, lambda: jw_overlay.add_delta(
+                root, "review_association/open", rule="round-close-open-findings-v1", summary="s"))
+            events = _run_with_home(home, lambda: jw_overlay.evaluate_boundary(
+                root, "review-ingest", {"round_id": "2026-01-01-r1"}))
+            fires = [e for e in events if e["event"] == "fire"]
+            self.assertEqual(len(fires), 1)
+            self.assertIn("fix/finding-a", fires[0]["message"])
+
+
+class DelegateExposureOverlayTests(unittest.TestCase):
+    """0.8.0 M2 §9 — delegation exposure `overlays` filled with active deltas at run time."""
+
+    def test_exposure_overlays_populated(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            _run_with_home(home, lambda: jw_overlay.add_delta(
+                root, "verification_debt/skip", rule="delegation-verification-evidence-v1", summary="s"))
+            _deleg_run(root, home, _deleg_fake({"impl.py": "x\n"}))
+            rec = _latest_rec(root, home)
+            exp = _json.loads((rec / "exposure.json").read_text())
+            self.assertEqual(exp["overlays"], [{"id": "verification_debt/skip", "status": "observing"}])
+
+
+class RoundExposureTests(unittest.TestCase):
+    """0.8.0 M2 §9 — round exposure record written at close (schema, re-close suffix, profile null,
+    record-failure keeps close succeeding)."""
+
+    def _exposure_dir(self, root, home):
+        return _run_with_home(home, lambda: jw_overlay._exposure_dir(root))
+
+    def test_close_records_round_exposure(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _round_review_project(d)
+            _write_profile(home)  # profile present -> bindings/fingerprint non-null
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = _run_with_home(home, lambda: jw_round.close(
+                    root, "2026-01-02-close", done=["chore/close-me"], touched=[], commit="HEAD"))
+            self.assertEqual(rc, 0)
+            p = self._exposure_dir(root, home) / "round-2026-01-02-close.json"
+            self.assertTrue(p.exists())
+            exp = _json.loads(p.read_text())
+            self.assertEqual(exp["schema"], "jw-round-exposure-1")
+            self.assertEqual(exp["round_id"], "2026-01-02-close")
+            self.assertIsNotNone(exp["profile_fingerprint"])
+            self.assertEqual(exp["bindings"]["implementer"], "codex:gpt-5.4-codex")
+            self.assertEqual(exp["guards"], None)
+            self.assertEqual(exp["waivers"], [])
+
+    def test_profile_absent_null_bindings(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _round_review_project(d)  # no profile written
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                _run_with_home(home, lambda: jw_round.close(
+                    root, "2026-01-02-close", done=["chore/close-me"], touched=[], commit="HEAD"))
+            p = self._exposure_dir(root, home) / "round-2026-01-02-close.json"
+            exp = _json.loads(p.read_text())
+            self.assertIsNone(exp["profile_fingerprint"])
+            self.assertIsNone(exp["bindings"])
+
+    def test_reclose_gets_suffix(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _round_review_project(d)
+            import contextlib
+            import io
+            for _ in range(2):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    _run_with_home(home, lambda: jw_round.close(
+                        root, "2026-01-02-close", done=["chore/close-me"], touched=[], commit="HEAD"))
+            edir = self._exposure_dir(root, home)
+            self.assertTrue((edir / "round-2026-01-02-close.json").exists())
+            self.assertTrue((edir / "round-2026-01-02-close-2.json").exists())
+
+    def test_exposure_failure_keeps_close_success(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _round_review_project(d)
+            orig = jw_overlay.write_round_exposure
+            jw_overlay.write_round_exposure = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk full"))
+            import contextlib
+            import io
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    rc = _run_with_home(home, lambda: jw_round.close(
+                        root, "2026-01-02-close", done=["chore/close-me"], touched=[], commit="HEAD"))
+            finally:
+                jw_overlay.write_round_exposure = orig
+            self.assertEqual(rc, 0)  # close still succeeds (S11)
+            self.assertIn("exposure", err.getvalue().lower())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

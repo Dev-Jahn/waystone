@@ -639,6 +639,12 @@ def ingest(root: Path, round_id: str | None, src: Path = INBOX, reviewer: str | 
     src.unlink()
     print(f"ingested {len(body)} bytes verbatim → {dest} (consumed {src})")
     print(f"  {len(findings)} finding(s) parsed — verify each before registering")
+    # M2 §6: evaluate overlay warns at the review-ingest boundary (best-effort; never blocks).
+    try:
+        import jw_overlay
+        jw_overlay.evaluate_boundary(root, "review-ingest", {"round_id": round_id})
+    except Exception:  # noqa: BLE001
+        pass
     return 0
 
 

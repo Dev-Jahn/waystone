@@ -462,6 +462,16 @@ def _diff_patch(cwd: Path, base: str, result: str) -> bytes:
     return p.stdout
 
 
+def _active_overlays(root: Path) -> list[dict]:
+    """Active (observing/warning) overlay deltas at run time, recorded in exposure (§9). Best-effort:
+    a broken overlay store must not fail the delegation — record an empty list."""
+    try:
+        import jw_overlay
+        return [{"id": d["id"], "status": d["status"]} for d in jw_overlay.active_deltas(root)]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _write_exposure(record_dir, did, root, packet, task_id, head_sha, base_sha, dirty, binding, fingerprint):
     exposure = {
         "schema": "jw-exposure-1", "delegation_id": did, "at": _now_iso(),
@@ -472,7 +482,7 @@ def _write_exposure(record_dir, did, root, packet, task_id, head_sha, base_sha, 
         "binding": binding,
         "profile_fingerprint": fingerprint,
         "sandbox": "workspace-write",
-        "overlays": [], "guards": None, "waivers": [],
+        "overlays": _active_overlays(root), "guards": None, "waivers": [],
     }
     (record_dir / "exposure.json").write_text(
         json.dumps(exposure, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -576,7 +586,18 @@ def run_delegation(root: Path, task_id: str, role: str, accept_flags: list[str])
             f"artifact computation failed after the runner — worktree preserved at {worktree_path}: {e}")
     _set_state(record_dir, "needs-review", env=env_rec)
     print(f"artifact: {artifact_dir / 'contract.yaml'}")
+    _warn_boundary(root, "delegate-run", {"delegation_id": did})
     return 0
+
+
+def _warn_boundary(root: Path, boundary: str, context: dict) -> None:
+    """Best-effort overlay warn at a delegation boundary. evaluate_boundary already swallows its own
+    exceptions; the extra guard covers an import failure — a warn must never affect the host exit (S5)."""
+    try:
+        import jw_overlay
+        jw_overlay.evaluate_boundary(root, boundary, context)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ---- evaluation path (§12 — apply/discard/show/status) ------------------------
@@ -608,6 +629,7 @@ def apply_delegation(root: Path, did: str) -> int:
     if state != "needs-review":
         raise WorkflowError(f"delegation {did} is {state} — only a needs-review delegation can be applied")
     contract = _load_contract(rec)
+    _warn_boundary(root, "delegate-apply", {"delegation_id": did})
     if not contract.get("empty"):
         rc, out, err = _git(root, "apply", str(rec / "artifact" / "changes.patch"))
         if rc != 0:
