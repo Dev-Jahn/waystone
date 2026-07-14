@@ -724,6 +724,21 @@ class StoragePathTests(unittest.TestCase):
                 else:
                     os.environ["WAYSTONE_HOME"] = old_override
 
+    def test_machine_dir_rejects_relative_override(self):
+        import os
+
+        old_override = os.environ.get("WAYSTONE_HOME")
+        try:
+            os.environ["WAYSTONE_HOME"] = "relative-waystone"
+            with self.assertRaises(common.WorkflowError) as cm:
+                common.machine_dir()
+            self.assertIn("absolute path", str(cm.exception))
+        finally:
+            if old_override is None:
+                os.environ.pop("WAYSTONE_HOME", None)
+            else:
+                os.environ["WAYSTONE_HOME"] = old_override
+
     def test_project_state_path_is_pure_and_ensure_restores_self_gitignore(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d) / "repo"
@@ -3307,6 +3322,8 @@ class DelegateProfileTests(unittest.TestCase):
             with self.assertRaises(delegate.WorkflowError) as cm:
                 _run_with_home(home, lambda: delegate._load_profile(root))
             self.assertIn(str(root / ".waystone" / "profile.yml"), str(cm.exception))
+            self.assertIn("verifier: {backend:", str(cm.exception))
+            self.assertNotIn("verifier: {execution:", str(cm.exception))
 
     def test_resolve_binding_ok_and_fingerprint(self):
         with tempfile.TemporaryDirectory() as d:

@@ -20,7 +20,11 @@ def machine_dir(home: Path | None = None) -> Path:
     """Waystone's host-neutral machine data root, optionally resolved under an injected home."""
     override = os.environ.get("WAYSTONE_HOME")
     if override:
-        return Path(override).expanduser()
+        path = Path(override).expanduser()
+        if not path.is_absolute():
+            raise WorkflowError(
+                f"WAYSTONE_HOME must be an absolute path after user expansion, got {override!r}")
+        return path
     return (Path.home() if home is None else Path(home)) / ".waystone"
 
 

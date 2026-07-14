@@ -60,14 +60,12 @@ _PROFILE_EXAMPLE = (
     "schema: waystone-profile-1\n"
     "bindings:\n"
     "  implementer: {execution: external-runner, backend: \"codex:gpt-5.6-sol\", effort: xhigh}\n"
-    "  verifier: {execution: codex-companion, backend: \"codex:gpt-5.6-sol\", "
+    "  verifier: {backend: \"codex:gpt-5.6-sol\", "
     "entry: adversarial-review}\n"
 )
 
 
 def _profile_example() -> str:
-    if os.environ.get("WAYSTONE_HOST") == "codex":
-        return _PROFILE_EXAMPLE.replace("execution: codex-companion", "execution: codex-cli")
     return _PROFILE_EXAMPLE
 
 
