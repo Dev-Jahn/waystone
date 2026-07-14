@@ -2,7 +2,7 @@
 
 # waystone
 
-### Agents forget. Waystone remembers why.
+### Agents forget. Project shouldn't.
 
 *Prevent intent drift and context loss in long-horizon development*
 
