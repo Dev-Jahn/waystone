@@ -2,7 +2,7 @@
 
 # waystone
 
-### Agents forget. Project shouldn't.
+### Agents forget. Projects shouldn't.
 
 *Prevent intent drift and context loss in long-horizon development*
 
