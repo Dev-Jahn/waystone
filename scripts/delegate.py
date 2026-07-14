@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["pyyaml"]
 # ///
-"""Delegation primitive — `jw delegate` (0.8.0 M1).
+"""Delegation primitive — `waystone delegate` (0.8.0 M1).
 
 Delegate a single implementation task to an external runner (codex) in an isolated git worktree,
 then bring the result back through an explicit, harness-computed artifact contract. The dirty working
@@ -40,7 +40,7 @@ from common import (  # noqa: E402
     WorkflowError, _project_slug, find_project_root, git_full_sha, load_config, load_tasks,
 )
 
-DELEG_REF_NS = "refs/jw/delegations"
+DELEG_REF_NS = "refs/waystone/delegations"
 TERMINAL_STATES = ("applied", "discarded")
 _TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "delegate-prompt.md"
 _EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh")
@@ -55,7 +55,7 @@ _LOCKFILE_DETECT = (
 )
 
 _PROFILE_EXAMPLE = (
-    "schema: jw-profile-1\n"
+    "schema: waystone-profile-1\n"
     "bindings:\n"
     "  implementer: {execution: external-runner, backend: \"codex:gpt-5.6-sol\", effort: xhigh}\n"
     "  verifier: {execution: codex-companion, backend: \"codex:gpt-5.6-sol\", "
@@ -134,11 +134,11 @@ def _snapshot(cwd: Path, message: str, *, exclude_uv_cache: bool = False) -> tup
     is the detached base, so `-p HEAD` parents the result on the base)."""
     head = _git_out(cwd, "rev-parse", "HEAD")
     head_tree = _git_out(cwd, "rev-parse", "HEAD^{tree}")
-    tmpdir = tempfile.mkdtemp(prefix="jw-snap-")
+    tmpdir = tempfile.mkdtemp(prefix="waystone-snap-")
     try:
         env = {"GIT_INDEX_FILE": str(Path(tmpdir) / "index")}
         _git_out(cwd, "read-tree", "HEAD", env=env)          # seed (S1 — not an index copy)
-        add_args = ("add", "-A", "--", ".", ":(exclude).jw-uv-cache") if exclude_uv_cache else (
+        add_args = ("add", "-A", "--", ".", ":(exclude).waystone-uv-cache") if exclude_uv_cache else (
             "add", "-A")
         _git_out(cwd, *add_args, env=env)                      # tracked mods + untracked(non-ignored)
         tree = _git_out(cwd, "write-tree", env=env)
@@ -159,7 +159,7 @@ def _make_did(task_id: str) -> str:
 
 # ---- residence (§9 — everything plugin-local, keyed by project slug) ----------
 def _plugin_base() -> Path:
-    return Path.home() / ".claude" / "jahns-workflow"
+    return Path.home() / ".claude" / "waystone"
 
 
 def _delegations_dir(root: Path) -> Path:
@@ -195,7 +195,7 @@ def _now_iso() -> str:
 
 # ---- profile / binding (§11 — fail-loud, no default-model guessing) -----------
 def _load_profile() -> tuple[dict, str]:
-    """Load ~/.claude/jahns-workflow/profile.yml and its byte fingerprint. Raises WorkflowError with a
+    """Load ~/.claude/waystone/profile.yml and its byte fingerprint. Raises WorkflowError with a
     creation guide if the file is absent (the harness never guesses a default model)."""
     path = _profile_path()
     if not path.is_file():
@@ -286,7 +286,7 @@ def _build_packet(data: dict, task_id: str, accept_flags: list[str], root: Path)
             f"task {task_id} has no acceptance criteria — add `accept:` (YAML list) to the task or pass --accept")
     deps = [{"id": d, "status": by_id.get(d, {}).get("status", "unknown")} for d in (task.get("deps") or [])]
     packet = {
-        "schema": "jw-packet-1",
+        "schema": "waystone-packet-1",
         "task": {
             "id": task_id, "title": task.get("title"), "status": status,
             "milestone": task.get("milestone"), "round": task.get("round"),
@@ -329,7 +329,7 @@ def _resolve_env_prep(worktree: Path, cfg: dict) -> tuple[str, list[str]]:
 def _run_env_prep(worktree: Path, commands: list[str]) -> tuple[int, str]:
     """Run each prep command in the worktree cwd (no shell, shlex.split, 600s each). Returns (rc,
     stderr_tail<=20 lines); rc 0 means every command succeeded."""
-    env = {**os.environ, "UV_CACHE_DIR": str(worktree / ".jw-uv-cache")}
+    env = {**os.environ, "UV_CACHE_DIR": str(worktree / ".waystone-uv-cache")}
     for cmd in commands:
         try:
             p = subprocess.run(shlex.split(cmd), cwd=str(worktree),
@@ -352,7 +352,7 @@ def _run_codex(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
     cmd.extend(["--color", "never", "--output-last-message",
                 str(record_dir / "last_message.md"), "--json"])
     start = time.monotonic()
-    env = {**os.environ, "UV_CACHE_DIR": str(worktree / ".jw-uv-cache")}
+    env = {**os.environ, "UV_CACHE_DIR": str(worktree / ".waystone-uv-cache")}
     try:
         with open(prompt_path, encoding="utf-8") as pin, \
              open(record_dir / "runner.jsonl", "w", encoding="utf-8") as jout, \
@@ -456,7 +456,7 @@ def _active_delegation_for_task(root: Path, task_id: str) -> tuple[str, str] | N
             broken = "status.json" if st is None else "exposure.json"
             raise WorkflowError(
                 f"delegation record {did} has a corrupt {broken} — treated as an active lock (fail-safe); "
-                f"run `jw delegate discard {did}` to clear it")
+                f"run `waystone delegate discard {did}` to clear it")
         return did, state
     return None
 
@@ -516,7 +516,7 @@ def _active_overlays(root: Path) -> list[dict]:
 def _write_exposure(record_dir, did, root, packet, task_id, head_sha, base_sha, dirty, binding,
                     fingerprint, overlays):
     exposure = {
-        "schema": "jw-exposure-1", "delegation_id": did, "at": _now_iso(),
+        "schema": "waystone-exposure-1", "delegation_id": did, "at": _now_iso(),
         "project": {"pslug": _project_slug(root), "root": str(root.resolve()), "name": packet["project"]["name"]},
         "task_id": task_id, "packet": "packet.yaml",
         "base": {"head_sha": head_sha, "snapshot_sha": base_sha, "dirty": dirty,
@@ -568,7 +568,7 @@ def run_delegation(root: Path, task_id: str, role: str, accept_flags: list[str])
     _mkdir_or_refuse(worktree_path.parent)
 
     head_sha = git_full_sha(root, "HEAD")
-    base_sha, dirty = _snapshot(root, f"jw delegation snapshot: {task_id} {did}")
+    base_sha, dirty = _snapshot(root, f"waystone delegation snapshot: {task_id} {did}")
     _git_out(root, "update-ref", f"{DELEG_REF_NS}/{did}", base_sha)
     _add_worktree(root, worktree_path, base_sha)
     print(f"base_sha: {base_sha}")
@@ -610,7 +610,7 @@ def run_delegation(root: Path, task_id: str, role: str, accept_flags: list[str])
     try:
         report = _read_report(worktree_path)
         result_sha, _ = _snapshot(
-            worktree_path, f"jw delegation result: {task_id} {did}", exclude_uv_cache=True)
+            worktree_path, f"waystone delegation result: {task_id} {did}", exclude_uv_cache=True)
         _git_out(root, "update-ref", f"{DELEG_REF_NS}/{did}-result", result_sha)
         changed = _changed_files(root, base_sha, result_sha)
         patch = _diff_patch(root, base_sha, result_sha)
@@ -618,7 +618,7 @@ def run_delegation(root: Path, task_id: str, role: str, accept_flags: list[str])
         if not empty:
             (artifact_dir / "changes.patch").write_bytes(patch)
         contract = {
-            "schema": "jw-artifact-1",
+            "schema": "waystone-artifact-1",
             "delegation_id": did, "task_id": task_id,
             "base_sha": base_sha, "result_sha": result_sha,
             "changed_files": changed,
@@ -648,7 +648,7 @@ def _warn_boundary(root: Path, boundary: str, context: dict) -> None:
         import overlay
         overlay.evaluate_boundary(root, boundary, context)
     except Exception as e:  # noqa: BLE001
-        print(f"jw delegate: overlay warning unavailable at {boundary} ({e}) — host command continued",
+        print(f"waystone delegate: overlay warning unavailable at {boundary} ({e}) — host command continued",
               file=sys.stderr)
 
 
@@ -770,7 +770,7 @@ def _cleanup_companion_broker(worktree: Path, *, state_root: Path | None = None)
         if not isinstance(broker, dict):
             raise ValueError("broker.json is not an object")
     except Exception as e:  # noqa: BLE001 — cleanup is explicitly best-effort
-        print(f"jw delegate verify: broker cleanup unreadable; daemon may remain ({e})", file=sys.stderr)
+        print(f"waystone delegate verify: broker cleanup unreadable; daemon may remain ({e})", file=sys.stderr)
         return "broker cleanup: daemon may remain"
 
     endpoint = broker.get("endpoint")
@@ -799,7 +799,7 @@ def _cleanup_companion_broker(worktree: Path, *, state_root: Path | None = None)
             return "broker cleanup: SIGTERM sent after shutdown RPC failure"
         except OSError:
             pass
-    print("jw delegate verify: broker shutdown failed; daemon may remain", file=sys.stderr)
+    print("waystone delegate verify: broker shutdown failed; daemon may remain", file=sys.stderr)
     return "broker cleanup: daemon may remain"
 
 
@@ -843,7 +843,7 @@ def _release_verify_lock(lock: Path, stream) -> None:
     except FileNotFoundError:
         pass
     except OSError as e:
-        print(f"jw delegate verify: could not remove verify lock {lock} ({e})", file=sys.stderr)
+        print(f"waystone delegate verify: could not remove verify lock {lock} ({e})", file=sys.stderr)
     finally:
         try:
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
@@ -899,7 +899,7 @@ def verify_delegation(root: Path, did: str) -> int:
             raise WorkflowError(
                 f"independent verifier returned invalid JSON ({e}) — delegation remains needs-review")
         artifact = {
-            "schema": "jw-verify-1", "at": _now_iso(),
+            "schema": "waystone-verify-1", "at": _now_iso(),
             "transport": "codex-companion:adversarial-review", "backend": binding["backend"],
             "provenance": "independent-verifier", "payload": payload,
         }
@@ -1123,15 +1123,15 @@ _HANDLERS = {"run": _cli_run, "status": _cli_status, "show": _cli_show,
 
 def main(argv: list[str]) -> int:
     if not argv or argv[0] not in _HANDLERS:
-        print("jw delegate: expected subcommand (run|status|show|apply|discard|verify)", file=sys.stderr)
+        print("waystone delegate: expected subcommand (run|status|show|apply|discard|verify)", file=sys.stderr)
         return 1
     try:
         return _HANDLERS[argv[0]](argv[1:])
     except _RefusedWrite as e:
-        print(f"jw delegate: {e}", file=sys.stderr)
+        print(f"waystone delegate: {e}", file=sys.stderr)
         return 2
     except WorkflowError as e:
-        print(f"jw delegate: {e}", file=sys.stderr)
+        print(f"waystone delegate: {e}", file=sys.stderr)
         return 1
 
 

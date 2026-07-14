@@ -1,5 +1,5 @@
 {
-  "description": "jahns-workflow: inject project digest+active tasks+next-actionable at session start/compaction; snapshot a re-entry pointer before compaction/session end; validate tasks.yaml and regenerate ROADMAP.md on edit. All hooks no-op fast (<10ms) in projects without .jahns-workflow.yml.",
+  "description": "waystone: inject project digest+active tasks+next-actionable at session start/compaction; snapshot a re-entry pointer before compaction/session end; validate tasks.yaml and regenerate ROADMAP.md on edit. All hooks no-op fast (<10ms) in projects without .waystone.yml.",
   "hooks": {
     "PreToolUse": [
       {

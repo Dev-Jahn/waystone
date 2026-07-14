@@ -29,7 +29,7 @@ def _routing_line() -> str:
 
     path = delegate._profile_path()
     if not path.is_file():
-        return "routing: no profile — jw delegate will guide setup"
+        return "routing: no profile — waystone delegate will guide setup"
     try:
         profile, _fingerprint = delegate._load_profile()
         bindings = profile.get("bindings")
@@ -88,7 +88,7 @@ def _delegation_summary(root: Path) -> str:
 
 
 def _evidence_summary(root: Path) -> str | None:
-    path = Path.home() / ".claude" / "jahns-workflow" / "improve" / "evidence.jsonl"
+    path = Path.home() / ".claude" / "waystone" / "improve" / "evidence.jsonl"
     if not path.is_file():
         return None
     try:
@@ -96,7 +96,7 @@ def _evidence_summary(root: Path) -> str | None:
         data = load_tasks(root)
         if isinstance(data.get("project"), str):
             aliases.add(data["project"])
-        registry = Path.home() / ".claude" / "jahns-workflow" / "projects.json"
+        registry = Path.home() / ".claude" / "waystone" / "projects.json"
         if registry.is_file():
             reg = json.loads(registry.read_text(encoding="utf-8"))
             for entry in reg.get("projects", []):
@@ -129,7 +129,7 @@ def _operating_contract(root: Path) -> list[str]:
         constitution = CONTRACT_PATH.read_text(encoding="utf-8").strip()
         if not constitution:
             return []
-        lines = ["◆ OPERATING CONTRACT (jahns-workflow)", *constitution.splitlines(),
+        lines = ["◆ OPERATING CONTRACT (waystone)", *constitution.splitlines(),
                  _routing_line(), _overlay_line(root)]
         live = "live: " + _delegation_summary(root)
         evidence = _evidence_summary(root)
@@ -152,7 +152,7 @@ def main() -> int:
     except Exception as e:  # malformed config must not break session start
         print(json.dumps({"hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": f"[jahns-workflow] config/tasks unreadable: {e}",
+            "additionalContext": f"[waystone] config/tasks unreadable: {e}",
         }}))
         return 0
 
@@ -165,7 +165,7 @@ def main() -> int:
     rounds = sorted({t["round"] for t in active if t.get("round")})
 
     lines = [
-        f"[jahns-workflow] project: {data.get('project', root.name)} | branch: {g['branch']}"
+        f"[waystone] project: {data.get('project', root.name)} | branch: {g['branch']}"
         f" ({'dirty +' + str(g['dirty']) if g['dirty'] else 'clean'}) | tasks: {done}/{len(tasks)} done",
     ]
     lines.extend(_operating_contract(root))
@@ -218,11 +218,11 @@ def main() -> int:
         lines.append("")
         lines.append(digest.read_text(encoding="utf-8").rstrip())
     elif cfg.get("ssot"):
-        lines.append(f"SSOT: {cfg['ssot']} (no digest generated yet — run /jahns-workflow:round or ssot.py digest)")
+        lines.append(f"SSOT: {cfg['ssot']} (no digest generated yet — run /waystone:round or ssot.py digest)")
 
     ctx = "\n".join(lines)
     if len(ctx) > MAX_CHARS:
-        ctx = ctx[:MAX_CHARS] + "\n…[truncated by jahns-workflow cap]"
+        ctx = ctx[:MAX_CHARS] + "\n…[truncated by waystone cap]"
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "SessionStart",
         "additionalContext": ctx,

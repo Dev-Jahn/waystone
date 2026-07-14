@@ -52,16 +52,16 @@ jobs:
           f=.claude-plugin/marketplace.json
           tmp=$(mktemp)
           jq --indent 2 --arg sha "$NEW_SHA" --arg ver "$NEW_VERSION" --arg desc "$NEW_DESC" \
-            '(.plugins[] | select(.name=="jahns-workflow")) |= (.source.sha = $sha | .version = $ver | .description = $desc)' \
+            '(.plugins[] | select(.name=="waystone")) |= (.source.sha = $sha | .version = $ver | .description = $desc)' \
             "$f" > "$tmp"
           mv "$tmp" "$f"
           if git diff --quiet -- "$f"; then
             echo "marketplace already in sync at ${NEW_SHA} @ v${NEW_VERSION} — nothing to do."
             exit 0
           fi
-          git config user.name "jahns-workflow-ci"
+          git config user.name "waystone-ci"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- "$f"
-          git commit -qm "chore(jahns-workflow): sync v${NEW_VERSION} @ ${NEW_SHA:0:7} (auto-sync from main)"
+          git commit -qm "chore(waystone): sync v${NEW_VERSION} @ ${NEW_SHA:0:7} (auto-sync from main)"
           git push origin HEAD:main
           echo "marketplace updated → v${NEW_VERSION} @ ${NEW_SHA:0:7}"

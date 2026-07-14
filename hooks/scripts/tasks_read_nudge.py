@@ -2,10 +2,10 @@
 # /// script
 # requires-python = ">=3.10"
 # ///
-"""PreToolUse hook body: redirect a raw `Read` of the canonical tasks.yaml to the `jw task` CLI.
+"""PreToolUse hook body: redirect a raw `Read` of the canonical tasks.yaml to the `waystone task` CLI.
 
 A long-lived registry is thousands of lines; slurping it whole is wasteful. This denies the Read
-(feeding a short redirect back to Claude, no user prompt) so the agent uses `jw task list`/`show`
+(feeding a short redirect back to Claude, no user prompt) so the agent uses `waystone task list`/`show`
 instead. It only fires for the project's own tasks.yaml inside an initialized project; a same-named
 file elsewhere, a different file, or a non-Read tool passes through untouched. Raw access still
 exists as an escape hatch via the shell (`cat tasks.yaml`).
@@ -18,19 +18,19 @@ import json
 import sys
 from pathlib import Path
 
-CONFIG_NAME = ".jahns-workflow.yml"
+CONFIG_NAME = ".waystone.yml"
 
 REASON = (
     "tasks.yaml is the long machine-validated registry — read it through the CLI, not whole:\n"
-    "  jw task list [--status S|--type T|--milestone M|--round R]   (compact view)\n"
-    "  jw task show <id>                                            (one task's record)\n"
-    "Mutate it the same way: jw task add/set/drop (validated, comment-preserving) — not Edit.\n"
+    "  waystone task list [--status S|--type T|--milestone M|--round R]   (compact view)\n"
+    "  waystone task show <id>                                            (one task's record)\n"
+    "Mutate it the same way: waystone task add/set/drop (validated, comment-preserving) — not Edit.\n"
     "(If you genuinely need the raw file, read it via the shell with `cat`.)"
 )
 
 
 def _find_project_root(start: Path) -> Path | None:
-    """Walk upward from `start` to the directory holding .jahns-workflow.yml (mirrors common)."""
+    """Walk upward from `start` to the directory holding .waystone.yml (mirrors common)."""
     cur = start.resolve()
     for p in (cur, *cur.parents):
         if (p / CONFIG_NAME).is_file():

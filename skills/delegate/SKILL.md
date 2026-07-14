@@ -1,9 +1,9 @@
 ---
 name: delegate
-description: Use when the user runs "/jahns-workflow:delegate", asks to delegate an implementation task, wants to inspect or independently verify a delegation result, or needs to apply or discard a reviewable delegated patch.
+description: Use when the user runs "/waystone:delegate", asks to delegate an implementation task, wants to inspect or independently verify a delegation result, or needs to apply or discard a reviewable delegated patch.
 ---
 
-# jahns-workflow: delegate
+# waystone: delegate
 
 Run one task in an isolated worktree, preserve provenance labels, and leave acceptance to the user.
 Require an initialized project. Plugin root = two directories above this skill's base directory.
@@ -13,7 +13,7 @@ Require an initialized project. Plugin root = two directories above this skill's
 Use the task ID from the argument. Otherwise present the injected next-actionable tasks (or run
 `uv run <plugin-root>/scripts/waystone.py task list .`) and ask the user to select one.
 
-Do not invent acceptance criteria. `jw delegate run` refuses a task without an `accept:` YAML list
+Do not invent acceptance criteria. `waystone delegate run` refuses a task without an `accept:` YAML list
 or explicit `--accept`. If criteria are missing, explain that the user must add them to the task in
 `tasks.yaml`; do not synthesize a bar merely to make the command pass.
 
@@ -24,7 +24,7 @@ uv run <plugin-root>/scripts/waystone.py delegate run <task-id> --root <project-
 ```
 
 Relay the stdout summary: immutable base, dirty-snapshot flag, worktree, env prep, runner binding,
-and artifact path. Relay every `jw warn` line from stderr unchanged; never hide a warning.
+and artifact path. Relay every `waystone warn` line from stderr unchanged; never hide a warning.
 
 ## Step 3 — Summarize the contract without judging it
 
@@ -46,7 +46,7 @@ HARD rules:
 
 ## Step 4 — Offer independent verification
 
-If `~/.claude/jahns-workflow/profile.yml` has a verifier binding, use one **AskUserQuestion** to ask
+If `~/.claude/waystone/profile.yml` has a verifier binding, use one **AskUserQuestion** to ask
 whether to run it. If accepted:
 
 ```bash

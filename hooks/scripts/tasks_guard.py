@@ -39,12 +39,12 @@ def main() -> int:
         with open(p, encoding="utf-8") as f:
             data = yaml.safe_load(f)
     except (OSError, yaml.YAMLError) as e:
-        print(f"[jahns-workflow] tasks.yaml is not parseable YAML: {e}", file=sys.stderr)
+        print(f"[waystone] tasks.yaml is not parseable YAML: {e}", file=sys.stderr)
         return 2
 
     errs = validate(data)
     if errs:
-        print(f"[jahns-workflow] tasks.yaml violates the workflow convention ({len(errs)} issue(s)) — fix now:",
+        print(f"[waystone] tasks.yaml violates the workflow convention ({len(errs)} issue(s)) — fix now:",
               file=sys.stderr)
         for e in errs[:20]:
             print(f"  - {e}", file=sys.stderr)

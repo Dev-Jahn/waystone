@@ -1,17 +1,17 @@
 ---
 name: round
-description: This skill should be used when the user runs "/jahns-workflow:round", says to "close the round", "wrap up this round", "finish the work cycle", or when an autonomous work round (implement → verify → push) reaches its end and the project CLAUDE.md mandates round closeout. Updates the task registry, PROGRESS, roadmap, SSOT views, and writes the round's markdown review request.
+description: This skill should be used when the user runs "/waystone:round", says to "close the round", "wrap up this round", "finish the work cycle", or when an autonomous work round (implement → verify → push) reaches its end and the project CLAUDE.md mandates round closeout. Updates the task registry, PROGRESS, roadmap, SSOT views, and writes the round's markdown review request.
 argument-hint: "[round-slug] e.g. lstream-seams"
 ---
 
-# jahns-workflow: round
+# waystone: round
 
 Close the current work round: bring the task registry up to date, record the round in
 PROGRESS, refresh generated views, and write the round's external review request (one markdown
 file; the reviewer reads the repo over git).
 
-Requires an initialized project (`.jahns-workflow.yml`). If missing, stop and point the user
-at `/jahns-workflow:init`. Plugin root = two directories above this skill's base directory.
+Requires an initialized project (`.waystone.yml`). If missing, stop and point the user
+at `/waystone:init`. Plugin root = two directories above this skill's base directory.
 
 ## Step 1 — Determine the round id
 
@@ -25,9 +25,9 @@ First register any newly discovered work as new tasks via the CLI — `uv run <p
 task add <type>/<slug> . --title "..." [--severity ...] [--deps a,b]` (proper IDs + explanatory
 titles; set `anchor:` to the governing SSOT §-anchor when known) — rather than hand-editing the
 registry. Unresolved questions for the user become `decision/...` tasks; when a `decision/...` is
-answered, record the ruling with `jw task set <id> ruling "..."`.
+answered, record the ruling with `waystone task set <id> ruling "..."`.
 
-An implementation task can be delegated to an external runner with `jw delegate run <task-id>` — it
+An implementation task can be delegated to an external runner with `waystone delegate run <task-id>` — it
 runs in an isolated worktree cut from a snapshot of your current tree and comes back as a reviewable
 patch you `apply` or `discard` (the guided flow arrives in a later milestone).
 
@@ -68,7 +68,7 @@ Write `<reviews_dir>/<round-id>-request.md` from `<plugin-root>/templates/review
 changed and *why*, the files to read first, falsifiable "claims to attack", evidence pointers (to
 where logs/PROGRESS already live — do **not** copy them), known weak spots, and the domain lens. Fill
 `Reviewing` with `git rev-parse HEAD` and the diff base with the **`review diff base`** value
-`jw round close` printed in Step 2 (the previous round's tip, or `(root)` for the first round — the
+`waystone round close` printed in Step 2 (the previous round's tip, or `(root)` for the first round — the
 live `state.last_round_commit` is no longer it, having just advanced to this round's tip). The
 reviewer reaches the repo over git, so the request is the only artifact you author — no zip, no bundle.
 
@@ -84,7 +84,7 @@ reads it too — the brief points there.
 **PR mode** (`review.mode: pr`): also freeze a SHA-bound review cycle and post the `@codex` request:
 `uv run <plugin-root>/scripts/waystone.py review freeze --pr <N> --round <round-id> .` (stamps the current
 PR head as cycle N + posts the request). The macro reviewer reads the PR + the request file. Check
-progress with `jw review status --pr <N>`; never treat "a comment appeared" as "review done" — a
+progress with `waystone review status --pr <N>`; never treat "a comment appeared" as "review done" — a
 review is `(reviewer, cycle, reviewed_sha)`.
 
 ## Step 5 — Report
@@ -98,7 +98,7 @@ End with the **next-step reminder** (so the reply is preserved byte-exact, not r
 
 > Give the reviewer the round request (`<reviews_dir>/<round-id>-request.md`) and the prompt; the
 > reviewer reads the repo over git. To ingest the reply, save it **in a separate shell**:
-> `cat > /tmp/review.md` → paste → `Ctrl-D`. Then run `/jahns-workflow:review <round-id>`, which
+> `cat > /tmp/review.md` → paste → `Ctrl-D`. Then run `/waystone:review <round-id>`, which
 > copies `/tmp/review.md` verbatim into the reviews dir (no model retyping) and triages it.
 
 ## Step 6 — Refresh the re-entry pointer

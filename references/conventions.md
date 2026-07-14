@@ -1,4 +1,4 @@
-# jahns-workflow Conventions v1
+# waystone Conventions v1
 
 Global grammar shared by ALL projects using this workflow. The same token always means
 the same thing in every repo, so working on several projects at once stays unambiguous.
@@ -8,7 +8,7 @@ rewritten retroactively.
 ## 1. Task IDs — `<type>/<kebab-slug>`
 
 Every unit of work gets one globally unique ID, registered in `tasks.yaml` **before first use**
-in commits, docs, or conversation. Read and mutate the registry through the `jw task` CLI
+in commits, docs, or conversation. Read and mutate the registry through the `waystone task` CLI
 (`list`/`show` to read; `add`/`set`/`drop` to mutate — validated and comment-preserving; `archive`
 to relocate old done/dropped tasks) rather than reading or editing the file whole; a PreToolUse hook
 redirects raw reads there. Grammar (machine-enforced by the tasks guard):
@@ -66,9 +66,9 @@ Used on review findings (a `severity:` field on the task, never part of the ID):
 
 | Artifact | Home | Notes |
 |---|---|---|
-| Design / theory | SSOT file (path in `.jahns-workflow.yml`) | single file, ADR-gated changes |
-| Task registry | `tasks.yaml` | the ONLY codename registry — read/mutate via `jw task`, not raw (a hook redirects whole-file reads) |
-| Archived tasks | `tasks.archive.yaml` | old done/dropped tasks relocated by `jw task archive` to keep the live registry small |
+| Design / theory | SSOT file (path in `.waystone.yml`) | single file, ADR-gated changes |
+| Task registry | `tasks.yaml` | the ONLY codename registry — read/mutate via `waystone task`, not raw (a hook redirects whole-file reads) |
+| Archived tasks | `tasks.archive.yaml` | old done/dropped tasks relocated by `waystone task archive` to keep the live registry small |
 | Roadmap view | `ROADMAP.md` | generated — never edit |
 | Work log | `PROGRESS.md` | current rounds + pointers; older months archived to `docs/progress/` |
 | Decisions | ADR dir | MADR-lite template |
@@ -91,7 +91,7 @@ filename or a round id alone. No review is requested against an unpushed HEAD.
 
 - **packet mode**: a round closes, is pushed, and `round` writes one markdown review request
   (`<reviews_dir>/<round-id>-request.md`) naming the reviewed branch/HEAD + diff base. A web reviewer
-  reads the repo over git (connector, zip, or clone) and returns a domain review; `jw review ingest`
+  reads the repo over git (connector, zip, or clone) and returns a domain review; `waystone review ingest`
   copies the reply **byte-exact** into `<round-id>-feedback.md` and appends a finding triage skeleton,
   which the model verifies (REAL/REJECTED/NEEDS-RULING) and registers. No bundle, no reviewer kit, no
   per-reply identity marker — the request names the SHA, and the reviewer reads the live tree.
@@ -139,7 +139,7 @@ solo developer driving agents, treat approval as a provenance record and merge s
 hard human-in-the-loop control. A true human gate requires running the agent under a separate bot
 identity and reserving the approver credential for interactive use.
 
-## 8. Delegation (`jw delegate`)
+## 8. Delegation (`waystone delegate`)
 
 A single implementation task can be handed to an external runner in an isolated git worktree, then
 brought back through an explicit artifact contract. The invariants:
@@ -147,7 +147,7 @@ brought back through an explicit artifact contract. The invariants:
 - **Snapshot base = what you see now.** The delegation base is an immutable snapshot commit of your
   current working tree — tracked modifications, staged changes, and untracked (non-`.gitignore`d)
   files included. A dirty tree is delegated without polluting history: the snapshot is a detached
-  commit object under `refs/jw/delegations/<id>` (never pushed), not a commit on your branch. A
+  commit object under `refs/waystone/delegations/<id>` (never pushed), not a commit on your branch. A
   clean tree uses HEAD directly. Submodules, an unborn HEAD, or an in-progress merge/rebase/
   cherry-pick are refused (they would bake a partial or conflicted state into the base).
 - **Harness computes; the runner claims.** The patch, changed-files list, and base/result SHAs are
@@ -155,26 +155,26 @@ brought back through an explicit artifact contract. The invariants:
   verification it ran, limitations, risks, escalations (written to `JW_REPORT.yaml`) — is carried
   through the contract labeled *delegate-claimed* and is never promoted to fact.
 - **Role sandboxes are fixed, not user knobs.** The implementer runs `workspace-write`; the verifier
-  runs `read-only` through codex-companion. `jw delegate verify` records its payload as
+  runs `read-only` through codex-companion. `waystone delegate verify` records its payload as
   *independent-verifier* evidence and leaves the delegation `needs-review` — only the user chooses
   apply or discard. A per-record `verify.lock` admits only one verifier at a time. The OS releases
   the lock if its process dies; an unlocked leftover marker is stale and reclaimed on the next try.
 - **You accept or discard.** A finished delegation is `needs-review`, its worktree preserved so a
-  verifier can run the acceptance criteria against the same base. `jw delegate apply` lands the
+  verifier can run the acceptance criteria against the same base. `waystone delegate apply` lands the
   patch on the live tree with plain `git apply` (it fails atomically if the tree has drifted from
-  the base — nothing is partially applied); `jw delegate discard` throws it away. Both keep the
+  the base — nothing is partially applied); `waystone delegate discard` throws it away. Both keep the
   record directory as history. Until one of them runs, that task is locked against a second
   delegation (single mutation owner) — a failed env/runner leaves the worktree as evidence and
   holds the lock too, so `discard` is how you clear it.
 - **Acceptance criteria are required, never invented.** A delegated task must carry an `accept:`
   field (a YAML list of free-text criteria, edited in `tasks.yaml` directly) or be given
   `--accept` at delegation time. With neither, delegation is refused — the harness does not make up
-  the bar. `accept` is deliberately not settable through `jw task add/set` (comma-splitting free
+  the bar. `accept` is deliberately not settable through `waystone task add/set` (comma-splitting free
   text would distort it).
 
-Artifacts live plugin-local (`~/.claude/jahns-workflow/delegations/…`, worktrees under
-`~/.claude/jahns-workflow/worktrees/…`), never committed to the repo. The runner backend (model)
-is bound per role in `~/.claude/jahns-workflow/profile.yml`; a missing binding fails loud rather
+Artifacts live plugin-local (`~/.claude/waystone/delegations/…`, worktrees under
+`~/.claude/waystone/worktrees/…`), never committed to the repo. The runner backend (model)
+is bound per role in `~/.claude/waystone/profile.yml`; a missing binding fails loud rather
 than guessing a default. A binding may set `effort` to `none`, `minimal`, `low`, `medium`, `high`,
 or `xhigh`; when omitted, the Codex configuration default is left untouched.
 
@@ -185,7 +185,7 @@ Adaptive policy is project-local and evidence-bearing:
 - **Exposure is recorded at execution time.** Delegation and round exposure records capture the
   active profile binding and overlays that governed that event; they do not infer retrospective
   policy.
-- **Evidence does not become a causal claim.** `jw improve evidence` joins review findings and
+- **Evidence does not become a causal claim.** `waystone improve evidence` joins review findings and
   delegation records only through their explicit `task-id`. Unlinked findings remain reported as
   provenance unknown. Shadow replay reports only how often a rule *would have fired*; the
   **estimated nuisance rate** stays null until examples are labeled, and replay never claims a
@@ -198,6 +198,6 @@ Adaptive policy is project-local and evidence-bearing:
   the conflict is recorded as evidence for the next improve cycle.
 
 All artifacts remain plugin-local and are never committed: deltas and warning events under
-`~/.claude/jahns-workflow/overlay/`, per-event policy exposure under
-`~/.claude/jahns-workflow/exposure/`, and the deterministic join projection at
-`~/.claude/jahns-workflow/improve/evidence.jsonl`.
+`~/.claude/waystone/overlay/`, per-event policy exposure under
+`~/.claude/waystone/exposure/`, and the deterministic join projection at
+`~/.claude/waystone/improve/evidence.jsonl`.

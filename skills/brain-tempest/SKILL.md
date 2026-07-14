@@ -1,18 +1,18 @@
 ---
 name: brain-tempest
-description: This skill should be used when the user runs "/jahns-workflow:brain-tempest", has a new or half-formed project idea, says things like "I want to build X but haven't thought it through", "help me figure out what I'm actually building", "let's scope/shape this project", "brainstorm the direction", or asks to "write a design doc / SSOT" — especially at the very start, before any design document exists. It draws a project's north-star out of the user through Socratic questioning and writes it as a ready-to-adopt SSOT.md that the rest of the workflow anchors to.
+description: This skill should be used when the user runs "/waystone:brain-tempest", has a new or half-formed project idea, says things like "I want to build X but haven't thought it through", "help me figure out what I'm actually building", "let's scope/shape this project", "brainstorm the direction", or asks to "write a design doc / SSOT" — especially at the very start, before any design document exists. It draws a project's north-star out of the user through Socratic questioning and writes it as a ready-to-adopt SSOT.md that the rest of the workflow anchors to.
 argument-hint: "[one-line project idea] (optional — I'll ask if omitted)"
 ---
 
-# jahns-workflow: brain-tempest
+# waystone: brain-tempest
 
 The ideation front door. Turn a one-line, half-formed idea into a **north-star `SSOT.md`** by
 questioning it: sharpen the vision, surface the decisions the user hasn't made yet, decide the
 obvious things yourself, and ground the rest with research. The whole workflow is SSOT-anchored,
 so this is where the anchor is forged.
 
-Runs before everything else — **no git, no `.jahns-workflow.yml`, no prior structure required**.
-It closes a real gap: without it, `/jahns-workflow:init` faced with no design doc can only scaffold
+Runs before everything else — **no git, no `.waystone.yml`, no prior structure required**.
+It closes a real gap: without it, `/waystone:init` faced with no design doc can only scaffold
 an *empty* SSOT.md, leaving an SSOT-anchored project with a hollow anchor. You fill it.
 
 Plugin root = two directories above this skill's base directory. The authority on what an SSOT is
@@ -154,7 +154,7 @@ downstream decision, not the anchor. Climb back up.
 Leave `SSOT.md` **uncommitted** for the user to read. Show a tight summary — the vision line, the
 section map, and any open questions you recorded — then point them at the next step:
 
-> `/jahns-workflow:init` — it detects `SSOT.md` as the SSOT and scaffolds the harness around it.
+> `/waystone:init` — it detects `SSOT.md` as the SSOT and scaffolds the harness around it.
 
 Don't run init yourself; it has its own decisions to walk through (review mode, existing structure).
 Respond in the user's configured language throughout.

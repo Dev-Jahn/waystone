@@ -13,7 +13,7 @@
 
 The text-surgery helpers (set_task_field, set_config_scalar) are pure and tested.
 
-Usage (also `jw round close`):
+Usage (also `waystone round close`):
   round.py close [root] --round <id> [--done id,id] [--touched id,id] [--commit HEAD]
 """
 from __future__ import annotations
@@ -163,7 +163,7 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
         print(f"round close: --round must match YYYY-MM-DD-<slug>, got {round_id!r}", file=sys.stderr)
         return 1
     cfg = load_config(root)
-    cfg_path = root / ".jahns-workflow.yml"
+    cfg_path = root / ".waystone.yml"
     tasks_path = root / "tasks.yaml"
 
     # --- preflight (no writes) ---
@@ -175,11 +175,11 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     try:
         ctext_new = set_config_scalar(ctext, "last_round_commit", full, section="state")
     except KeyError:
-        print("round close: state.last_round_commit is missing from .jahns-workflow.yml — "
+        print("round close: state.last_round_commit is missing from .waystone.yml — "
               "add it (under `state:`) before closing rounds.", file=sys.stderr)
         return 1
     except WorkflowError as e:
-        print(f"round close: cannot safely edit .jahns-workflow.yml — {e}", file=sys.stderr)
+        print(f"round close: cannot safely edit .waystone.yml — {e}", file=sys.stderr)
         return 1
 
     orig_tasks_text = tasks_path.read_text(encoding="utf-8")
@@ -228,7 +228,7 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     gen_existed = bool(gen_dir and gen_dir.exists())
     gen_backup = None
     if gen_existed:
-        gen_backup = Path(tempfile.mkdtemp(prefix="jw-ssot-bak-")) / "g"
+        gen_backup = Path(tempfile.mkdtemp(prefix="waystone-ssot-bak-")) / "g"
         shutil.copytree(gen_dir, gen_backup)
 
     try:

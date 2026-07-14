@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["pyyaml"]
 # ///
-"""Validate a jahns-workflow tasks.yaml against the global naming convention and schema.
+"""Validate a waystone tasks.yaml against the global naming convention and schema.
 
 Usage: validate.py [path/to/tasks.yaml]   (default: ./tasks.yaml or nearest project root)
 Exit codes: 0 valid, 1 cannot read/parse, 2 schema violations (details on stderr).

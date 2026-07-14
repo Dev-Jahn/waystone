@@ -5,7 +5,7 @@
 # ///
 """Remote reconciliation: is the local HEAD actually pushed, and how far behind is it.
 
-Subcommands (also reachable as `jw remote <sub>`):
+Subcommands (also reachable as `waystone remote <sub>`):
   verify [root]   exit 0 if HEAD is contained in its tracked upstream (pushed), else 3
   drift  [root]   print how many commits the local HEAD is behind upstream (informational)
 
@@ -60,7 +60,7 @@ def main(argv: list[str]) -> int:
     sub, rest = argv[0], argv[1:]
     root = _root(rest)
     if root is None:
-        print("remote: no initialized project (missing .jahns-workflow.yml)", file=sys.stderr)
+        print("remote: no initialized project (missing .waystone.yml)", file=sys.stderr)
         return 1
     return {"verify": verify, "drift": drift}[sub](root)
 

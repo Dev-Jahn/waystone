@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SessionStart fast-path: only spin up Python in jahns-workflow-initialized projects.
+# SessionStart fast-path: only spin up Python in waystone-initialized projects.
 set -uo pipefail
 
 input=$(cat)
@@ -7,7 +7,7 @@ input=$(cat)
 find_root() {
   local dir="$1"
   while [ -n "$dir" ] && [ "$dir" != "/" ]; do
-    if [ -f "$dir/.jahns-workflow.yml" ]; then
+    if [ -f "$dir/.waystone.yml" ]; then
       printf '%s' "$dir"
       return 0
     fi

@@ -3,22 +3,22 @@
 # requires-python = ">=3.10"
 # dependencies = ["pyyaml"]
 # ///
-"""`jw improve` — mine Claude Code evidence into deterministic, local-only projection tables.
+"""`waystone improve` — mine Claude Code evidence into deterministic, local-only projection tables.
 
-  jw improve trace   [--source DIR]... [--project SLUG]... [--out DIR]
-  jw improve reviews [--out DIR]
-  jw improve audit   [--in DIR]
-  jw improve decide  <rec-id> accept|reject [--title T] [--note N] [--out DIR]
+  waystone improve trace   [--source DIR]... [--project SLUG]... [--out DIR]
+  waystone improve reviews [--out DIR]
+  waystone improve audit   [--in DIR]
+  waystone improve decide  <rec-id> accept|reject [--title T] [--note N] [--out DIR]
 
 `trace` walks each source (default `$CLAUDE_CONFIG_DIR/projects`, else `~/.claude/projects`),
 streams every transcript file line-by-line through cclog, and emits three regenerable artifacts
-into --out (default `~/.claude/jahns-workflow/improve/`):
+into --out (default `~/.claude/waystone/improve/`):
   sessions.jsonl        one row per transcript (main/subagent/workflow-subagent)
   delegations.jsonl     one row per agent_spawn tool_use
   parse_coverage.json   files-by-kind, event-type counts, unknown/skip/error tallies
 
-`reviews` reads the registered projects (`~/.claude/jahns-workflow/projects.json`), resolves each
-`reviews_dir` via `.jahns-workflow.yml`, and projects the review evidence already on disk (it never
+`reviews` reads the registered projects (`~/.claude/waystone/projects.json`), resolves each
+`reviews_dir` via `.waystone.yml`, and projects the review evidence already on disk (it never
 re-implements review ingest) into --out:
   reviews.jsonl         one row per review round (findings from the feedback triage table + the
                         finding-derived tasks joined by their `origin: review-<round-id>`)
@@ -345,7 +345,7 @@ def _dumps(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, sort_keys=True)
 
 
-# self-session truncation: when `jw improve trace` runs inside a live CC session, that session's own
+# self-session truncation: when `waystone improve trace` runs inside a live CC session, that session's own
 # main transcript is mid-write and includes this very invocation. We stop parsing it at the improve
 # invocation so the trace does not pollute itself. Anchor detection re-scans ONLY the one matched file
 # (main transcript whose stem == CLAUDE_CODE_SESSION_ID) and copies no content into outputs.
@@ -365,9 +365,9 @@ def _user_message_text(message: dict) -> str:
 def _self_session_anchor(path: Path) -> tuple[int | None, str | None, int]:
     """Pre-scan the one matched main transcript for the truncation anchor. Returns
     (anchor_line_no, anchor_kind, lines_excluded); anchor_line_no is 1-based (parsing stops before
-    it). Priority: LAST command-tag (a real `/jahns-workflow:improve` skill invocation — the tag must
+    it). Priority: LAST command-tag (a real `/waystone:improve` skill invocation — the tag must
     LEAD the message, distinguishing it from a user pasting the tag mid-text); else, if none, the LAST
-    `jw ... improve trace` Bash tool_use. lines_excluded counts raw lines from the anchor to EOF."""
+    `waystone ... improve trace` Bash tool_use. lines_excluded counts raw lines from the anchor to EOF."""
     cmd_tag_line: int | None = None
     tool_use_line: int | None = None
     total = 0
@@ -389,7 +389,7 @@ def _self_session_anchor(path: Path) -> tuple[int | None, str | None, int]:
                     stripped = _user_message_text(rec.get("message") or {}).lstrip()
                     if stripped.startswith("<command-name>"):
                         m = _SELF_CMD_NAME_RE.search(stripped)
-                        if m and "/jahns-workflow:improve" in m.group(1):
+                        if m and "/waystone:improve" in m.group(1):
                             cmd_tag_line = line_no
                 elif rtype == "assistant":
                     content = (rec.get("message") or {}).get("content")
@@ -514,7 +514,7 @@ def run_trace(sources: list[Path], projects: set[str], out_dir: Path) -> dict:
 #   | JW-GPT-NNN — title | <severity> | <verdict> | <evidence> | <task id> |
 # We parse ONLY that appended table (the last such heading), never the verbatim body (§3.8: no
 # defensive multi-format guessing). Finding-derived tasks carry the review-round link in their
-# `origin` field (`review-<round-id>`), set by `jw task add --origin` in skills/review/SKILL.md — the
+# `origin` field (`review-<round-id>`), set by `waystone task add --origin` in skills/review/SKILL.md — the
 # `round` field records the FIXING round (stamped at close), so origin is the correct join key.
 _TRIAGE_HEADING = "## Findings (triage skeleton"
 _FINDING_ID_RE = re.compile(r"JW-GPT-\d+")
@@ -647,7 +647,7 @@ def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
 def _registry_path() -> Path:
     """Runtime-resolved global registry (honours HOME so tests can override it), matching
     common.REGISTRY_PATH's location without freezing it at import time."""
-    return Path.home() / ".claude" / "jahns-workflow" / "projects.json"
+    return Path.home() / ".claude" / "waystone" / "projects.json"
 
 
 def run_reviews(registry_path: Path, out_dir: Path) -> dict:
@@ -680,7 +680,7 @@ def run_reviews(registry_path: Path, out_dir: Path) -> dict:
             continue
         root = Path(path).expanduser()
         if not (root / CONFIG_NAME).is_file():
-            skipped.append({"project": name, "reason": "project root or .jahns-workflow.yml inaccessible"})
+            skipped.append({"project": name, "reason": "project root or .waystone.yml inaccessible"})
             continue
         try:
             cfg = load_config(root)
@@ -773,7 +773,7 @@ def run_evidence(registry_path: Path, out_dir: Path, projects: set[str]) -> dict
             continue
         root = Path(path).expanduser()
         if not (root / CONFIG_NAME).is_file():
-            skipped.append({"project": name, "reason": "project root or .jahns-workflow.yml inaccessible"})
+            skipped.append({"project": name, "reason": "project root or .waystone.yml inaccessible"})
             continue
         try:
             cfg = load_config(root)
@@ -1237,7 +1237,7 @@ def _parse_single_opt(argv: list[str], flag: str) -> str | None:
 
 
 def _default_out() -> Path:
-    return Path.home() / ".claude" / "jahns-workflow" / "improve"
+    return Path.home() / ".claude" / "waystone" / "improve"
 
 
 def _residence_checked(value: str | None, flag: str) -> Path:
@@ -1259,7 +1259,7 @@ def _cli_trace(argv: list[str]) -> int:
         raw_sources, projects, out = _parse_trace_args(argv)
         out_dir = _residence_checked(out, "--out")
     except WorkflowError as e:
-        print(f"jw improve trace: {e}", file=sys.stderr)
+        print(f"waystone improve trace: {e}", file=sys.stderr)
         return 1
 
     if raw_sources:
@@ -1268,7 +1268,7 @@ def _cli_trace(argv: list[str]) -> int:
         # default source may legitimately be absent on a fresh machine (recorded in sources_missing)
         missing = [s for s in sources if not s.is_dir()]
         if missing:
-            print("jw improve trace: --source not a directory: "
+            print("waystone improve trace: --source not a directory: "
                   + ", ".join(str(m) for m in missing), file=sys.stderr)
             return 1
     else:
@@ -1282,10 +1282,10 @@ def _cli_trace(argv: list[str]) -> int:
     try:
         cov = run_trace(sources, projects, out_dir)
     except OSError as e:
-        print(f"jw improve trace: cannot write outputs — {e}", file=sys.stderr)
+        print(f"waystone improve trace: cannot write outputs — {e}", file=sys.stderr)
         return 2
 
-    print(f"jw improve trace: {cov['row_totals']['sessions']} session(s), "
+    print(f"waystone improve trace: {cov['row_totals']['sessions']} session(s), "
           f"{cov['row_totals']['delegations']} delegation(s) -> {out_dir}")
     return 0
 
@@ -1295,17 +1295,17 @@ def _cli_reviews(argv: list[str]) -> int:
         out = _parse_single_opt(argv, "--out")
         out_dir = _residence_checked(out, "--out")
     except WorkflowError as e:
-        print(f"jw improve reviews: {e}", file=sys.stderr)
+        print(f"waystone improve reviews: {e}", file=sys.stderr)
         return 1
     try:
         cov = run_reviews(_registry_path(), out_dir)
     except WorkflowError as e:
-        print(f"jw improve reviews: {e}", file=sys.stderr)
+        print(f"waystone improve reviews: {e}", file=sys.stderr)
         return 1
     except OSError as e:
-        print(f"jw improve reviews: cannot write outputs — {e}", file=sys.stderr)
+        print(f"waystone improve reviews: cannot write outputs — {e}", file=sys.stderr)
         return 2
-    print(f"jw improve reviews: {cov['row_totals']['reviews']} review round(s), "
+    print(f"waystone improve reviews: {cov['row_totals']['reviews']} review round(s), "
           f"{cov['row_totals']['findings']} finding(s), "
           f"{len(cov['projects_scanned'])} project(s) scanned, "
           f"{len(cov['projects_skipped'])} skipped -> {out_dir}")
@@ -1319,17 +1319,17 @@ def _cli_evidence(argv: list[str]) -> int:
             raise WorkflowError("--source is not valid for evidence")
         out_dir = _residence_checked(out, "--out")
     except WorkflowError as e:
-        print(f"jw improve evidence: {e}", file=sys.stderr)
+        print(f"waystone improve evidence: {e}", file=sys.stderr)
         return 1
     try:
         coverage = run_evidence(_registry_path(), out_dir, projects)
     except WorkflowError as e:
-        print(f"jw improve evidence: {e}", file=sys.stderr)
+        print(f"waystone improve evidence: {e}", file=sys.stderr)
         return 1
     except OSError as e:
-        print(f"jw improve evidence: cannot write outputs — {e}", file=sys.stderr)
+        print(f"waystone improve evidence: cannot write outputs — {e}", file=sys.stderr)
         return 2
-    print(f"jw improve evidence: {coverage['row_totals']['tasks']} task(s), "
+    print(f"waystone improve evidence: {coverage['row_totals']['tasks']} task(s), "
           f"{len(coverage['projects_scanned'])} project(s) scanned, "
           f"{len(coverage['projects_skipped'])} skipped -> {out_dir / 'evidence.jsonl'}")
     return 0
@@ -1340,18 +1340,18 @@ def _cli_audit(argv: list[str]) -> int:
         inp = _parse_single_opt(argv, "--in")
         in_dir = _residence_checked(inp, "--in")
     except WorkflowError as e:
-        print(f"jw improve audit: {e}", file=sys.stderr)
+        print(f"waystone improve audit: {e}", file=sys.stderr)
         return 1
     if not in_dir.is_dir():
-        print(f"jw improve audit: input dir does not exist: {in_dir} "
-              f"(run `jw improve trace`/`reviews` first)", file=sys.stderr)
+        print(f"waystone improve audit: input dir does not exist: {in_dir} "
+              f"(run `waystone improve trace`/`reviews` first)", file=sys.stderr)
         return 1
     try:
         facts = run_audit(in_dir)
     except OSError as e:
-        print(f"jw improve audit: cannot write outputs — {e}", file=sys.stderr)
+        print(f"waystone improve audit: cannot write outputs — {e}", file=sys.stderr)
         return 2
-    print(f"jw improve audit: {len(facts['lenses'])} lens(es), "
+    print(f"waystone improve audit: {len(facts['lenses'])} lens(es), "
           f"{len(facts['skipped_lenses'])} skipped -> {in_dir / 'facts.json'}")
     return 0
 
@@ -1393,21 +1393,21 @@ def _cli_decide(argv: list[str]) -> int:
         rec_id, decision, title, note, out = _parse_decide_args(argv)
         out_dir = _residence_checked(out, "--out")
     except WorkflowError as e:
-        print(f"jw improve decide: {e}", file=sys.stderr)
+        print(f"waystone improve decide: {e}", file=sys.stderr)
         return 1
     try:
         rec = run_decide(rec_id, decision, title, note, out_dir)
     except OSError as e:
-        print(f"jw improve decide: cannot write decision — {e}", file=sys.stderr)
+        print(f"waystone improve decide: cannot write decision — {e}", file=sys.stderr)
         return 2
-    print(f"jw improve decide: recorded {rec['decision']} for {rec['rec_id']} "
+    print(f"waystone improve decide: recorded {rec['decision']} for {rec['rec_id']} "
           f"-> {out_dir / 'decisions.jsonl'}")
     return 0
 
 
 def main(argv: list[str]) -> int:
     if not argv:
-        print("jw improve: expected subcommand (trace|reviews|audit|decide)\n" + __doc__, file=sys.stderr)
+        print("waystone improve: expected subcommand (trace|reviews|audit|decide)\n" + __doc__, file=sys.stderr)
         return 1
     sub, rest = argv[0], argv[1:]
     if sub == "trace":
@@ -1420,7 +1420,7 @@ def main(argv: list[str]) -> int:
         return _cli_audit(rest)
     if sub == "decide":
         return _cli_decide(rest)
-    print(f"jw improve: unknown subcommand {sub!r} (expected trace|reviews|audit|decide)\n" + __doc__,
+    print(f"waystone improve: unknown subcommand {sub!r} (expected trace|reviews|audit|decide)\n" + __doc__,
           file=sys.stderr)
     return 1
 

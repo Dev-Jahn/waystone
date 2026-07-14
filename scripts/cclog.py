@@ -24,7 +24,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-PARSER_VERSION = "jw-trace-3"
+PARSER_VERSION = "waystone-trace-1"
 
 
 # --------------------------------------------------------------------------- util

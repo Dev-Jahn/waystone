@@ -1,4 +1,4 @@
-# jahns-workflow
+# waystone
 
 A Claude Code plugin for SSOT-anchored development: one task-naming convention across projects, a
 validated task registry, generated roadmaps, round-based progress, and an external review loop. Built
@@ -17,57 +17,57 @@ Full convention: [references/conventions.md](references/conventions.md).
 
 | | |
 |---|---|
-| `/jahns-workflow:init` | Set up or retrofit a project — non-destructive; existing history and docs are never rewritten. |
-| `/jahns-workflow:round` | Close a round: sync the registry, append PROGRESS, regenerate views, write the review request. |
-| `/jahns-workflow:review` | Ingest a reviewer's reply verbatim, verify each finding, register the real ones as tasks. |
-| `/jahns-workflow:status` | Cross-project dashboard (branches, rounds, active/blocked tasks); projects can be local or remote. |
-| `/jahns-workflow:improve` | Advisory report over your Claude Code history + review evidence: provenance-labeled recommendations you accept or reject (recorded, never auto-applied). |
-| `/jahns-workflow:delegate` | Guided delegation: select a task, inspect labeled evidence, optionally run the independent verifier, then ask you to apply or discard. |
-| `jw task` CLI | Read and mutate the registry without opening the whole file: `list`/`show`, `add`/`set`/`drop` (validated, comment-preserving), `archive` (move old done/dropped tasks to `tasks.archive.yaml`). |
-| `jw delegate` CLI | Hand one task to an external runner in an isolated git worktree cut from an immutable snapshot of your current (even dirty) tree: `run`/`status`/`show`/`apply`/`discard`. The harness computes the patch from git; the runner's own report is carried through labeled as a claim; you `apply` (plain `git apply`) or `discard` after review. |
-| `jw delegate verify` | Normalize the preserved worktree to the delegation base + result patch, then collect read-only `independent-verifier` evidence through the bound codex-companion model; state remains `needs-review`. |
-| `jw overlay` | Store project-local adaptive deltas and manage `observing`/`warning`/`suspended`/`retired`; warning promotion requires deterministic shadow replay. |
-| `jw check` | Evaluate all active overlay rules against current project state; warnings and evaluation errors are visible but never block the host command. |
-| `jw improve evidence` | Deterministically join review findings and delegation records by explicit task ID into plugin-local `evidence.jsonl`. |
+| `/waystone:init` | Set up or retrofit a project — non-destructive; existing history and docs are never rewritten. |
+| `/waystone:round` | Close a round: sync the registry, append PROGRESS, regenerate views, write the review request. |
+| `/waystone:review` | Ingest a reviewer's reply verbatim, verify each finding, register the real ones as tasks. |
+| `/waystone:status` | Cross-project dashboard (branches, rounds, active/blocked tasks); projects can be local or remote. |
+| `/waystone:improve` | Advisory report over your Claude Code history + review evidence: provenance-labeled recommendations you accept or reject (recorded, never auto-applied). |
+| `/waystone:delegate` | Guided delegation: select a task, inspect labeled evidence, optionally run the independent verifier, then ask you to apply or discard. |
+| `waystone task` CLI | Read and mutate the registry without opening the whole file: `list`/`show`, `add`/`set`/`drop` (validated, comment-preserving), `archive` (move old done/dropped tasks to `tasks.archive.yaml`). |
+| `waystone delegate` CLI | Hand one task to an external runner in an isolated git worktree cut from an immutable snapshot of your current (even dirty) tree: `run`/`status`/`show`/`apply`/`discard`. The harness computes the patch from git; the runner's own report is carried through labeled as a claim; you `apply` (plain `git apply`) or `discard` after review. |
+| `waystone delegate verify` | Normalize the preserved worktree to the delegation base + result patch, then collect read-only `independent-verifier` evidence through the bound codex-companion model; state remains `needs-review`. |
+| `waystone overlay` | Store project-local adaptive deltas and manage `observing`/`warning`/`suspended`/`retired`; warning promotion requires deterministic shadow replay. |
+| `waystone check` | Evaluate all active overlay rules against current project state; warnings and evaluation errors are visible but never block the host command. |
+| `waystone improve evidence` | Deterministically join review findings and delegation records by explicit task ID into plugin-local `evidence.jsonl`. |
 | SessionStart hook | Injects the main operating contract, digest, active tasks, and live delegation/overlay summary on start/resume/compact. No-op outside an initialized project. |
-| PreToolUse hook | Redirects a raw read of `tasks.yaml` to the `jw task` CLI; `cat` stays as an escape hatch. |
+| PreToolUse hook | Redirects a raw read of `tasks.yaml` to the `waystone task` CLI; `cat` stays as an escape hatch. |
 | PostToolUse hook | Validates `tasks.yaml` on every edit and regenerates `ROADMAP.md`. |
 
-Rendering and validation are plain Python (`scripts/jw_*.py`, run with `uv`) — no LLM tokens. One
-front door, `jw <group>`, dispatches them
+Rendering and validation are plain Python (`scripts/*.py`, run with `uv`) — no LLM tokens. One
+front door, `waystone <group>`, dispatches them
 (`validate/task/roadmap/ssot/status/remote/review/approve/round/lanes/resume/improve/delegate/overlay/check`).
 
 ## Rounds
 
-`jw round close . --round <id> --done <ids> --touched <ids>` runs the closeout in one step: flips task
+`waystone round close . --round <id> --done <ids> --touched <ids>` runs the closeout in one step: flips task
 status and stamps the round (comment-preserving), validates, regenerates ROADMAP and the SSOT views,
 and advances the `last_round_commit` watermark.
 
 Between sessions, the PreCompact/SessionEnd hooks write a re-entry pointer (HEAD, branch, active round,
 next-actionable tasks) and SessionStart injects it back, so a fresh or post-compaction session picks up
 the frontier without re-explaining. `round close` and `review` also overwrite a short "where am I" note,
-reset each round so it can't grow without bound. `jw lanes verify .` checks each task's `lane:` manifest
+reset each round so it can't grow without bound. `waystone lanes verify .` checks each task's `lane:` manifest
 — that the branch contains its recorded `base_sha` — for parallel worktree lanes.
 
 ## Review
 
-Two modes, set by `review.mode` in `.jahns-workflow.yml`. Both share a push gate: no review is requested
+Two modes, set by `review.mode` in `.waystone.yml`. Both share a push gate: no review is requested
 against an unpushed HEAD.
 
 **`packet`** (default) — round close writes one markdown request
 (`<reviews_dir>/<round-id>-request.md`): what changed and why, files to read first, claims to attack,
 evidence pointers, weak spots, the domain lens. The reviewer reads the repo over git (connector, zip, or
 clone — the plugin doesn't care how) and reviews for domain validity, not workflow conformance.
-`jw review ingest` copies the reply byte-exact — the user saves it to `/tmp/review.md` in a separate
+`waystone review ingest` copies the reply byte-exact — the user saves it to `/tmp/review.md` in a separate
 shell, so the model never re-types it — and appends a triage skeleton; the model verifies each finding
 against the code before registering it. Per-project review priorities can live in `docs/review-profile.md`.
 
 **`pr`** — SHA-bound review cycles on a GitHub PR with a computed merge gate. A review is identified by
 `(reviewer, cycle, reviewed_sha)` and stored as markers in PR comments (GitHub is the source of truth,
-never inferred from filenames). `jw review freeze` stamps the PR head as a cycle and posts the `@codex`
-request. `jw round merge` passes only when, at the current head: the cycle is fresh, CI is green (if
+never inferred from filenames). `waystone review freeze` stamps the PR head as a cycle and posts the `@codex`
+request. `waystone round merge` passes only when, at the current head: the cycle is fresh, CI is green (if
 `require_ci`), a fresh Codex review + resolved findings + a macro-reviewer result are bound to the head,
-there are no open blockers or decisions, and a human approval (`jw approve --pr N --sha <head>`) is bound
+there are no open blockers or decisions, and a human approval (`waystone approve --pr N --sha <head>`) is bound
 to the head. The trust policy (reviewers, approvers, CI requirement) is read from the PR base SHA, so a
 branch can't relax its own merge rules. The gate is computed, never judged.
 
@@ -80,18 +80,18 @@ run fetches `pyyaml` once).
 
 ```bash
 /plugin marketplace add Dev-Jahn/jahns-cc-marketplace
-/plugin install jahns-workflow                   # from a marketplace listing it
-claude --plugin-dir ~/workspace/jahns-workflow   # or for local dev
+/plugin install waystone                   # from a marketplace listing it
+claude --plugin-dir ~/workspace/waystone   # or for local dev
 ```
 
-Then run `/jahns-workflow:init` in each project. Restart Claude Code after install so the hooks load.
+Then run `/waystone:init` in each project. Restart Claude Code after install so the hooks load.
 
 ## What a project gains
 
 ```
-.jahns-workflow.yml      config: SSOT path, directory mapping, review mode
+.waystone.yml      config: SSOT path, directory mapping, review mode
 tasks.yaml               the task registry (validated on every edit)
-tasks.archive.yaml       old done/dropped tasks, moved out by `jw task archive`
+tasks.archive.yaml       old done/dropped tasks, moved out by `waystone task archive`
 ROADMAP.md               generated Mermaid graph + task table
 PROGRESS.md              round log (older months auto-archived under docs/progress/)
 docs/CONVENTIONS.md      verbatim copy of the global convention

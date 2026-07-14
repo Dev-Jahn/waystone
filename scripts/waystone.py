@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["pyyaml"]
 # ///
-"""Unified front door for jahns-workflow scripts: `jw <group> <args>`.
+"""Unified front door for waystone scripts: `waystone <group> <args>`.
 
 Groups:
   validate [tasks.yaml]              validate the task registry
@@ -21,7 +21,7 @@ Groups:
   check    [--root DIR]               evaluate active overlay deltas at an explicit boundary (never blocks)
 
 Existing hook/skill call sites that invoke sibling scripts directly keep working; this is an
-additive convenience front door (GPT review: consolidate under one `jw` CLI).
+additive convenience front door (GPT review: consolidate under one `waystone` CLI).
 """
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def main(argv: list[str]) -> int:
             return merge.main(["merge", *rest[1:]])
         if rest and rest[0] == "close":
             return _run_module_main("round", rest)
-        print("jw round: expected 'close' or 'merge'", file=sys.stderr)
+        print("waystone round: expected 'close' or 'merge'", file=sys.stderr)
         return 1
     if group == "lanes":
         return _run_module_main("lanes", rest)
@@ -91,7 +91,7 @@ def main(argv: list[str]) -> int:
     if group in legacy:
         return _run_module_main(legacy[group], rest)
 
-    print(f"jw: unknown group {group!r}\n{__doc__}", file=sys.stderr)
+    print(f"waystone: unknown group {group!r}\n{__doc__}", file=sys.stderr)
     return 1
 
 

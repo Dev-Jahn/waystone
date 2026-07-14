@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["pyyaml"]
 # ///
-"""Integration tests for the jahns-workflow v0.2.0 correctness kernel.
+"""Integration tests for the waystone v0.2.0 correctness kernel.
 
 Run: uv run scripts/tests/run_tests.py
 Covers the deterministic core: merge-gate computation, review-cycle marker emit/parse/classify,
@@ -643,7 +643,7 @@ class ResumeStartHereTests(unittest.TestCase):
             root = Path(d) / "proj"
             root.mkdir()
             init_repo(root)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             home = Path(d) / "home"
             home.mkdir()
 
@@ -670,7 +670,7 @@ class ResumeStartHereTests(unittest.TestCase):
             root = Path(d) / "proj"
             root.mkdir()
             init_repo(root)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: demo\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: demo\n")
             (root / "tasks.yaml").write_text("version: 1\nproject: demo\ntasks: []\n")
             home = Path(d) / "home"
             home.mkdir()
@@ -701,7 +701,7 @@ class ConfigTests(unittest.TestCase):
     def _cfg(self, body: str) -> dict:
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text(body)
+            (root / ".waystone.yml").write_text(body)
             return common.load_config(root)
 
     def test_default_review_mode_packet(self):
@@ -857,7 +857,7 @@ class LaneTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             init_repo(root)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(
                 "version: 1\nproject: x\ntasks:\n"
                 "  - id: feat/old-lane\n    title: 'a merged & cleaned-up lane'\n    status: done\n"
@@ -870,7 +870,7 @@ class RoundCloseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             init_repo(root)
-            (root / ".jahns-workflow.yml").write_text(
+            (root / ".waystone.yml").write_text(
                 "version: 1\nproject: x\nstate:\n  last_round_commit: null\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             git(root, "add", "-A"); git(root, "commit", "-qm", "setup")
@@ -889,11 +889,11 @@ class RoundCloseTests(unittest.TestCase):
             self.assertIn("# registry — comments must be preserved", txt)
             self.assertTrue((root / "ROADMAP.md").is_file())
             head = git(root, "rev-parse", "HEAD").stdout.strip()
-            self.assertIn(f"last_round_commit: {head}", (root / ".jahns-workflow.yml").read_text())
+            self.assertIn(f"last_round_commit: {head}", (root / ".waystone.yml").read_text())
 
     def _setup(self, root, cfg_body):
         init_repo(root)
-        (root / ".jahns-workflow.yml").write_text(cfg_body)
+        (root / ".waystone.yml").write_text(cfg_body)
         (root / "tasks.yaml").write_text(TASKS_FIXTURE)
         git(root, "add", "-A"); git(root, "commit", "-qm", "setup")
 
@@ -942,7 +942,7 @@ class RoundCloseTests(unittest.TestCase):
             root = Path(d)
             self._setup(root, "version: 1\nproject: x\nstate:\n  last_round_commit: null\n")
             before_tasks = (root / "tasks.yaml").read_text()
-            before_cfg = (root / ".jahns-workflow.yml").read_text()
+            before_cfg = (root / ".waystone.yml").read_text()
 
             def boom(_root):
                 raise RuntimeError("render exploded mid-commit")
@@ -956,7 +956,7 @@ class RoundCloseTests(unittest.TestCase):
             self.assertEqual(rc, 1)
             # primary files restored; ROADMAP not left behind
             self.assertEqual((root / "tasks.yaml").read_text(), before_tasks)
-            self.assertEqual((root / ".jahns-workflow.yml").read_text(), before_cfg)
+            self.assertEqual((root / ".waystone.yml").read_text(), before_cfg)
             self.assertFalse((root / "ROADMAP.md").exists())
 
     def test_close_restores_generated_ssot_on_digest_failure(self):
@@ -964,7 +964,7 @@ class RoundCloseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             init_repo(root)
-            (root / ".jahns-workflow.yml").write_text(
+            (root / ".waystone.yml").write_text(
                 "version: 1\nproject: x\nssot: SSOT.md\ngenerated_dir: docs/ssot\n"
                 "state:\n  last_round_commit: null\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
@@ -1010,7 +1010,7 @@ class BasePolicyTests(unittest.TestCase):
 
         def fake_file_at_ref(root, repo, path, ref):
             calls.append((path, ref))
-            if path == ".jahns-workflow.yml":
+            if path == ".waystone.yml":
                 return STRICT_BASE if ref == bundle["base_sha"] else RELAXED_HEAD
             return TASKS  # tasks.yaml @ head
 
@@ -1023,7 +1023,7 @@ class BasePolicyTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as d:
                 # a local config must exist for the load_config fallback; the gate must ignore it
                 # in favour of the base-SHA policy
-                (Path(d) / ".jahns-workflow.yml").write_text("version: 1\nproject: x\nreview:\n  mode: pr\n")
+                (Path(d) / ".waystone.yml").write_text("version: 1\nproject: x\nreview:\n  mode: pr\n")
                 g = merge._gather(Path(d), 7)
         finally:
             review.resolve_repo, review.pr_bundle, review.file_at_ref, review._gh = saved
@@ -1033,9 +1033,9 @@ class BasePolicyTests(unittest.TestCase):
         self.assertTrue(g["want_codex"])   # base lists codex (head dropped it)
         self.assertTrue(g["want_pro"])     # base lists gpt-5.5-pro (head dropped it)
         # the config was read at the base SHA; tasks at the head SHA
-        self.assertIn((".jahns-workflow.yml", bundle["base_sha"]), calls)
+        self.assertIn((".waystone.yml", bundle["base_sha"]), calls)
         self.assertIn(("tasks.yaml", bundle["head"]), calls)
-        self.assertNotIn((".jahns-workflow.yml", bundle["head"]), calls)
+        self.assertNotIn((".waystone.yml", bundle["head"]), calls)
 
     def test_custom_named_macro_reviewer_is_mandatory(self):
         # a reviewer that isn't 'codex' and isn't named gpt/pro must still gate the merge
@@ -1046,12 +1046,12 @@ class BasePolicyTests(unittest.TestCase):
         saved = (review.resolve_repo, review.pr_bundle, review.file_at_ref, review._gh)
         review.resolve_repo = lambda root: "owner/repo"
         review.pr_bundle = lambda root, pr, repo=None: bundle
-        review.file_at_ref = lambda root, repo, path, ref: (BASE if path == ".jahns-workflow.yml"
+        review.file_at_ref = lambda root, repo, path, ref: (BASE if path == ".waystone.yml"
                                                                else "version: 1\nproject: x\ntasks: []\n")
         review._gh = lambda root, *a: (0, "main")
         try:
             with tempfile.TemporaryDirectory() as d:
-                (Path(d) / ".jahns-workflow.yml").write_text("version: 1\nproject: x\nreview:\n  mode: pr\n")
+                (Path(d) / ".waystone.yml").write_text("version: 1\nproject: x\nreview:\n  mode: pr\n")
                 g = merge._gather(Path(d), 7)
         finally:
             review.resolve_repo, review.pr_bundle, review.file_at_ref, review._gh = saved
@@ -1061,7 +1061,7 @@ class BasePolicyTests(unittest.TestCase):
 class IngestTests(unittest.TestCase):
     def _root(self, d):
         root = Path(d)
-        (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+        (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
         return root
 
     def test_byte_exact_copy_and_consume(self):
@@ -1213,13 +1213,13 @@ class FrozenAcceptanceTests(unittest.TestCase):
         saved = (review.resolve_repo, review.pr_bundle, review.file_at_ref, review._gh)
         review.resolve_repo = lambda root: "owner/repo"
         review.pr_bundle = lambda root, pr, repo=None: bundle
-        review.file_at_ref = lambda root, repo, path, ref: (BASE_PACKET if path == ".jahns-workflow.yml"
+        review.file_at_ref = lambda root, repo, path, ref: (BASE_PACKET if path == ".waystone.yml"
                                                                else "version: 1\nproject: x\ntasks: []\n")
         review._gh = lambda root, *a: (0, "main")
         try:
             with tempfile.TemporaryDirectory() as d:
                 # local config says pr — but the BASE policy (packet) is authoritative
-                (Path(d) / ".jahns-workflow.yml").write_text("version: 1\nproject: x\nreview:\n  mode: pr\n")
+                (Path(d) / ".waystone.yml").write_text("version: 1\nproject: x\nreview:\n  mode: pr\n")
                 g = merge._gather(Path(d), 7)
         finally:
             review.resolve_repo, review.pr_bundle, review.file_at_ref, review._gh = saved
@@ -1251,7 +1251,7 @@ class FrozenAcceptanceTests(unittest.TestCase):
         import ssot
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\nssot: missing.md\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\nssot: missing.md\n")
             with self.assertRaises(common.WorkflowError):  # NOT SystemExit (which slips rollbacks)
                 ssot.regenerate(root)
 
@@ -1259,7 +1259,7 @@ class FrozenAcceptanceTests(unittest.TestCase):
         import ssot
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text(
+            (root / ".waystone.yml").write_text(
                 "version: 1\nproject: x\nssot: S.md\ngenerated_dir: docs/ssot\n")
             (root / "S.md").write_text("# T\n\n## A\nalpha\n")
             ssot.regenerate(root)
@@ -1305,7 +1305,7 @@ class IntegrationSmokeTests(unittest.TestCase):
                 return (0, _json.dumps([comments]))
             if "pulls" in j and "reviews" in j:
                 return (0, _json.dumps([reviews]))
-            if "contents/.jahns-workflow.yml" in j:
+            if "contents/.waystone.yml" in j:
                 return (0, _b64.b64encode(POLICY.encode()).decode())
             if "contents/tasks.yaml" in j:
                 return (0, _b64.b64encode(TASKS.encode()).decode())
@@ -1334,7 +1334,7 @@ class IntegrationSmokeTests(unittest.TestCase):
         review._gh = self._gh(comments, reviews)
         try:
             with tempfile.TemporaryDirectory() as d:
-                (Path(d) / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+                (Path(d) / ".waystone.yml").write_text("version: 1\nproject: x\n")
                 root = Path(d)
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     rc_pass = merge.merge(root, 7, execute=False, method=None)
@@ -1395,7 +1395,7 @@ class TaskCliTests(unittest.TestCase):
     def test_main_add_set_drop_end_to_end(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             self.assertEqual(tasks.main(["add", "fix/new", str(root), "--title", "a brand new fix task"]), 0)
             self.assertEqual(tasks.main(["set", "fix/new", "status", "active", str(root)]), 0)
@@ -1410,7 +1410,7 @@ class TaskCliTests(unittest.TestCase):
     def test_main_add_rejects_invalid_id(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             before = (root / "tasks.yaml").read_text()
             self.assertEqual(tasks.main(["add", "P0", str(root), "--title", "a banned codename task"]), 2)
@@ -1423,7 +1423,7 @@ class TaskCliTests(unittest.TestCase):
                '  - id: feat/gamma\n    title: "gamma depends on alpha"\n    status: active\n    deps: [feat/alpha]\n')
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(doc)
             # re-point gamma's dep alpha→beta (the list-field edit that was impossible before)
             self.assertEqual(tasks.main(["set", "feat/gamma", "deps", "feat/beta", str(root)]), 0)
@@ -1445,7 +1445,7 @@ class TaskCliTests(unittest.TestCase):
                '  - id: feat/gamma\n    title: "gamma depends on alpha in block form"\n    status: active\n    deps:\n      - feat/alpha\n')
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(doc)
             self.assertEqual(tasks.main(["set", "feat/gamma", "deps", "feat/beta", str(root)]), 0)
             text = (root / "tasks.yaml").read_text()
@@ -1486,7 +1486,7 @@ class TaskArchiveTests(unittest.TestCase):
     def test_archive_main_moves_accumulates_and_stays_valid(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(_registry(20, 2))
             self.assertEqual(tasks.main(["archive", str(root), "--threshold", "10", "--keep", "5"]), 0)
             data = yaml.safe_load((root / "tasks.yaml").read_text())
@@ -1508,18 +1508,18 @@ class TaskReadNudgeTests(unittest.TestCase):
     def test_denies_read_of_canonical_tasks_yaml(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             out = self.nudge.decide({"tool_name": "Read",
                                      "tool_input": {"file_path": str(root / "tasks.yaml")}})
             self.assertIsNotNone(out)
             self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
-            self.assertIn("jw task", out["hookSpecificOutput"]["permissionDecisionReason"])
+            self.assertIn("waystone task", out["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_allows_other_files_and_tools(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             (root / "other.yaml").write_text("x: 1\n")
             # a different file → no decision
@@ -1559,7 +1559,7 @@ class TaskRegressionTests(unittest.TestCase):
     def test_set_last_field_no_trailing_newline_updates(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(self.NO_NL)
             self.assertEqual(tasks.main(["set", "feat/last", "status", "done", str(root)]), 0)
             data = yaml.safe_load((root / "tasks.yaml").read_text())
@@ -1583,7 +1583,7 @@ class TaskRegressionTests(unittest.TestCase):
     def test_set_value_with_colon(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             self.assertEqual(tasks.main(["set", "feat/alpha", "notes", "blocked by X: see ticket 5", str(root)]), 0)
             data = {t["id"]: t for t in yaml.safe_load((root / "tasks.yaml").read_text())["tasks"]}
@@ -1592,7 +1592,7 @@ class TaskRegressionTests(unittest.TestCase):
     def test_set_invalid_value_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             before = (root / "tasks.yaml").read_text()
             self.assertEqual(tasks.main(["set", "feat/alpha", "status", "bogus", str(root)]), 2)
@@ -1616,7 +1616,7 @@ class TaskRegressionTests(unittest.TestCase):
     def test_negative_keep_rejected(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(_registry(20, 2))
             before = (root / "tasks.yaml").read_text()
             self.assertEqual(tasks.main(["archive", str(root), "--threshold", "10", "--keep", "-1"]), 1)
@@ -1625,7 +1625,7 @@ class TaskRegressionTests(unittest.TestCase):
     def test_malformed_archive_file_aborts(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(_registry(20, 2))
             (root / "tasks.archive.yaml").write_text("just a string, not a registry\n")
             before = (root / "tasks.yaml").read_text()
@@ -1636,7 +1636,7 @@ class TaskRegressionTests(unittest.TestCase):
     def test_symlinked_tasks_yaml_is_denied(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "real.yaml").write_text(TASKS_FIXTURE)
             (root / "tasks.yaml").symlink_to(root / "real.yaml")
             out = self.nudge.decide({"tool_name": "Read",
@@ -1972,7 +1972,7 @@ class ImproveDiscoveryTests(unittest.TestCase):
 
             rc = _run_with_home(home, run)
             self.assertEqual(rc, 0)
-            out_dir = home / ".claude" / "jahns-workflow" / "improve"
+            out_dir = home / ".claude" / "waystone" / "improve"
             self.assertTrue((out_dir / "sessions.jsonl").is_file())
             self.assertTrue((out_dir / "parse_coverage.json").is_file())
 
@@ -2162,7 +2162,7 @@ class ImproveSelfSessionTests(unittest.TestCase):
     @staticmethod
     def _cmd_tag(uuid):
         return {"type": "user", "uuid": uuid, "message": {"role": "user",
-                "content": "<command-name>/jahns-workflow:improve</command-name>\n<command-args></command-args>"}}
+                "content": "<command-name>/waystone:improve</command-name>\n<command-args></command-args>"}}
 
     @staticmethod
     def _agent(uuid, tuid):
@@ -2320,7 +2320,7 @@ class ImproveSelfSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             src = self._main_src(d, _UUID, [
                 self._u("u1", "implement"),                                                # 1 turn
-                self._u("u2", "I ran <command-name>/jahns-workflow:improve</command-name> earlier"),  # 2
+                self._u("u2", "I ran <command-name>/waystone:improve</command-name> earlier"),  # 2
                 self._bash("a3", "t3", "echo tail"),                                       # 3 included
             ])
             out = Path(d) / "out"
@@ -2349,7 +2349,7 @@ class ImproveSelfSessionTests(unittest.TestCase):
 # feedback file exactly as review.ingest writes it: metadata header, byte-exact reviewer body
 # (which itself contains `### JW-GPT-NNN` blocks + `- Severity:` lines we must NOT parse), then an
 # APPENDED triage table under `## Findings (triage skeleton …)` — the only thing improve reviews reads.
-_TRIAGE_FEEDBACK = """<!-- jahns-workflow feedback: verbatim body below; triage skeleton appended. -->
+_TRIAGE_FEEDBACK = """<!-- waystone feedback: verbatim body below; triage skeleton appended. -->
 round: 2026-07-01-alpha
 reviewer: gpt-5.5-pro
 ingested: 2026-07-01
@@ -2382,7 +2382,7 @@ class ImproveReviewsTests(unittest.TestCase):
     def _fixture(self, d: Path) -> Path:
         proj = d / "projA"
         proj.mkdir()
-        (proj / ".jahns-workflow.yml").write_text("version: 1\nproject: a\n")  # reviews_dir=docs/reviews
+        (proj / ".waystone.yml").write_text("version: 1\nproject: a\n")  # reviews_dir=docs/reviews
         rdir = proj / "docs" / "reviews"
         rdir.mkdir(parents=True)
         (rdir / "2026-07-01-alpha-request.md").write_text("# Review Request — alpha\n")
@@ -2484,10 +2484,10 @@ class ImproveReviewsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             home = d / "home"
-            (home / ".claude" / "jahns-workflow").mkdir(parents=True)
+            (home / ".claude" / "waystone").mkdir(parents=True)
             # place the registry where the runtime path resolves it under the fake HOME
             reg = self._fixture(d)
-            (home / ".claude" / "jahns-workflow" / "projects.json").write_text(reg.read_text())
+            (home / ".claude" / "waystone" / "projects.json").write_text(reg.read_text())
 
             def run():
                 buf = io.StringIO()
@@ -2497,7 +2497,7 @@ class ImproveReviewsTests(unittest.TestCase):
 
             rc = _run_with_home(home, run)
             self.assertEqual(rc, 0)
-            out_dir = home / ".claude" / "jahns-workflow" / "improve"
+            out_dir = home / ".claude" / "waystone" / "improve"
             self.assertTrue((out_dir / "reviews.jsonl").is_file())
             self.assertTrue((out_dir / "reviews_coverage.json").is_file())
 
@@ -2547,7 +2547,7 @@ class ImproveAuditTests(unittest.TestCase):
         ]
 
     def _coverage(self):
-        return {"parser_version": "jw-trace-2", "generated_from": ["/x"],
+        return {"parser_version": "waystone-trace-2", "generated_from": ["/x"],
                 "files_by_kind": {"main_transcript": 2}, "files_skipped": 0,
                 "event_type_counts": {}, "unknown_raw_types": {"weird": 1},
                 "record_parse_errors": 0, "replayed_records_skipped": 1,
@@ -2713,7 +2713,7 @@ class ImproveDecideTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             home = d / "home"
-            (home / ".claude" / "jahns-workflow").mkdir(parents=True)
+            (home / ".claude" / "waystone").mkdir(parents=True)
 
             def run():
                 buf = io.StringIO()
@@ -2721,7 +2721,7 @@ class ImproveDecideTests(unittest.TestCase):
                     return improve.main(["decide", "context_heavy/trim", "accept"])
             rc = _run_with_home(home, run)
             self.assertEqual(rc, 0)
-            default_log = home / ".claude" / "jahns-workflow" / "improve" / "decisions.jsonl"
+            default_log = home / ".claude" / "waystone" / "improve" / "decisions.jsonl"
             self.assertTrue(default_log.is_file())  # default --out honors HOME
 
             explicit = d / "elsewhere"
@@ -2797,7 +2797,7 @@ class ImproveM1DefectTests(unittest.TestCase):
             d = Path(d)
             proj = d / "projA"
             proj.mkdir()
-            (proj / ".jahns-workflow.yml").write_text("version: 1\nproject: a\n")
+            (proj / ".waystone.yml").write_text("version: 1\nproject: a\n")
             rdir = proj / "docs" / "reviews"
             rdir.mkdir(parents=True)
             (rdir / "2026-07-01-x-feedback.md").write_text(
@@ -2849,8 +2849,8 @@ class ImproveM1DefectTests(unittest.TestCase):
                 improve.run_reviews(wrong, out)              # wrong shape -> fail loud
             # exit-code contract via the CLI (corrupt registry under a fake HOME) -> rc 1, not 0
             home = d / "home"
-            (home / ".claude" / "jahns-workflow").mkdir(parents=True)
-            (home / ".claude" / "jahns-workflow" / "projects.json").write_text("{ nope ")
+            (home / ".claude" / "waystone").mkdir(parents=True)
+            (home / ".claude" / "waystone" / "projects.json").write_text("{ nope ")
             rc = _run_with_home(home, lambda: self._quiet(
                 lambda: improve.main(["reviews", "--out", str(d / "o2")])))
             self.assertEqual(rc, 1)
@@ -2948,7 +2948,7 @@ class ImproveM1DefectTests(unittest.TestCase):
 
 class AcceptFieldTests(unittest.TestCase):
     """0.8.0 M1: the optional task `accept` field (YAML list of acceptance criteria) — validated by
-    validate, but NOT settable via `jw task add/set` (comma-split would distort free text)."""
+    validate, but NOT settable via `waystone task add/set` (comma-split would distort free text)."""
 
     def test_validate_accepts_string_list(self):
         data = {"version": 1, "project": "x", "tasks": [
@@ -2973,7 +2973,7 @@ class AcceptFieldTests(unittest.TestCase):
     def test_task_add_rejects_accept_flag(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             before = (root / "tasks.yaml").read_text()
             rc = tasks.main(["add", "feat/new", str(root), "--title",
@@ -2984,7 +2984,7 @@ class AcceptFieldTests(unittest.TestCase):
     def test_task_set_rejects_accept_field(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             before = (root / "tasks.yaml").read_text()
             rc = tasks.main(["set", "feat/alpha", "accept", "some criterion", str(root)])
@@ -3101,12 +3101,12 @@ class DelegateSnapshotTests(unittest.TestCase):
         self.assertRegex(did, r"^\d{8}T\d{6}Z-feat-xyz$")
 
 
-_PROFILE_BODY = ('schema: jw-profile-1\nbindings:\n'
+_PROFILE_BODY = ('schema: waystone-profile-1\nbindings:\n'
                  '  implementer: {execution: external-runner, backend: "codex:gpt-5.4-codex"}\n')
 
 
 def _write_profile(home: Path, body: str = _PROFILE_BODY):
-    pdir = home / ".claude" / "jahns-workflow"
+    pdir = home / ".claude" / "waystone"
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "profile.yml").write_text(body, encoding="utf-8")
 
@@ -3178,7 +3178,7 @@ class DelegatePacketTests(unittest.TestCase):
         data = _packet_registry()
         packet, acceptance = delegate._build_packet(data, "feat/xyz",
                                                        ["flag criterion", "registry criterion one"], Path("/x"))
-        self.assertEqual(packet["schema"], "jw-packet-1")
+        self.assertEqual(packet["schema"], "waystone-packet-1")
         self.assertEqual(acceptance, ["registry criterion one", "flag criterion"])  # order + dedup
         self.assertEqual(packet["task"]["deps"], [{"id": "feat/dep", "status": "done"}])
         self.assertEqual(packet["project"]["name"], "demo")
@@ -3214,7 +3214,7 @@ class DelegateRunTests(unittest.TestCase):
         root = Path(d) / "repo"
         root.mkdir()
         init_repo(root)
-        (root / ".jahns-workflow.yml").write_text("version: 1\nproject: demo\n")
+        (root / ".waystone.yml").write_text("version: 1\nproject: demo\n")
         (root / "tasks.yaml").write_text(
             "version: 1\nproject: demo\ntasks:\n"
             '  - id: feat/xyz\n    title: "implement xyz feature"\n    status: active\n'
@@ -3266,7 +3266,7 @@ class DelegateRunTests(unittest.TestCase):
             wt = _run_with_home(home, lambda: delegate._worktree_path(root, rec.name))
             self.assertFalse((wt / "JW_REPORT.yaml").exists())
             contract = yaml.safe_load((rec / "artifact" / "contract.yaml").read_text())
-            self.assertEqual(contract["schema"], "jw-artifact-1")
+            self.assertEqual(contract["schema"], "waystone-artifact-1")
             self.assertFalse(contract["empty"])
             self.assertEqual([c["path"] for c in contract["changed_files"]], ["impl.py"])
             self.assertEqual(contract["changed_files"][0]["status"], "A")
@@ -3277,13 +3277,13 @@ class DelegateRunTests(unittest.TestCase):
             # exposure immutable fields
             import json as _json
             exp = _json.loads((rec / "exposure.json").read_text())
-            self.assertEqual(exp["schema"], "jw-exposure-1")
+            self.assertEqual(exp["schema"], "waystone-exposure-1")
             self.assertEqual(exp["sandbox"], "workspace-write")
             self.assertEqual(exp["binding"]["backend"], "codex:gpt-5.4-codex")
             self.assertEqual(exp["overlays"], [])
             # result ref exists
             self.assertTrue(git(root, "rev-parse", "--verify",
-                                f"refs/jw/delegations/{rec.name}-result").returncode == 0)
+                                f"refs/waystone/delegations/{rec.name}-result").returncode == 0)
 
     def test_missing_report_marked_absent(self):
         with tempfile.TemporaryDirectory() as d:
@@ -3330,7 +3330,7 @@ class DelegateRunTests(unittest.TestCase):
     def test_env_prep_failure_is_failed_env_no_runner(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(d)
-            (root / ".jahns-workflow.yml").write_text(
+            (root / ".waystone.yml").write_text(
                 "version: 1\nproject: demo\ndelegation:\n  env_prep:\n    - \"false\"\n")
             called = {"n": 0}
 
@@ -3487,7 +3487,7 @@ def _deleg_project(d) -> tuple[Path, Path]:
     root = Path(d) / "repo"
     root.mkdir()
     init_repo(root)
-    (root / ".jahns-workflow.yml").write_text("version: 1\nproject: demo\n")
+    (root / ".waystone.yml").write_text("version: 1\nproject: demo\n")
     (root / "tasks.yaml").write_text(
         "version: 1\nproject: demo\ntasks:\n"
         '  - id: feat/xyz\n    title: "implement xyz feature"\n    status: active\n'
@@ -3534,7 +3534,7 @@ class DelegateEffortTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root, home = _deleg_project(d)
             _write_profile(home, (
-                "schema: jw-profile-1\nbindings:\n"
+                "schema: waystone-profile-1\nbindings:\n"
                 "  implementer: {execution: external-runner, backend: \"codex:gpt-test\", "
                 "effort: high}\n"))
             seen = {}
@@ -3586,7 +3586,7 @@ class DelegateApplyTests(unittest.TestCase):
             self.assertFalse(wt.exists())                                    # worktree removed
             self.assertTrue((rec / "artifact" / "contract.yaml").exists())   # record preserved
             self.assertNotEqual(git(root, "rev-parse", "--verify",
-                                    f"refs/jw/delegations/{rec.name}").returncode, 0)  # ref gone
+                                    f"refs/waystone/delegations/{rec.name}").returncode, 0)  # ref gone
 
     def test_apply_drift_is_atomic_exit1(self):
         with tempfile.TemporaryDirectory() as d:
@@ -3795,8 +3795,8 @@ class DelegateCliTests(unittest.TestCase):
             rec = _latest_rec(root, home)
             import contextlib
             import io
-            for opt, needle in (("--patch", "hello"), ("--report", "jw-artifact-1"),
-                                ("--exposure", "jw-exposure-1")):
+            for opt, needle in (("--patch", "hello"), ("--report", "waystone-artifact-1"),
+                                ("--exposure", "waystone-exposure-1")):
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
                     rc = _run_with_home(home, lambda o=opt: delegate.main(
@@ -3807,7 +3807,7 @@ class DelegateCliTests(unittest.TestCase):
     def test_show_patch_report_refused_when_no_artifact(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _deleg_project(d)
-            (root / ".jahns-workflow.yml").write_text(
+            (root / ".waystone.yml").write_text(
                 "version: 1\nproject: demo\ndelegation:\n  env_prep:\n    - \"false\"\n")
             import contextlib
             import io
@@ -3852,7 +3852,7 @@ class OverlayStoreTests(unittest.TestCase):
             root, home = _overlay_project(d)
             delta = _add_delta(root, home)
             self.assertEqual(delta["status"], "observing")
-            self.assertEqual(delta["schema"], "jw-delta-1")
+            self.assertEqual(delta["schema"], "waystone-delta-1")
             self.assertEqual(delta["candidate_scope"], "unresolved")
             self.assertEqual(delta["evidence"]["source"], "manual")
             self.assertIsNone(delta["evidence"]["rec_id"])
@@ -4000,7 +4000,7 @@ def _rule2_project(d):
     root = Path(d) / "repo"
     root.mkdir()
     init_repo(root)
-    (root / ".jahns-workflow.yml").write_text("version: 1\nproject: demo\nreviews_dir: docs/reviews\n")
+    (root / ".waystone.yml").write_text("version: 1\nproject: demo\nreviews_dir: docs/reviews\n")
     (root / "tasks.yaml").write_text(
         "version: 1\nproject: demo\ntasks:\n"
         "  - id: fix/finding-a\n    title: open severe finding task\n    status: active\n"
@@ -4087,7 +4087,7 @@ def _check_project(d):
     root = Path(d) / "repo"
     root.mkdir()
     init_repo(root)
-    (root / ".jahns-workflow.yml").write_text("version: 1\nproject: demo\nreviews_dir: docs/reviews\n")
+    (root / ".waystone.yml").write_text("version: 1\nproject: demo\nreviews_dir: docs/reviews\n")
     (root / "tasks.yaml").write_text(
         "version: 1\nproject: demo\ntasks:\n"
         "  - id: feat/xyz\n    title: task one here\n    status: active\n    accept:\n      - c1\n"
@@ -4109,7 +4109,7 @@ def _round_review_project(d):
     root = Path(d) / "repo"
     root.mkdir()
     init_repo(root)
-    (root / ".jahns-workflow.yml").write_text(
+    (root / ".waystone.yml").write_text(
         "version: 1\nproject: demo\nreviews_dir: docs/reviews\nstate:\n  last_round_commit: null\n")
     (root / "tasks.yaml").write_text(
         "version: 1\nproject: demo\ntasks:\n"
@@ -4170,7 +4170,7 @@ class BoundaryWarnTests(unittest.TestCase):
             with contextlib.redirect_stderr(err):
                 events = _run_with_home(home, lambda: overlay.evaluate_boundary(
                     root, "delegate-run", {"delegation_id": did}))
-            self.assertIn("jw warn", err.getvalue())
+            self.assertIn("waystone warn", err.getvalue())
             self.assertEqual([e for e in events if e["event"] == "fire"][0]["delta_status"], "warning")
 
     def test_no_fire_when_verification_present(self):
@@ -4296,7 +4296,7 @@ class BoundaryWarnTests(unittest.TestCase):
                 rc = _run_with_home(home, lambda: round.close(
                     root, "2026-01-02-close", done=["chore/close-me"], touched=[], commit="HEAD"))
             self.assertEqual(rc, 0)  # warn does not block close
-            self.assertIn("jw warn", err.getvalue())
+            self.assertIn("waystone warn", err.getvalue())
             rows = _read_warnings(root, home)
             self.assertTrue(any(r["boundary"] == "round-close" and r["event"] == "fire" for r in rows))
 
@@ -4434,7 +4434,7 @@ class RoundExposureTests(unittest.TestCase):
             p = self._exposure_dir(root, home) / "round-2026-01-02-close.json"
             self.assertTrue(p.exists())
             exp = _json.loads(p.read_text())
-            self.assertEqual(exp["schema"], "jw-round-exposure-1")
+            self.assertEqual(exp["schema"], "waystone-round-exposure-1")
             self.assertEqual(exp["round_id"], "2026-01-02-close")
             self.assertIsNotNone(exp["profile_fingerprint"])
             self.assertEqual(exp["bindings"]["implementer"], "codex:gpt-5.4-codex")
@@ -4584,7 +4584,7 @@ class EvidenceTests(unittest.TestCase):
         root = d / "repo"
         root.mkdir()
         init_repo(root)
-        (root / ".jahns-workflow.yml").write_text(
+        (root / ".waystone.yml").write_text(
             "version: 1\nproject: demo\nreviews_dir: docs/reviews\n")
         (root / "tasks.yaml").write_text(
             "version: 1\nproject: demo\ntasks:\n"
@@ -4612,7 +4612,7 @@ class EvidenceTests(unittest.TestCase):
             {"name": "remote-only", "repo": "owner/repo"},
             {"name": "gone", "path": str(d / "missing")},
         ]}))
-        default_registry = home / ".claude" / "jahns-workflow" / "projects.json"
+        default_registry = home / ".claude" / "waystone" / "projects.json"
         default_registry.parent.mkdir(parents=True, exist_ok=True)
         default_registry.write_bytes(registry.read_bytes())
         return root, home, registry
@@ -4736,7 +4736,7 @@ class DelegateVerifyTests(unittest.TestCase):
     """0.8.0 M2 §11/§12 — same-base independent verifier transport (synthetic only)."""
 
     _PROFILE = (
-        "schema: jw-profile-1\nbindings:\n"
+        "schema: waystone-profile-1\nbindings:\n"
         "  implementer: {execution: external-runner, backend: \"codex:gpt-5.6-sol\"}\n"
         "  verifier: {execution: codex-companion, backend: \"codex:gpt-5.6-sol\", "
         "entry: adversarial-review}\n")
@@ -4810,7 +4810,7 @@ class DelegateVerifyTests(unittest.TestCase):
                 "-C", str(worktree), "-m", "gpt-5.6-sol"])
             self.assertLessEqual(len(args[-1].encode("utf-8")), 1024)
             artifact = _json.loads((rec / "artifact" / "verify-1.json").read_text())
-            self.assertEqual(artifact["schema"], "jw-verify-1")
+            self.assertEqual(artifact["schema"], "waystone-verify-1")
             self.assertEqual(artifact["backend"], "codex:gpt-5.6-sol")
             self.assertEqual(artifact["provenance"], "independent-verifier")
             self.assertEqual(artifact["payload"]["verdict"], "challenge")
@@ -5020,7 +5020,7 @@ class DelegateVerifyTests(unittest.TestCase):
                 ("{execution: codex-companion, backend: \"codex:x\", entry: review}",
                  "entry 'review' not implemented in M2"),
             ):
-                body = ("schema: jw-profile-1\nbindings:\n"
+                body = ("schema: waystone-profile-1\nbindings:\n"
                         "  implementer: {execution: external-runner, backend: \"codex:x\"}\n"
                         f"  verifier: {verifier}\n")
                 _write_profile(home, body)
@@ -5129,7 +5129,7 @@ class UvCacheTests(unittest.TestCase):
                     worktree, "gpt-5.6-sol", prompt, record)[0], 0)
             finally:
                 delegate.subprocess.run = orig
-            expected = str(worktree / ".jw-uv-cache")
+            expected = str(worktree / ".waystone-uv-cache")
             self.assertEqual([env["UV_CACHE_DIR"] for env in seen], [expected, expected])
             self.assertEqual(os.environ.get("UV_CACHE_DIR"), before)
 
@@ -5142,7 +5142,7 @@ class UvCacheTests(unittest.TestCase):
             before = info_exclude.read_bytes() if info_exclude.exists() else None
 
             def fake(worktree, model, prompt_path, record_dir):
-                cache = worktree / ".jw-uv-cache"
+                cache = worktree / ".waystone-uv-cache"
                 cache.mkdir()
                 (cache / "junk").write_text("cache")
                 (worktree / "kept.txt").write_text("keep")
@@ -5155,7 +5155,7 @@ class UvCacheTests(unittest.TestCase):
             self.assertEqual(contract["changed_files"], [{"path": "kept.txt", "status": "A"}])
             patch = (rec / "artifact" / "changes.patch").read_text()
             self.assertIn("kept.txt", patch)
-            self.assertNotIn(".jw-uv-cache", patch)
+            self.assertNotIn(".waystone-uv-cache", patch)
             after = info_exclude.read_bytes() if info_exclude.exists() else None
             self.assertEqual(after, before)
 
@@ -5200,7 +5200,7 @@ class ContractInjectTests(unittest.TestCase):
         root = Path(d) / "repo"
         root.mkdir()
         init_repo(root)
-        (root / ".jahns-workflow.yml").write_text("version: 1\nproject: demo\n")
+        (root / ".waystone.yml").write_text("version: 1\nproject: demo\n")
         (root / "tasks.yaml").write_text(
             "version: 1\nproject: demo\ntasks:\n"
             "  - id: feat/active\n    title: active task here\n    status: active\n")
@@ -5244,7 +5244,7 @@ class ContractInjectTests(unittest.TestCase):
             self._delegation(root, home, "did-one", "needs-review")
             self._delegation(root, home, "did-two", "needs-review")
             self._delegation(root, home, "did-done", "applied")
-            evidence = home / ".claude" / "jahns-workflow" / "improve" / "evidence.jsonl"
+            evidence = home / ".claude" / "waystone" / "improve" / "evidence.jsonl"
             evidence.parent.mkdir(parents=True)
             _write_jsonl(evidence, [
                 {"task_id": "feat/active", "project": "demo", "findings": [{"severity": "major"}],
@@ -5285,7 +5285,7 @@ class ContractInjectTests(unittest.TestCase):
         module = self._module()
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(d)
-            profile = home / ".claude" / "jahns-workflow" / "profile.yml"
+            profile = home / ".claude" / "waystone" / "profile.yml"
             profile.parent.mkdir(parents=True)
             profile.write_text("bindings: [\n")
             delta = _run_with_home(home, lambda: overlay._deltas_dir(root)) / "bad.json"
@@ -5293,7 +5293,7 @@ class ContractInjectTests(unittest.TestCase):
             delta.write_text("{bad")
             rec = self._delegation(root, home, "did-corrupt", "needs-review")
             (rec / "status.json").write_text("{bad")
-            evidence = home / ".claude" / "jahns-workflow" / "improve" / "evidence.jsonl"
+            evidence = home / ".claude" / "waystone" / "improve" / "evidence.jsonl"
             evidence.parent.mkdir(parents=True)
             evidence.write_text("{bad\n")
             rc, ctx = self._context(module, root, home)
@@ -5323,7 +5323,7 @@ class M2DocsTests(unittest.TestCase):
     def test_delegate_skill_preserves_provenance_and_user_acceptance(self):
         text = (SCRIPTS.parent / "skills" / "delegate" / "SKILL.md").read_text()
         self.assertIn("name: delegate", text)
-        self.assertIn("/jahns-workflow:delegate", text)
+        self.assertIn("/waystone:delegate", text)
         self.assertIn("delegate-claimed", text)
         self.assertIn("independent-verifier", text)
         self.assertIn("AskUserQuestion", text)
@@ -5350,7 +5350,7 @@ class M2DocsTests(unittest.TestCase):
 
     def test_readme_and_front_door_name_all_new_surfaces(self):
         readme = (SCRIPTS.parent / "README.md").read_text()
-        for surface in ("jw overlay", "jw check", "jw improve evidence", "jw delegate verify"):
+        for surface in ("waystone overlay", "waystone check", "waystone improve evidence", "waystone delegate verify"):
             self.assertIn(f"`{surface}`", readme)
         import waystone
         for surface in ("improve", "evidence", "delegate", "verify", "overlay", "check"):
@@ -5361,8 +5361,8 @@ class M2DocsTests(unittest.TestCase):
         for phrase in (
             "non-blocking", "least-restrictive", "task-id", "estimated nuisance rate",
             "workspace-write", "read-only", "independent-verifier",
-            "~/.claude/jahns-workflow/overlay/", "~/.claude/jahns-workflow/exposure/",
-            "~/.claude/jahns-workflow/improve/evidence.jsonl",
+            "~/.claude/waystone/overlay/", "~/.claude/waystone/exposure/",
+            "~/.claude/waystone/improve/evidence.jsonl",
         ):
             self.assertIn(phrase, text)
 

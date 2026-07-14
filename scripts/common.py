@@ -1,4 +1,4 @@
-"""Shared helpers for jahns-workflow scripts (imported by sibling scripts)."""
+"""Shared helpers for waystone scripts (imported by sibling scripts)."""
 from __future__ import annotations
 
 import hashlib
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import yaml
 
-CONFIG_NAME = ".jahns-workflow.yml"
+CONFIG_NAME = ".waystone.yml"
 TASKS_NAME = "tasks.yaml"
 
 
@@ -17,7 +17,7 @@ class WorkflowError(Exception):
     ordinary Exception, catchable by rollback logic) rather than calling sys.exit() — only CLI
     main() converts it to an exit code. (sys.exit raises SystemExit/BaseException, which slips past
     `except Exception` rollbacks.)"""
-REGISTRY_PATH = Path.home() / ".claude" / "jahns-workflow" / "projects.json"
+REGISTRY_PATH = Path.home() / ".claude" / "waystone" / "projects.json"
 
 TASK_TYPES = ("feat", "fix", "perf", "gate", "spike", "decision", "docs", "chore")
 TASK_STATUSES = ("pending", "active", "blocked", "done", "dropped")
@@ -30,7 +30,7 @@ ROUND_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]*$")
 
 
 def find_project_root(start: Path) -> Path | None:
-    """Walk upward from `start` to find the directory containing .jahns-workflow.yml."""
+    """Walk upward from `start` to find the directory containing .waystone.yml."""
     cur = start.resolve()
     for p in (cur, *cur.parents):
         if (p / CONFIG_NAME).is_file():
@@ -187,7 +187,7 @@ def resume_path(root: Path) -> Path:
     """Plugin-local EPHEMERAL re-entry snapshot for a project (NOT committed to the repo). Written
     deterministically by the PreCompact/SessionEnd hook (structured: HEAD/round/tasks) and CONSUMED
     by the next SessionStart. Hashed path so different repos can't collide on a truncated slug."""
-    return Path.home() / ".claude" / "jahns-workflow" / "resume" / f"{_project_slug(root)}.md"
+    return Path.home() / ".claude" / "waystone" / "resume" / f"{_project_slug(root)}.md"
 
 
 def start_here_path(root: Path) -> Path:
@@ -195,7 +195,7 @@ def start_here_path(root: Path) -> Path:
     MODEL overwrites it at round close / after review with a bounded live-frontier narrative; the
     SessionStart hook injects it so a new/resumed session picks up without a manual 'pick up where
     we left off'. Complements the ephemeral structured resume_path — narrative vs. structured."""
-    return Path.home() / ".claude" / "jahns-workflow" / "start_here" / f"{_project_slug(root)}.md"
+    return Path.home() / ".claude" / "waystone" / "start_here" / f"{_project_slug(root)}.md"
 
 
 def slugify(text: str, max_len: int = 40) -> str:

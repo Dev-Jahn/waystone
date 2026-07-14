@@ -16,7 +16,7 @@ sibling lanes merge and would false-fail healthy lanes).
     base_sha: <sha recorded when the lane was created>   # = the dependency's result if depends_on
     depends_on: [feat/bar]   # optional
 
-Usage (also `jw lanes verify`): lanes.py verify [root]   exit 0 ok, 3 if any lane fails.
+Usage (also `waystone lanes verify`): lanes.py verify [root]   exit 0 ok, 3 if any lane fails.
 """
 from __future__ import annotations
 

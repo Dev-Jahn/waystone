@@ -3,10 +3,10 @@
 # requires-python = ">=3.10"
 # dependencies = ["pyyaml"]
 # ///
-"""Cross-project terminal dashboard for all jahns-workflow projects.
+"""Cross-project terminal dashboard for all waystone projects.
 
 Usage: dashboard.py [--project NAME]
-Reads the global registry (~/.claude/jahns-workflow/projects.json). Entry forms:
+Reads the global registry (~/.claude/waystone/projects.json). Entry forms:
   { "name": "...", "path": "/abs/local/clone" }   — local: git state + tasks.yaml from disk
   { "name": "...", "repo": "owner/name" }          — remote: tasks.yaml fetched via `gh api`
   both                                             — local preferred while the path exists
@@ -114,7 +114,7 @@ def main() -> int:
     idx = sys.argv.index("--project") if "--project" in sys.argv else -1
     only = sys.argv[idx + 1] if 0 <= idx < len(sys.argv) - 1 else None
     if not REGISTRY_PATH.is_file():
-        print("no projects registered yet — run /jahns-workflow:init in a project first")
+        print("no projects registered yet — run /waystone:init in a project first")
         return 0
     reg = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
     projects = reg.get("projects", [])

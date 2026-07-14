@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["pyyaml"]
 # ///
-"""Adaptive overlay store + boundary warn engine — `jw overlay` / `jw check` (0.8.0 M2).
+"""Adaptive overlay store + boundary warn engine — `waystone overlay` / `waystone check` (0.8.0 M2).
 
 A project-local overlay is a small set of *deltas*: machine-evaluable rules (from a fixed
 vocabulary) that the harness can check at workflow boundaries (a delegation reaching needs-review,
@@ -121,7 +121,7 @@ def evaluate_rule2(root: Path, cfg: dict, severities, *, closing_done=frozenset(
 
 # ---- residence (§2 — plugin-local, keyed by project slug; never committed) -----
 def _plugin_base() -> Path:
-    return Path.home() / ".claude" / "jahns-workflow"
+    return Path.home() / ".claude" / "waystone"
 
 
 def _overlay_dir(root: Path) -> Path:
@@ -215,7 +215,7 @@ def active_deltas_for_exposure(root: Path) -> list[dict]:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
             raise WorkflowError(f"corrupt delta file {p} ({e})")
-        if (not isinstance(data, dict) or data.get("schema") != "jw-delta-1"
+        if (not isinstance(data, dict) or data.get("schema") != "waystone-delta-1"
                 or not isinstance(data.get("id"), str)
                 or DELTA_ID_RE.fullmatch(data["id"]) is None
                 or data.get("status") not in DELTA_STATUSES
@@ -246,7 +246,7 @@ def add_delta(root: Path, delta_id: str, *, rule: str, summary: str, pointers=No
     source, rec_id = ("improve-rec", from_rec) if from_rec is not None else ("manual", None)
     now = _now_iso()
     delta = {
-        "schema": "jw-delta-1",
+        "schema": "waystone-delta-1",
         "id": delta_id,
         "title": title or delta_id,
         "rule": rule,
@@ -277,7 +277,7 @@ def _transition(root: Path, delta_id: str, to: str, *, require_from: str | None 
         raise WorkflowError(f"delta {delta_id} is {cur} — {to} requires it to be {require_from}")
     if replay_gate and not delta.get("replay"):
         raise WorkflowError(
-            f"delta {delta_id} has no replay result — run `jw overlay replay {delta_id}` first")
+            f"delta {delta_id} has no replay result — run `waystone overlay replay {delta_id}` first")
     delta["status"] = to
     entry = {"to": to, "at": _now_iso()}
     if note:
@@ -414,7 +414,7 @@ def _emit(root: Path, boundary: str, delta_id: str, rule: str, delta_status: str
            "delta_status": delta_status, "event": event, "message": message, "context": context}
     _append_warning(root, row)
     if event == "fire" and delta_status == "warning":
-        print(f"jw warn [{delta_id}]: {message}", file=sys.stderr)
+        print(f"waystone warn [{delta_id}]: {message}", file=sys.stderr)
     return row
 
 
@@ -473,7 +473,7 @@ def evaluate_boundary(root: Path, boundary: str, context: dict) -> list[dict]:
     try:
         return _evaluate_boundary(root, boundary, context)
     except Exception as e:  # noqa: BLE001 — never propagate into the host flow
-        print(f"jw warn: overlay evaluation error at {boundary}: {e}", file=sys.stderr)
+        print(f"waystone warn: overlay evaluation error at {boundary}: {e}", file=sys.stderr)
         return []
 
 
@@ -486,7 +486,7 @@ def _evaluate_boundary(root: Path, boundary: str, context: dict) -> list[dict]:
         message = f"active delta references unknown rule {rule_id!r} and could not be evaluated"
         events.append(_emit(root, boundary, d.get("id", "(missing-id)"), rule_id,
                             d["status"], "evaluation-error", message, {}))
-        print(f"jw warn [{d.get('id', '(missing-id)')}]: {message}", file=sys.stderr)
+        print(f"waystone warn [{d.get('id', '(missing-id)')}]: {message}", file=sys.stderr)
 
     relevant = [d for d in active
                 if boundary in RULES.get(d.get("rule"), {}).get("boundaries", set())]
@@ -563,7 +563,7 @@ def write_round_exposure(root: Path, round_id: str, head_sha: str | None, waterm
     gets a `-2`/`-3` suffix (H4 precedent — existing records are never overwritten)."""
     fp, bindings = _profile_summary()
     exposure = {
-        "schema": "jw-round-exposure-1", "round_id": round_id, "at": _now_iso(),
+        "schema": "waystone-round-exposure-1", "round_id": round_id, "at": _now_iso(),
         "project": {"pslug": _project_slug(root), "root": str(Path(root).resolve())},
         "head_sha": head_sha, "config_watermark": watermark,
         "profile_fingerprint": fp, "bindings": bindings,
@@ -715,7 +715,7 @@ def _cli_check(rest: list[str]) -> int:
     events = evaluate_boundary(root, "check", {})
     fires = [e for e in events if e["event"] == "fire"]
     if not fires:
-        print("jw check: no active-delta warnings")
+        print("waystone check: no active-delta warnings")
     for e in fires:
         marker = "warn" if e["delta_status"] == "warning" else "observe"
         print(f"[{marker}] {e['rule']} [{e['delta_id']}]: {e['message']}")
@@ -731,16 +731,16 @@ _HANDLERS = {"add": _cli_add, "list": _cli_list, "show": _cli_show, "promote": _
 
 def main(argv: list[str]) -> int:
     if not argv or argv[0] not in _HANDLERS:
-        print("jw overlay: expected subcommand "
+        print("waystone overlay: expected subcommand "
               "(add|list|show|promote|demote|suspend|retire|replay)", file=sys.stderr)
         return 1
     try:
         return _HANDLERS[argv[0]](argv[1:])
     except _RefusedWrite as e:
-        print(f"jw overlay: {e}", file=sys.stderr)
+        print(f"waystone overlay: {e}", file=sys.stderr)
         return 2
     except WorkflowError as e:
-        print(f"jw overlay: {e}", file=sys.stderr)
+        print(f"waystone overlay: {e}", file=sys.stderr)
         return 1
 
 

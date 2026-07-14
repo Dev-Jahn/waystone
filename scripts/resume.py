@@ -11,7 +11,7 @@ pick up next) written to a plugin-local ephemeral file (NOT committed to the rep
 SessionStart hook reads it back after a compaction/resume. Called by PreCompact / SessionEnd
 hooks and at round close.
 
-Usage (also `jw resume`): resume.py [root]   |   resume.py --path [root]
+Usage (also `waystone resume`): resume.py [root]   |   resume.py --path [root]
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def snapshot(root: Path) -> str:
 
     L = [f"captured_head: {git_full_sha(root, 'HEAD') or 'none'}",
          f"captured_at: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
-         f"[jahns-workflow resume] {data.get('project', root.name)} — re-entry pointer",
+         f"[waystone resume] {data.get('project', root.name)} — re-entry pointer",
          f"branch: {g['branch']} ({'dirty +' + str(g['dirty']) if g['dirty'] else 'clean'}) | HEAD: {head}"]
     if rounds:
         L.append(f"active round: {', '.join(rounds)}")

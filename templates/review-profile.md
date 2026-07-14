@@ -15,7 +15,7 @@ Delete the example block at the bottom once you have written your own.
 ## Suppress
 
 - style-only comments, naming, and optional refactors with no failure mechanism
-- jahns-workflow harness / workflow complaints unless the request asks for a workflow review
+- waystone harness / workflow complaints unless the request asks for a workflow review
 - minor docs issues unless they mislead the implementation or the experiments
 
 ## Environment notes

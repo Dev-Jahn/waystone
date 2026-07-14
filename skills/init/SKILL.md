@@ -1,24 +1,24 @@
 ---
 name: init
-description: This skill should be used when the user runs "/jahns-workflow:init", asks to "initialize the workflow harness", "set up jahns-workflow", "adopt the workflow in this project", or "re-sync the workflow setup". One-click setup for new projects and non-destructive retrofit for projects already in progress.
+description: This skill should be used when the user runs "/waystone:init", asks to "initialize the workflow harness", "set up waystone", "adopt the workflow in this project", or "re-sync the workflow setup". One-click setup for new projects and non-destructive retrofit for projects already in progress.
 argument-hint: "[ssot-path] (optional — skips SSOT detection)"
 disable-model-invocation: true
 ---
 
-# jahns-workflow: init
+# waystone: init
 
-Set up (or repair) the jahns-workflow harness in the current project. Greenfield projects get
+Set up (or repair) the waystone harness in the current project. Greenfield projects get
 the full structure; in-progress projects are retrofitted **non-destructively**: existing docs,
 codenames, and commit history are never rewritten — the convention applies from now on only.
 
 Plugin root = two directories above this skill's base directory. Shared resources:
-`<plugin-root>/references/conventions.md`, `<plugin-root>/templates/*`, `<plugin-root>/scripts/jw_*.py`
+`<plugin-root>/references/conventions.md`, `<plugin-root>/templates/*`, `<plugin-root>/scripts/*.py`
 (run scripts with `uv run`).
 
 ## Step 0 — Preconditions and mode
 
 1. Verify the project is a git repository (`git rev-parse --git-dir`). If not, ask the user whether to `git init` first; do not proceed without git.
-2. If `.jahns-workflow.yml` already exists → **repair mode**: skip to Step 5 and re-run Steps 5–9 idempotently, reporting anything that drifted (missing dirs, stale generated views, missing CLAUDE.md stanza, unregistered project).
+2. If `.waystone.yml` already exists → **repair mode**: skip to Step 5 and re-run Steps 5–9 idempotently, reporting anything that drifted (missing dirs, stale generated views, missing CLAUDE.md stanza, unregistered project).
 
 ## Step 1 — Detect the existing structure
 
@@ -42,7 +42,7 @@ existing files is allowed only when the user confirms it and history stays intac
 
 ## Step 3 — Write the harness files
 
-1. `.jahns-workflow.yml`:
+1. `.waystone.yml`:
 
 ```yaml
 version: 1
@@ -74,8 +74,8 @@ guard the merge; suits repos that already work through PRs with a `@codex` bot).
    `anchor` — §-anchor of the SSOT section the task governs — `severity`,
    `origin`, `branch`, `notes`, `ruling` — the user's decision on a `decision/...` task,
    `result` — a recorded measurement/outcome, `lane` — `{branch, base_sha, depends_on}` for
-   parallel worktree lanes, verified by `jw lanes verify`).
-3. Missing directories for adr/reviews/progress-archive; `docs/CONVENTIONS.md` as a verbatim copy of `<plugin-root>/references/conventions.md`; an ADR-0000 from `<plugin-root>/templates/adr.md` recording "adopted jahns-workflow" (so the numbering and format are established by example).
+   parallel worktree lanes, verified by `waystone lanes verify`).
+3. Missing directories for adr/reviews/progress-archive; `docs/CONVENTIONS.md` as a verbatim copy of `<plugin-root>/references/conventions.md`; an ADR-0000 from `<plugin-root>/templates/adr.md` recording "adopted waystone" (so the numbering and format are established by example).
 4. If no PROGRESS file exists, create one with a one-line header pointing at tasks.yaml/ROADMAP.
 
 ## Step 4 — Seed the task registry (brownfield only)
@@ -99,7 +99,7 @@ uv run <plugin-root>/scripts/validate.py tasks.yaml
 
 Insert `<plugin-root>/templates/claude-md-stanza.md` into the project CLAUDE.md (create the
 file if absent), substituting `{SSOT_PATH}`/`{GENERATED_DIR}`. The block is delimited by
-`<!-- jahns-workflow:begin/end -->` markers — replace an existing block instead of duplicating
+`<!-- waystone:begin/end -->` markers — replace an existing block instead of duplicating
 it. Do not touch anything outside the markers. If CLAUDE.md currently carries a running
 status log (acting as a de-facto PROGRESS), propose moving that content into PROGRESS.md and
 leaving a pointer — show the user the move before applying it.
@@ -117,14 +117,14 @@ environment/user-preference memories.
 
 ## Step 8 — Register the project
 
-Add `{ "name": <project>, "path": <abs path> }` to `~/.claude/jahns-workflow/projects.json`
+Add `{ "name": <project>, "path": <abs path> }` to `~/.claude/waystone/projects.json`
 (create `{"projects": []}` if missing; skip if already registered). This feeds
-`/jahns-workflow:status`.
+`/waystone:status`.
 
 ## Step 9 — Report
 
 Leave all changes **uncommitted** for user review. Report in the user's configured language:
 what was created vs adapted, the config mapping, memory changes, and next steps (commit
-suggestion `docs: adopt jahns-workflow harness`; start working; close rounds with
-`/jahns-workflow:round`). Generated document content (PROGRESS, ADR-0000) is written in the
+suggestion `docs: adopt waystone harness`; start working; close rounds with
+`/waystone:round`). Generated document content (PROGRESS, ADR-0000) is written in the
 user's configured response language; `docs/CONVENTIONS.md` stays a verbatim copy.

@@ -1,10 +1,10 @@
 ---
 name: review
-description: This skill should be used when the user runs "/jahns-workflow:review", pastes an external review reply (e.g. from web ChatGPT / GPT reviewer) to be processed, or asks to "ingest the review", "process the reviewer feedback", "record the external review". Preserves the review verbatim and triages findings into the task registry.
+description: This skill should be used when the user runs "/waystone:review", pastes an external review reply (e.g. from web ChatGPT / GPT reviewer) to be processed, or asks to "ingest the review", "process the reviewer feedback", "record the external review". Preserves the review verbatim and triages findings into the task registry.
 argument-hint: "[round-slug] — first save the reply: cat > /tmp/review.md, paste, Ctrl-D"
 ---
 
-# jahns-workflow: review
+# waystone: review
 
 Ingest an external review reply: preserve it verbatim (reviews are otherwise ephemeral chat
 text), verify each finding, and register real findings as tracked tasks.
@@ -34,8 +34,8 @@ verbatim reply directly". Then read `<reviews_dir>/<round-id>-feedback.md` to tr
 If ingest reports `no review at /tmp/review.md`, tell the user to save the reply first
 (`cat > /tmp/review.md`, paste, `Ctrl-D`) and stop.
 
-(PR mode: the macro reviewer's verdict reaches the merge gate through its `jw-review-result` PR
-comment marker, read from GitHub by `jw round merge` — not through this ingest, which just preserves
+(PR mode: the macro reviewer's verdict reaches the merge gate through its `waystone-review-result` PR
+comment marker, read from GitHub by `waystone round merge` — not through this ingest, which just preserves
 the reply locally.)
 
 ## Step 3 — Verify, then triage (never blindly implement)
@@ -71,15 +71,15 @@ without re-explaining. (Same file the round skill writes; see round Step 6.)
 When the project uses PR-mode review, the same verify-then-register discipline applies, plus:
 
 - After adjudicating a cycle's Codex findings, post a resolution marker so the merge gate can
-  see it — a PR comment containing `<!-- jw-findings:v1\ncycle: <N>\nresolved: true\n-->`
+  see it — a PR comment containing `<!-- waystone-findings:v1\ncycle: <N>\nresolved: true\n-->`
   (only after every REAL finding is fixed/deferred-with-cause).
 - A finding fixed in code produces a NEW head SHA, which makes the frozen cycle stale. Do not
-  merge against a stale cycle — re-freeze (`jw review freeze --pr <N>`) so reviewers re-examine
+  merge against a stale cycle — re-freeze (`waystone review freeze --pr <N>`) so reviewers re-examine
   the new SHA. Codex re-reviews the new head; the macro reviewer does a full or delta review.
 - The merge is gated, not judged: `uv run <plugin-root>/scripts/waystone.py round merge --pr <N> .`
   prints PASS only when the cycle is fresh, CI ok (if required), a fresh Codex review + resolved
   findings + a macro result are all bound to the current head, zero open blockers/decisions, and
   a human approval is bound to the current head. The user approves with
-  `jw approve --pr <N> --sha <current-head>` (a new push auto-invalidates it). Only run
+  `waystone approve --pr <N> --sha <current-head>` (a new push auto-invalidates it). Only run
   `round merge --pr <N> --execute --squash|--rebase|--merge` once the gate passes and the user
   has approved — never merge on natural-language judgement.

@@ -14,7 +14,7 @@ A merge is blocked unless EVERY condition holds at the *current* head SHA:
   - zero open blocker tasks and zero unresolved decision/ tasks
   - a human approval is bound to this exact head SHA
 
-Subcommands (also `jw approve` / `jw round merge`):
+Subcommands (also `waystone approve` / `waystone round merge`):
   approve --pr N --sha X [root]            record a human approval bound to SHA X (must == PR head)
   merge   --pr N [--execute --squash|--rebase|--merge] [root]
                                            check the gate; with --execute + a method, perform the merge
@@ -56,7 +56,7 @@ def merge_gate(g: dict) -> tuple[bool, list[str]]:
     if g.get("expected_base") and g.get("base") and g["base"] != g["expected_base"]:
         f.append(f"PR base is {g['base']!r}, expected {g['expected_base']!r}")
     if not g.get("cycle_fresh"):
-        f.append("review cycle is stale: head or base advanced past the frozen SHAs — re-freeze (jw review freeze)")
+        f.append("review cycle is stale: head or base advanced past the frozen SHAs — re-freeze (waystone review freeze)")
     if g.get("require_ci"):
         if g.get("ci") == "failing":
             f.append("CI is failing")
@@ -76,7 +76,7 @@ def merge_gate(g: dict) -> tuple[bool, list[str]]:
     if nd:
         f.append(f"{nd} unresolved decision task(s): {', '.join(g['open_decisions'])}")
     if not g.get("approved_at_head"):
-        f.append("no human approval bound to the current head (jw approve --pr N --sha <head>)")
+        f.append("no human approval bound to the current head (waystone approve --pr N --sha <head>)")
     if g.get("remote_contains_head") is False:
         f.append("local HEAD is not pushed to its upstream")
     return (not f, f)
@@ -88,13 +88,13 @@ def approve(root: Path, pr: int, sha: str) -> int:
     if ctx is None:
         return 1
     if ctx["policy"] is None:
-        print("jw approve: cannot read the base-branch policy at the PR base SHA.", file=sys.stderr)
+        print("waystone approve: cannot read the base-branch policy at the PR base SHA.", file=sys.stderr)
         return 1
     repo, bundle = ctx["repo"], ctx["bundle"]
     head = bundle["head"]
     base_sha = bundle.get("base_sha", "")
     if len(sha) < 7 or not head.startswith(sha):
-        print(f"jw approve: refusing — --sha {sha} is not the current PR head ({head[:12]}). "
+        print(f"waystone approve: refusing — --sha {sha} is not the current PR head ({head[:12]}). "
               f"Approval must bind to the exact current head.", file=sys.stderr)
         return 3
     # bind the approval to the current cycle, so a later re-freeze (new cycle/base) invalidates it.
@@ -103,11 +103,11 @@ def approve(root: Path, pr: int, sha: str) -> int:
     operators = tuple({owner, *ctx["policy"]["review"].get("operators", [])} - {""})
     lc = review.latest_cycle(review.parse_bodies(bundle["bodies"]), operators)
     if lc is None:
-        print("jw approve: no review cycle is frozen yet — run `jw review freeze` first.", file=sys.stderr)
+        print("waystone approve: no review cycle is frozen yet — run `waystone review freeze` first.", file=sys.stderr)
         return 1
     rc, login = review._gh(root, "api", "user", "-q", ".login")
     if rc != 0 or not login:
-        print("jw approve: could not resolve your GitHub login (gh api user) — an approval must "
+        print("waystone approve: could not resolve your GitHub login (gh api user) — an approval must "
               "bind to a real actor whose identity matches who posts it.", file=sys.stderr)
         return 1
     by = login
@@ -117,7 +117,7 @@ def approve(root: Path, pr: int, sha: str) -> int:
             f"A new push, a base advance, or a re-freeze invalidates this automatically.\n\n{marker}\n")
     rc, out = review._gh(root, "pr", "comment", str(pr), "--body", body)
     if rc != 0:
-        print(f"jw approve: gh pr comment failed: {out}", file=sys.stderr)
+        print(f"waystone approve: gh pr comment failed: {out}", file=sys.stderr)
         return 1
     print(f"approval recorded for PR #{pr} at {head[:12]} (cycle {lc['cycle']}) by {by}")
     return 0
@@ -180,7 +180,7 @@ def merge(root: Path, pr: int, execute: bool, method: str | None) -> int:
     # the merge guard applies only under a pr-mode BASE policy (not the local checkout) — a branch
     # can't switch a packet-policy repo into pr mode to wave itself through an empty reviewer set.
     if g.get("policy_mode") != "pr":
-        print("jw merge: the base-branch review.mode is not 'pr'; the merge guard is for PR mode.",
+        print("waystone merge: the base-branch review.mode is not 'pr'; the merge guard is for PR mode.",
               file=sys.stderr)
         return 1
     ok, failures = merge_gate(g)
@@ -195,13 +195,13 @@ def merge(root: Path, pr: int, execute: bool, method: str | None) -> int:
         print("  (dry run — re-run with --execute --squash|--rebase|--merge to perform the merge)")
         return 0
     if method not in ("squash", "rebase", "merge"):
-        print("jw merge --execute requires a method: --squash | --rebase | --merge", file=sys.stderr)
+        print("waystone merge --execute requires a method: --squash | --rebase | --merge", file=sys.stderr)
         return 1
     # bind the merge to the exact validated head — a push between gate and merge aborts it
     rc, out = review._gh(root, "pr", "merge", str(pr), f"--{method}",
                             "--match-head-commit", g["current_head"])
     if rc != 0:
-        print(f"jw merge: gh pr merge failed (head may have moved since the gate): {out}", file=sys.stderr)
+        print(f"waystone merge: gh pr merge failed (head may have moved since the gate): {out}", file=sys.stderr)
         return 1
     print(f"merged PR #{pr} via {method} at {g['current_head'][:12]}")
     return 0
@@ -214,16 +214,16 @@ def main(argv: list[str]) -> int:
     sub, rest = argv[0], argv[1:]
     root = review._root(rest)
     if root is None:
-        print("merge: no initialized project (missing .jahns-workflow.yml)", file=sys.stderr)
+        print("merge: no initialized project (missing .waystone.yml)", file=sys.stderr)
         return 1
     pr_s = review._opt(rest, "--pr")
     if not pr_s:
-        print(f"jw {sub}: --pr N is required", file=sys.stderr)
+        print(f"waystone {sub}: --pr N is required", file=sys.stderr)
         return 1
     if sub == "approve":
         sha = review._opt(rest, "--sha")
         if not sha:
-            print("jw approve: --sha X is required", file=sys.stderr)
+            print("waystone approve: --sha X is required", file=sys.stderr)
             return 1
         return approve(root, int(pr_s), sha)
     method = next((m[2:] for m in ("--squash", "--rebase", "--merge") if m in rest), None)
