@@ -1,10 +1,10 @@
 ---
-name: brain-tempest
-description: This skill should be used when the user runs "/waystone:brain-tempest", has a new or half-formed project idea, says things like "I want to build X but haven't thought it through", "help me figure out what I'm actually building", "let's scope/shape this project", "brainstorm the direction", or asks to "write a design doc / SSOT" — especially at the very start, before any design document exists. It draws a project's north-star out of the user through Socratic questioning and writes it as a ready-to-adopt SSOT.md that the rest of the workflow anchors to.
+name: ideate
+description: This skill should be used when the user runs "/waystone:ideate", has a new or half-formed project idea, says things like "I want to build X but haven't thought it through", "help me figure out what I'm actually building", "let's scope/shape this project", "brainstorm the direction", or asks to "write a design doc / SSOT" — especially at the very start, before any design document exists. It draws a project's north-star out of the user through Socratic questioning and writes it as a ready-to-adopt SSOT.md that the rest of the workflow anchors to.
 argument-hint: "[one-line project idea] (optional — I'll ask if omitted)"
 ---
 
-# waystone: brain-tempest
+# waystone: ideate
 
 The ideation front door. Turn a one-line, half-formed idea into a **north-star `SSOT.md`** by
 questioning it: sharpen the vision, surface the decisions the user hasn't made yet, decide the
