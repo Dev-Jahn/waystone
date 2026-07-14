@@ -698,6 +698,44 @@ class ResumeStartHereTests(unittest.TestCase):
             self.assertLess(ctx_big.count("Z"), session_context.MAX_START_HERE + 800)
 
 
+class StoragePathTests(unittest.TestCase):
+    def test_machine_dir_is_host_neutral_and_honors_override(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "home"
+            old_host = os.environ.get("WAYSTONE_HOST")
+            old_override = os.environ.get("WAYSTONE_HOME")
+            try:
+                os.environ["WAYSTONE_HOST"] = "claude"
+                self.assertEqual(common.machine_dir(home), home / ".waystone")
+                os.environ["WAYSTONE_HOST"] = "codex"
+                self.assertEqual(common.machine_dir(home), home / ".waystone")
+                os.environ["WAYSTONE_HOME"] = "~/custom-waystone"
+                self.assertEqual(_run_with_home(home, common.machine_dir),
+                                 home / "custom-waystone")
+            finally:
+                if old_host is None:
+                    os.environ.pop("WAYSTONE_HOST", None)
+                else:
+                    os.environ["WAYSTONE_HOST"] = old_host
+                if old_override is None:
+                    os.environ.pop("WAYSTONE_HOME", None)
+                else:
+                    os.environ["WAYSTONE_HOME"] = old_override
+
+    def test_project_state_dir_creates_and_restores_self_gitignore(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "repo"
+            root.mkdir()
+            state = common.project_state_dir(root)
+            self.assertEqual(state, root / ".waystone")
+            self.assertEqual((state / ".gitignore").read_text(), "*\n")
+            (state / ".gitignore").unlink()
+            self.assertEqual(common.project_state_dir(root), state)
+            self.assertEqual((state / ".gitignore").read_text(), "*\n")
+
+
 class ConfigTests(unittest.TestCase):
     def _cfg(self, body: str) -> dict:
         with tempfile.TemporaryDirectory() as d:

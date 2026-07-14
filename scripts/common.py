@@ -16,6 +16,43 @@ LEGACY_CONFIG_NAME = ".jahns-workflow.yml"
 TASKS_NAME = "tasks.yaml"
 
 
+def machine_dir(home: Path | None = None) -> Path:
+    """Waystone's host-neutral machine data root, optionally resolved under an injected home."""
+    override = os.environ.get("WAYSTONE_HOME")
+    if override:
+        return Path(override).expanduser()
+    return (Path.home() if home is None else Path(home)) / ".waystone"
+
+
+def project_state_dir(root: Path) -> Path:
+    """Project-local state root. Its own ignore file keeps the directory out of repository state."""
+    state = Path(root) / ".waystone"
+    state.mkdir(parents=True, exist_ok=True)
+    ignore = state / ".gitignore"
+    if not ignore.is_file() or ignore.read_text(encoding="utf-8") != "*\n":
+        ignore.write_text("*\n", encoding="utf-8")
+    return state
+
+
+def worktrees_cache_dir(home: Path | None = None) -> Path:
+    return machine_dir(home) / "cache" / "worktrees"
+
+
+def registry_path(home: Path | None = None) -> Path:
+    return machine_dir(home) / "projects.json"
+
+
+def _legacy_claude_root(home: Path | None = None) -> Path:
+    return (Path.home() if home is None else Path(home)) / ".claude" / "waystone"
+
+
+def _legacy_codex_root(home: Path | None = None) -> Path:
+    base_home = Path.home() if home is None else Path(home)
+    codex_home = (Path(os.environ["CODEX_HOME"]).expanduser()
+                  if os.environ.get("CODEX_HOME") else base_home / ".codex")
+    return codex_home / "waystone"
+
+
 def data_dir(home: Path | None = None) -> Path:
     """Waystone's host-local data root, optionally resolved under an injected home for tests."""
     base_home = Path.home() if home is None else Path(home)
