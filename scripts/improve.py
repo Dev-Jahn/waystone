@@ -67,9 +67,10 @@ from cclog import (  # noqa: E402
     stable_id,
 )
 from common import (  # noqa: E402
-    CONFIG_NAME,
     SEVERITIES,
     WorkflowError,
+    data_dir,
+    has_project_config,
     load_config,
     load_tasks,
     load_yaml,
@@ -647,7 +648,7 @@ def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
 def _registry_path() -> Path:
     """Runtime-resolved global registry (honours HOME so tests can override it), matching
     common.REGISTRY_PATH's location without freezing it at import time."""
-    return Path.home() / ".claude" / "waystone" / "projects.json"
+    return data_dir() / "projects.json"
 
 
 def run_reviews(registry_path: Path, out_dir: Path) -> dict:
@@ -679,7 +680,7 @@ def run_reviews(registry_path: Path, out_dir: Path) -> dict:
             skipped.append({"project": name, "reason": "no local path (remote-only registry entry)"})
             continue
         root = Path(path).expanduser()
-        if not (root / CONFIG_NAME).is_file():
+        if not has_project_config(root):
             skipped.append({"project": name, "reason": "project root or .waystone.yml inaccessible"})
             continue
         try:
@@ -772,7 +773,7 @@ def run_evidence(registry_path: Path, out_dir: Path, projects: set[str]) -> dict
             skipped.append({"project": name, "reason": "no local path (remote-only registry entry)"})
             continue
         root = Path(path).expanduser()
-        if not (root / CONFIG_NAME).is_file():
+        if not has_project_config(root):
             skipped.append({"project": name, "reason": "project root or .waystone.yml inaccessible"})
             continue
         try:
@@ -1237,7 +1238,7 @@ def _parse_single_opt(argv: list[str], flag: str) -> str | None:
 
 
 def _default_out() -> Path:
-    return Path.home() / ".claude" / "waystone" / "improve"
+    return data_dir() / "improve"
 
 
 def _residence_checked(value: str | None, flag: str) -> Path:

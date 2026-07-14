@@ -2,14 +2,44 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
 
 CONFIG_NAME = ".waystone.yml"
+LEGACY_CONFIG_NAME = ".jahns-workflow.yml"
 TASKS_NAME = "tasks.yaml"
+
+
+def data_dir(home: Path | None = None) -> Path:
+    """Waystone's user-local data root, optionally resolved under an injected home for tests."""
+    return (Path.home() if home is None else Path(home)) / ".claude" / "waystone"
+
+
+def _legacy_data_dir(home: Path | None = None) -> Path:
+    return (Path.home() if home is None else Path(home)) / ".claude" / "jahns-workflow"
+
+
+def migrate_home_data(home: Path | None = None) -> Path:
+    """Move the legacy data root once. A conflict is preserved and reported, never merged."""
+    old = _legacy_data_dir(home)
+    new = data_dir(home)
+    if new.exists():
+        if old.exists():
+            print(
+                f"waystone: legacy data dir {old} and new data dir {new} both exist; "
+                f"using {new} and leaving {old} untouched",
+                file=sys.stderr,
+            )
+        return new
+    if old.exists():
+        shutil.move(old, new)
+    return new
 
 
 class WorkflowError(Exception):
@@ -17,7 +47,7 @@ class WorkflowError(Exception):
     ordinary Exception, catchable by rollback logic) rather than calling sys.exit() — only CLI
     main() converts it to an exit code. (sys.exit raises SystemExit/BaseException, which slips past
     `except Exception` rollbacks.)"""
-REGISTRY_PATH = Path.home() / ".claude" / "waystone" / "projects.json"
+REGISTRY_PATH = data_dir() / "projects.json"
 
 TASK_TYPES = ("feat", "fix", "perf", "gate", "spike", "decision", "docs", "chore")
 TASK_STATUSES = ("pending", "active", "blocked", "done", "dropped")
@@ -30,12 +60,32 @@ ROUND_RE = re.compile(r"^\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]*$")
 
 
 def find_project_root(start: Path) -> Path | None:
-    """Walk upward from `start` to find the directory containing .waystone.yml."""
+    """Walk upward from `start` to find either the current or legacy project config."""
     cur = start.resolve()
     for p in (cur, *cur.parents):
-        if (p / CONFIG_NAME).is_file():
+        if has_project_config(p):
             return p
     return None
+
+
+def has_project_config(root: Path) -> bool:
+    return any((root / name).is_file() for name in (CONFIG_NAME, LEGACY_CONFIG_NAME))
+
+
+def _migrate_project_config(root: Path) -> Path:
+    legacy = root / LEGACY_CONFIG_NAME
+    current = root / CONFIG_NAME
+    if current.exists():
+        if legacy.exists():
+            print(
+                f"waystone: legacy config {legacy} and new config {current} both exist; "
+                f"using {current} and leaving {legacy} untouched",
+                file=sys.stderr,
+            )
+        return current
+    if legacy.is_file():
+        os.rename(legacy, current)
+    return current
 
 
 def load_yaml(path: Path):
@@ -87,7 +137,7 @@ def normalize_config(cfg: dict | None) -> dict:
 
 
 def load_config(root: Path) -> dict:
-    return normalize_config(load_yaml(root / CONFIG_NAME))
+    return normalize_config(load_yaml(_migrate_project_config(root)))
 
 
 def git_rc(root: Path, *args: str) -> tuple[int, str, str]:
@@ -187,7 +237,7 @@ def resume_path(root: Path) -> Path:
     """Plugin-local EPHEMERAL re-entry snapshot for a project (NOT committed to the repo). Written
     deterministically by the PreCompact/SessionEnd hook (structured: HEAD/round/tasks) and CONSUMED
     by the next SessionStart. Hashed path so different repos can't collide on a truncated slug."""
-    return Path.home() / ".claude" / "waystone" / "resume" / f"{_project_slug(root)}.md"
+    return data_dir() / "resume" / f"{_project_slug(root)}.md"
 
 
 def start_here_path(root: Path) -> Path:
@@ -195,7 +245,7 @@ def start_here_path(root: Path) -> Path:
     MODEL overwrites it at round close / after review with a bounded live-frontier narrative; the
     SessionStart hook injects it so a new/resumed session picks up without a manual 'pick up where
     we left off'. Complements the ephemeral structured resume_path — narrative vs. structured."""
-    return Path.home() / ".claude" / "waystone" / "start_here" / f"{_project_slug(root)}.md"
+    return data_dir() / "start_here" / f"{_project_slug(root)}.md"
 
 
 def slugify(text: str, max_len: int = 40) -> str:

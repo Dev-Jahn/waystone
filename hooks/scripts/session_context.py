@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from common import git_branch_info, git_full_sha, load_config, load_tasks, next_actionable, resume_path, start_here_path  # noqa: E402
+from common import data_dir, git_branch_info, git_full_sha, load_config, load_tasks, next_actionable, resume_path, start_here_path  # noqa: E402
 
 MAX_CHARS = 8000
 MAX_TASK_LINES = 8
@@ -88,7 +88,7 @@ def _delegation_summary(root: Path) -> str:
 
 
 def _evidence_summary(root: Path) -> str | None:
-    path = Path.home() / ".claude" / "waystone" / "improve" / "evidence.jsonl"
+    path = data_dir() / "improve" / "evidence.jsonl"
     if not path.is_file():
         return None
     try:
@@ -96,7 +96,7 @@ def _evidence_summary(root: Path) -> str | None:
         data = load_tasks(root)
         if isinstance(data.get("project"), str):
             aliases.add(data["project"])
-        registry = Path.home() / ".claude" / "waystone" / "projects.json"
+        registry = data_dir() / "projects.json"
         if registry.is_file():
             reg = json.loads(registry.read_text(encoding="utf-8"))
             for entry in reg.get("projects", []):

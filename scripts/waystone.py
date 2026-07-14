@@ -31,6 +31,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import common  # noqa: E402
 
 
 def _run_module_main(modname: str, argv: list[str]) -> int:
@@ -41,6 +42,7 @@ def _run_module_main(modname: str, argv: list[str]) -> int:
 
 
 def main(argv: list[str]) -> int:
+    common.migrate_home_data()
     if not argv:
         print(__doc__, file=sys.stderr)
         return 1

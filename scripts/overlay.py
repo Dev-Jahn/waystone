@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import (  # noqa: E402
-    WorkflowError, _project_slug, find_project_root, load_config,
+    WorkflowError, _project_slug, data_dir, find_project_root, load_config,
 )
 
 # delta-id grammar mirrors the improve rec_id (`<lens>/<kebab-gist>`, S2) so a rec materialises to a
@@ -36,6 +36,7 @@ DELTA_ID_RE = re.compile(r"^[a-z][a-z0-9_]*/[a-z0-9]+(?:-[a-z0-9]+)*$")
 DELTA_STATUSES = ("proposed", "observing", "warning", "suspended", "retired")
 ACTIVE_STATUSES = ("observing", "warning")
 CANDIDATE_SCOPES = ("project_candidate", "user_candidate", "unresolved")
+DELTA_SCHEMAS = ("waystone-delta-1", "jw-delta-1")
 
 
 class _RefusedWrite(WorkflowError):
@@ -121,7 +122,7 @@ def evaluate_rule2(root: Path, cfg: dict, severities, *, closing_done=frozenset(
 
 # ---- residence (§2 — plugin-local, keyed by project slug; never committed) -----
 def _plugin_base() -> Path:
-    return Path.home() / ".claude" / "waystone"
+    return data_dir()
 
 
 def _overlay_dir(root: Path) -> Path:
@@ -215,7 +216,7 @@ def active_deltas_for_exposure(root: Path) -> list[dict]:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
             raise WorkflowError(f"corrupt delta file {p} ({e})")
-        if (not isinstance(data, dict) or data.get("schema") != "waystone-delta-1"
+        if (not isinstance(data, dict) or data.get("schema") not in DELTA_SCHEMAS
                 or not isinstance(data.get("id"), str)
                 or DELTA_ID_RE.fullmatch(data["id"]) is None
                 or data.get("status") not in DELTA_STATUSES

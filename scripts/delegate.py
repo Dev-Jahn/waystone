@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
 from common import (  # noqa: E402
-    WorkflowError, _project_slug, find_project_root, git_full_sha, load_config, load_tasks,
+    WorkflowError, _project_slug, data_dir, find_project_root, git_full_sha, load_config, load_tasks,
 )
 
 DELEG_REF_NS = "refs/waystone/delegations"
@@ -159,7 +159,7 @@ def _make_did(task_id: str) -> str:
 
 # ---- residence (§9 — everything plugin-local, keyed by project slug) ----------
 def _plugin_base() -> Path:
-    return Path.home() / ".claude" / "waystone"
+    return data_dir()
 
 
 def _delegations_dir(root: Path) -> Path:

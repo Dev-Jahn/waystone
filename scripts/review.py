@@ -55,7 +55,7 @@ def is_codex(login: str | None) -> bool:
     return (login or "").removesuffix("[bot]") == "chatgpt-codex-connector"
 
 
-MARKER_RE = re.compile(r"<!--\s*waystone-([a-z-]+):v1\s*\n(.*?)\n\s*-->", re.DOTALL)
+MARKER_RE = re.compile(r"<!--\s*(?:waystone|jw)-([a-z-]+):v1\s*\n(.*?)\n\s*-->", re.DOTALL)
 FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 MERGE_OK_VERDICTS = {"shipped", "shipped-with-risk", "approved", "approve", "lgtm"}
 # output-contract finding blocks: `### JW-GPT-NNN — <title>` then a `- Severity: <x>` line.

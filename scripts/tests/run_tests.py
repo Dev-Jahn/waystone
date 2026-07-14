@@ -1516,6 +1516,16 @@ class TaskReadNudgeTests(unittest.TestCase):
             self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
             self.assertIn("waystone task", out["hookSpecificOutput"]["permissionDecisionReason"])
 
+    def test_legacy_config_still_activates_nudge(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
+            (root / "tasks.yaml").write_text(TASKS_FIXTURE)
+            out = self.nudge.decide({"tool_name": "Read",
+                                     "tool_input": {"file_path": str(root / "tasks.yaml")}})
+            self.assertIsNotNone(out)
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
     def test_allows_other_files_and_tools(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -5315,6 +5325,106 @@ class ContractInjectTests(unittest.TestCase):
             finally:
                 module.CONTRACT_PATH = original
             self.assertLessEqual(len("\n".join(block)), 1200)
+
+
+class MigrationTests(unittest.TestCase):
+    def test_home_data_dir_moves_at_dispatcher_entry(self):
+        import contextlib
+        import io
+        import waystone
+
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "home"
+            old = home / ".claude" / "jahns-workflow"
+            old.mkdir(parents=True)
+            (old / "sentinel").write_text("kept")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(_run_with_home(home, lambda: waystone.main([])), 1)
+            new = home / ".claude" / "waystone"
+            self.assertEqual(common.data_dir(home), new)
+            self.assertFalse(old.exists())
+            self.assertEqual((new / "sentinel").read_text(), "kept")
+
+    def test_home_data_dir_conflict_warns_without_moving(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "home"
+            old = home / ".claude" / "jahns-workflow"
+            new = home / ".claude" / "waystone"
+            old.mkdir(parents=True)
+            new.mkdir(parents=True)
+            (old / "legacy").write_text("old")
+            (new / "current").write_text("new")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                common.migrate_home_data(home)
+            self.assertTrue((old / "legacy").is_file())
+            self.assertTrue((new / "current").is_file())
+            self.assertIn(str(old), err.getvalue())
+            self.assertIn(str(new), err.getvalue())
+            self.assertEqual(len(err.getvalue().splitlines()), 1)
+
+    def test_legacy_config_is_found_and_renamed_on_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "repo"
+            nested = root / "a" / "b"
+            nested.mkdir(parents=True)
+            legacy = root / ".jahns-workflow.yml"
+            legacy.write_text("version: 1\nproject: legacy\n")
+            self.assertEqual(common.find_project_root(nested), root.resolve())
+            self.assertEqual(common.load_config(root)["project"], "legacy")
+            self.assertFalse(legacy.exists())
+            self.assertTrue((root / ".waystone.yml").is_file())
+
+    def test_config_conflict_prefers_new_and_warns(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            legacy = root / ".jahns-workflow.yml"
+            current = root / ".waystone.yml"
+            legacy.write_text("version: 1\nproject: legacy\n")
+            current.write_text("version: 1\nproject: current\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                cfg = common.load_config(root)
+            self.assertEqual(cfg["project"], "current")
+            self.assertTrue(legacy.is_file())
+            self.assertIn(str(legacy), err.getvalue())
+            self.assertIn(str(current), err.getvalue())
+
+    def test_legacy_profile_and_delta_schema_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _overlay_project(d)
+            _write_profile(home, _PROFILE_BODY.replace("waystone-profile-1", "jw-profile-1"))
+            profile, _ = _run_with_home(home, delegate._load_profile)
+            self.assertEqual(profile["schema"], "jw-profile-1")
+            delta = _add_delta(root, home, "verification_debt/legacy")
+            path = _run_with_home(home, lambda: overlay._delta_path(root, delta["id"]))
+            record = _json.loads(path.read_text())
+            record["schema"] = "jw-delta-1"
+            path.write_text(_json.dumps(record))
+            loaded = _run_with_home(home, lambda: overlay.active_deltas_for_exposure(root))
+            self.assertEqual(loaded[0]["schema"], "jw-delta-1")
+
+    def test_legacy_review_marker_reads_and_new_marker_writes(self):
+        legacy = "<!-- jw-review-cycle:v1\ncycle: 7\ntarget_sha: abc\n-->"
+        parsed = review.parse_markers(legacy)
+        self.assertEqual(parsed[0]["_kind"], "review-cycle")
+        self.assertTrue(review.emit_marker("review-cycle", {"cycle": 8}).startswith(
+            "<!-- waystone-review-cycle:v1"))
+
+    def test_init_skill_upgrades_legacy_managed_markers(self):
+        text = (SCRIPTS.parent / "skills" / "init" / "SKILL.md").read_text()
+        for marker in (
+            "<!-- jahns-workflow:begin -->", "<!-- jahns-workflow:end -->",
+            "<!-- waystone:begin -->", "<!-- waystone:end -->",
+        ):
+            self.assertIn(marker, text)
+        self.assertIn("always write", text.lower())
 
 
 class M2DocsTests(unittest.TestCase):
