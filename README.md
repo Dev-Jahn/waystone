@@ -62,7 +62,7 @@ claude --plugin-dir ~/workspace/waystone
 For a new or half-formed project:
 
 ```text
-/waystone:ideate "one-line project idea"
+/waystone:ideate "one-line project idea"   # optional
 /waystone:init
 ```
 
@@ -81,20 +81,25 @@ flowchart LR
   M -. recommendations .-> T
 ```
 
-Save the reviewer's reply to `/tmp/review.md`, then run `/waystone:review` — fix confirmed issues and start the next round. Run `/waystone:improve` periodically to analyze past sessions and review results.
+```text
+/waystone:round          # close the cycle and generate a review request
+cat > /tmp/review.md     # paste the external reviewer's reply, then Ctrl-D
+/waystone:review         # verify each finding, register confirmed issues
+```
+
+Fix confirmed issues and start the next round. Run `/waystone:improve` periodically to analyze past sessions and review results.
 
 <br>
 
-## What it does today
+## Available commands
 
 | Command | Purpose |
 |---|---|
 | `/waystone:ideate` | Turns a rough idea into `SSOT.md`, a concise project-direction document. No repository required. |
 | `/waystone:init` | Sets up a new project or adds Waystone to an existing one without rewriting its history. |
-| `waystone task ...` | Adds, updates, lists, and archives tasks through a validated command-line interface. |
-| `/waystone:delegate` | Runs one task in an isolated worktree, optionally verifies it independently, then asks you to apply or discard. |
 | `/waystone:round` | Closes a bounded work cycle, updates progress, refreshes generated views, and creates a review request. |
 | `/waystone:review` | Preserves a reviewer reply exactly, verifies each issue, and turns confirmed issues into tasks. |
+| `/waystone:delegate` | Runs one task in an isolated worktree, optionally verifies it independently, then asks you to apply or discard. |
 | `/waystone:status` | Shows active, blocked, and pending work across registered local or remote projects. |
 | `/waystone:improve` | Analyzes Claude Code history and review evidence, then proposes evidence-backed workflow improvements. |
 
@@ -108,6 +113,23 @@ An initialized project keeps the main project direction in one document (when it
 On session start or resume, Claude Code receives a short operating summary, the project digest, active tasks, and the next useful action. Before compaction or exit, Waystone stores a small re-entry note so a later session can continue without reconstructing the whole context.
 
 Most validation, rendering, bookkeeping, log parsing, and policy checks are plain scripts and spend no model tokens.
+
+</details>
+
+## Internal features
+
+<details>
+<summary>CLI surfaces the skills drive for you</summary>
+
+<br>
+
+| Command | Purpose |
+|---|---|
+| `waystone task ...` | Validated task-registry CLI — adds, updates, lists, and archives tasks without slurping the file. |
+| `waystone delegate verify` | Re-runs independent read-only verification of a delegation result in its preserved worktree. |
+| `waystone overlay` | Stores project-local adaptive checks and manages their observing/warning lifecycle; promotion to warning requires deterministic shadow replay. |
+| `waystone check` | Evaluates active overlay rules against the current project state; warnings are visible but never block the host command. |
+| `waystone improve evidence` | Deterministically joins review findings and delegation records by task ID into a local evidence log. |
 
 </details>
 
@@ -224,10 +246,9 @@ Personal analysis, delegation records, worktrees, model bindings, and adaptive-r
 
 </details>
 
-<details>
-<summary>Recommended global CLAUDE.md to use with the plugin</summary>
+## Recommended global CLAUDE.md
 
-<br>
+Pair the plugin with this global constitution:
 
 ```markdown
 # Global Constitution
@@ -242,8 +263,6 @@ Personal analysis, delegation records, worktrees, model bindings, and adaptive-r
 - Task state lives in `waystone task`, generated roadmap/progress, and workflow artifacts.
 - Nontrivial implementation should go through `waystone delegate` unless explicitly justified.
 ```
-
-</details>
 
 <br>
 
