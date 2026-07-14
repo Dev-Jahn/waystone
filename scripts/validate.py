@@ -5,7 +5,7 @@
 # ///
 """Validate a jahns-workflow tasks.yaml against the global naming convention and schema.
 
-Usage: jw_validate.py [path/to/tasks.yaml]   (default: ./tasks.yaml or nearest project root)
+Usage: validate.py [path/to/tasks.yaml]   (default: ./tasks.yaml or nearest project root)
 Exit codes: 0 valid, 1 cannot read/parse, 2 schema violations (details on stderr).
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
-from jw_common import (  # noqa: E402
+from common import (  # noqa: E402
     MILESTONE_ID_RE, MILESTONE_STATUSES, ROUND_RE, SEVERITIES,
     TASK_ID_RE, TASK_STATUSES, TASK_TYPES, find_project_root,
 )
@@ -185,7 +185,7 @@ def main() -> int:
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
     except (OSError, yaml.YAMLError) as e:
-        print(f"jw_validate: cannot read {path}: {e}", file=sys.stderr)
+        print(f"validate: cannot read {path}: {e}", file=sys.stderr)
         return 1
     errs = validate(data)
     if errs:

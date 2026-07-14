@@ -12,8 +12,8 @@ Show the cross-project dashboard. Zero-LLM rendering: run the script, relay its 
 Plugin root = two directories above this skill's base directory.
 
 ```bash
-uv run <plugin-root>/scripts/jw_dashboard.py            # all registered projects
-uv run <plugin-root>/scripts/jw_dashboard.py --project <name>
+uv run <plugin-root>/scripts/dashboard.py            # all registered projects
+uv run <plugin-root>/scripts/dashboard.py --project <name>
 ```
 
 Relay the output verbatim in a code block (it is pre-formatted). Add at most 1–3 sentences

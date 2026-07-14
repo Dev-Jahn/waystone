@@ -11,7 +11,7 @@ Require an initialized project. Plugin root = two directories above this skill's
 ## Step 1 — Select a delegable task
 
 Use the task ID from the argument. Otherwise present the injected next-actionable tasks (or run
-`uv run <plugin-root>/scripts/jw.py task list .`) and ask the user to select one.
+`uv run <plugin-root>/scripts/waystone.py task list .`) and ask the user to select one.
 
 Do not invent acceptance criteria. `jw delegate run` refuses a task without an `accept:` YAML list
 or explicit `--accept`. If criteria are missing, explain that the user must add them to the task in
@@ -20,7 +20,7 @@ or explicit `--accept`. If criteria are missing, explain that the user must add 
 ## Step 2 — Run the delegation
 
 ```bash
-uv run <plugin-root>/scripts/jw.py delegate run <task-id> --root <project-root>
+uv run <plugin-root>/scripts/waystone.py delegate run <task-id> --root <project-root>
 ```
 
 Relay the stdout summary: immutable base, dirty-snapshot flag, worktree, env prep, runner binding,
@@ -31,7 +31,7 @@ and artifact path. Relay every `jw warn` line from stderr unchanged; never hide 
 Read the bounded contract surface only:
 
 ```bash
-uv run <plugin-root>/scripts/jw.py delegate show <delegation-id> --report --root <project-root>
+uv run <plugin-root>/scripts/waystone.py delegate show <delegation-id> --report --root <project-root>
 ```
 
 Present harness-computed changed files/base/result as explicit evidence. Keep verification,
@@ -50,8 +50,8 @@ If `~/.claude/jahns-workflow/profile.yml` has a verifier binding, use one **AskU
 whether to run it. If accepted:
 
 ```bash
-uv run <plugin-root>/scripts/jw.py delegate verify <delegation-id> --root <project-root>
-uv run <plugin-root>/scripts/jw.py delegate show <delegation-id> --verify --root <project-root>
+uv run <plugin-root>/scripts/waystone.py delegate verify <delegation-id> --root <project-root>
+uv run <plugin-root>/scripts/waystone.py delegate show <delegation-id> --verify --root <project-root>
 ```
 
 Summarize the latest payload as **independent-verifier** evidence. Preserve that label and do not
@@ -63,8 +63,8 @@ Use one **AskUserQuestion** for the user's decision: `apply` or `discard`. Do no
 behalf. Run exactly the selected command and report the result:
 
 ```bash
-uv run <plugin-root>/scripts/jw.py delegate apply <delegation-id> --root <project-root>
-uv run <plugin-root>/scripts/jw.py delegate discard <delegation-id> --root <project-root>
+uv run <plugin-root>/scripts/waystone.py delegate apply <delegation-id> --root <project-root>
+uv run <plugin-root>/scripts/waystone.py delegate discard <delegation-id> --root <project-root>
 ```
 
 Again relay any stderr warning unchanged.

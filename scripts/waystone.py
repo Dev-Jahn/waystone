@@ -20,7 +20,7 @@ Groups:
   overlay  add|list|show|promote|demote|suspend|retire|replay ...  project-local adaptive warn deltas
   check    [--root DIR]               evaluate active overlay deltas at an explicit boundary (never blocks)
 
-Existing hook/skill call sites that invoke jw_<name>.py directly keep working; this is an
+Existing hook/skill call sites that invoke sibling scripts directly keep working; this is an
 additive convenience front door (GPT review: consolidate under one `jw` CLI).
 """
 from __future__ import annotations
@@ -36,7 +36,7 @@ sys.path.insert(0, str(HERE))
 def _run_module_main(modname: str, argv: list[str]) -> int:
     """Invoke a sibling module's main() that reads sys.argv (legacy scripts)."""
     sys.argv = [modname, *argv]
-    ns = runpy.run_path(str(HERE / f"{modname}.py"), run_name="__jw_dispatch__")
+    ns = runpy.run_path(str(HERE / f"{modname}.py"), run_name="__waystone_dispatch__")
     return int(ns["main"]() or 0)
 
 
@@ -48,46 +48,46 @@ def main(argv: list[str]) -> int:
 
     # new-style modules expose main(argv)
     if group == "task":
-        import jw_tasks
-        return jw_tasks.main(rest)
+        import tasks
+        return tasks.main(rest)
     if group == "review":
-        import jw_review
-        return jw_review.main(rest)
+        import review
+        return review.main(rest)
     if group == "improve":
-        import jw_improve
-        return jw_improve.main(rest)
+        import improve
+        return improve.main(rest)
     if group == "delegate":
-        import jw_delegate
-        return jw_delegate.main(rest)
+        import delegate
+        return delegate.main(rest)
     if group == "overlay":
-        import jw_overlay
-        return jw_overlay.main(rest)
+        import overlay
+        return overlay.main(rest)
     if group == "check":
-        import jw_overlay
-        return jw_overlay.main(["check", *rest])
+        import overlay
+        return overlay.main(["check", *rest])
     if group == "remote":
         import importlib
-        mod = importlib.import_module("jw_remote")
+        mod = importlib.import_module("remote")
         return mod.main(rest)
     if group == "approve":
-        import jw_merge
-        return jw_merge.main(["approve", *rest])
+        import merge
+        return merge.main(["approve", *rest])
     if group == "round":
         if rest and rest[0] == "merge":
-            import jw_merge
-            return jw_merge.main(["merge", *rest[1:]])
+            import merge
+            return merge.main(["merge", *rest[1:]])
         if rest and rest[0] == "close":
-            return _run_module_main("jw_round", rest)
+            return _run_module_main("round", rest)
         print("jw round: expected 'close' or 'merge'", file=sys.stderr)
         return 1
     if group == "lanes":
-        return _run_module_main("jw_lanes", rest)
+        return _run_module_main("lanes", rest)
     if group == "resume":
-        return _run_module_main("jw_resume", rest)
+        return _run_module_main("resume", rest)
 
     # legacy modules with main() reading sys.argv
-    legacy = {"validate": "jw_validate", "roadmap": "jw_roadmap",
-              "ssot": "jw_ssot", "status": "jw_dashboard"}
+    legacy = {"validate": "validate", "roadmap": "roadmap",
+              "ssot": "ssot", "status": "dashboard"}
     if group in legacy:
         return _run_module_main(legacy[group], rest)
 

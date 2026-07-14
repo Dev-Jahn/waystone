@@ -14,7 +14,7 @@
 The text-surgery helpers (set_task_field, set_config_scalar) are pure and tested.
 
 Usage (also `jw round close`):
-  jw_round.py close [root] --round <id> [--done id,id] [--touched id,id] [--commit HEAD]
+  round.py close [root] --round <id> [--done id,id] [--touched id,id] [--commit HEAD]
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from jw_common import (  # noqa: E402
+from common import (  # noqa: E402
     ROUND_RE, WorkflowError, find_project_root, git_full_sha, load_config,
 )
 
@@ -156,11 +156,11 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     import shutil
     import tempfile
     import yaml
-    import jw_roadmap
-    import jw_validate
+    import roadmap
+    import validate
 
     if not ROUND_RE.match(round_id):
-        print(f"jw_round close: --round must match YYYY-MM-DD-<slug>, got {round_id!r}", file=sys.stderr)
+        print(f"round close: --round must match YYYY-MM-DD-<slug>, got {round_id!r}", file=sys.stderr)
         return 1
     cfg = load_config(root)
     cfg_path = root / ".jahns-workflow.yml"
@@ -169,17 +169,17 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     # --- preflight (no writes) ---
     full = git_full_sha(root, commit)
     if full is None:
-        print(f"jw_round close: --commit {commit!r} does not resolve to a commit", file=sys.stderr)
+        print(f"round close: --commit {commit!r} does not resolve to a commit", file=sys.stderr)
         return 1
     ctext = cfg_path.read_text(encoding="utf-8")
     try:
         ctext_new = set_config_scalar(ctext, "last_round_commit", full, section="state")
     except KeyError:
-        print("jw_round close: state.last_round_commit is missing from .jahns-workflow.yml — "
+        print("round close: state.last_round_commit is missing from .jahns-workflow.yml — "
               "add it (under `state:`) before closing rounds.", file=sys.stderr)
         return 1
     except WorkflowError as e:
-        print(f"jw_round close: cannot safely edit .jahns-workflow.yml — {e}", file=sys.stderr)
+        print(f"round close: cannot safely edit .jahns-workflow.yml — {e}", file=sys.stderr)
         return 1
 
     orig_tasks_text = tasks_path.read_text(encoding="utf-8")
@@ -197,7 +197,7 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
                                     f"(and is not being closed in this round)")
     if dep_problems:
         for p in dep_problems:
-            print(f"jw_round close: {p}", file=sys.stderr)
+            print(f"round close: {p}", file=sys.stderr)
         return 1
 
     try:
@@ -206,12 +206,12 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
         for tid in dict.fromkeys(done + touched):
             text = set_task_field(text, tid, "round", round_id)
     except (KeyError, WorkflowError) as e:
-        print(f"jw_round close: {e}", file=sys.stderr)
+        print(f"round close: {e}", file=sys.stderr)
         return 1
 
-    errs = jw_validate.validate(yaml.safe_load(text))
+    errs = validate.validate(yaml.safe_load(text))
     if errs:
-        print(f"jw_round close: edits would make tasks.yaml invalid ({len(errs)} issue(s)) — aborted, "
+        print(f"round close: edits would make tasks.yaml invalid ({len(errs)} issue(s)) — aborted, "
               f"nothing written:", file=sys.stderr)
         for e in errs[:10]:
             print(f"  - {e}", file=sys.stderr)
@@ -221,7 +221,7 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     # ROADMAP.render reads tasks.yaml from disk, so the new registry must be written first. If any
     # later step raises, restore the primary mutated files (tasks.yaml, cfg, ROADMAP) AND the whole
     # generated SSOT dir from a snapshot — split/index/.hash/DIGEST must stay mutually consistent,
-    # else `jw_ssot.check()` (which only diffs .hash) would report "up to date" over a stale digest.
+    # else `ssot.check()` (which only diffs .hash) would report "up to date" over a stale digest.
     roadmap_path = root / "ROADMAP.md"
     orig_roadmap = roadmap_path.read_text(encoding="utf-8") if roadmap_path.exists() else None
     gen_dir = (root / cfg["generated_dir"]) if cfg.get("ssot") else None
@@ -234,10 +234,10 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     try:
         tasks_path.write_text(text, encoding="utf-8")
         cfg_path.write_text(ctext_new, encoding="utf-8")
-        roadmap_path.write_text(jw_roadmap.render(root), encoding="utf-8")
+        roadmap_path.write_text(roadmap.render(root), encoding="utf-8")
         if cfg.get("ssot"):
-            import jw_ssot
-            jw_ssot.regenerate(root)  # one full regen; raises WorkflowError (caught below) not sys.exit
+            import ssot
+            ssot.regenerate(root)  # one full regen; raises WorkflowError (caught below) not sys.exit
     except Exception as e:  # noqa: BLE001 — any failure must roll every written artifact back
         tasks_path.write_text(orig_tasks_text, encoding="utf-8")
         cfg_path.write_text(ctext, encoding="utf-8")
@@ -251,7 +251,7 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
                 shutil.copytree(gen_backup, gen_dir)
         if gen_backup is not None:
             shutil.rmtree(gen_backup.parent, ignore_errors=True)
-        print(f"jw_round close: closeout failed mid-write and was rolled back — {e}", file=sys.stderr)
+        print(f"round close: closeout failed mid-write and was rolled back — {e}", file=sys.stderr)
         return 1
     if gen_backup is not None:
         shutil.rmtree(gen_backup.parent, ignore_errors=True)
@@ -268,17 +268,17 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     # Both are best-effort — an exposure/warn failure must NOT roll back an already-completed close
     # (S11/S5). The exposure guard names its failure so it stays visible.
     try:
-        import jw_overlay
-        jw_overlay.write_round_exposure(root, round_id, git_full_sha(root, "HEAD"), full)
+        import overlay
+        overlay.write_round_exposure(root, round_id, git_full_sha(root, "HEAD"), full)
     except Exception as e:  # noqa: BLE001
-        print(f"jw_round close: round exposure not recorded ({e}) — close still succeeded",
+        print(f"round close: round exposure not recorded ({e}) — close still succeeded",
               file=sys.stderr)
     try:
-        import jw_overlay
-        jw_overlay.evaluate_boundary(
+        import overlay
+        overlay.evaluate_boundary(
             root, "round-close", {"round_id": round_id, "closing_task_ids": done})
     except Exception as e:  # noqa: BLE001
-        print(f"jw_round close: overlay warning unavailable ({e}) — close still succeeded",
+        print(f"round close: overlay warning unavailable ({e}) — close still succeeded",
               file=sys.stderr)
     return 0
 
@@ -295,11 +295,11 @@ def main() -> int:
     positional = [a for a in rest if not a.startswith("--") and (rest.index(a) == 0 or rest[rest.index(a) - 1] not in ("--round", "--done", "--touched", "--commit"))]
     root = Path(positional[0]).resolve() if positional else find_project_root(Path.cwd())
     if root is None:
-        print("jw_round: no initialized project", file=sys.stderr)
+        print("round: no initialized project", file=sys.stderr)
         return 1
     round_id = opt("--round")
     if not round_id:
-        print("jw_round close: --round <id> is required", file=sys.stderr)
+        print("round close: --round <id> is required", file=sys.stderr)
         return 1
     return close(root, round_id, _parse_ids(opt("--done")), _parse_ids(opt("--touched")), opt("--commit") or "HEAD")
 

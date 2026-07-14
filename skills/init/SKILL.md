@@ -89,10 +89,10 @@ If a PROGRESS/TODO registry with open items exists, offer to convert open items 
 Run (always safe, idempotent):
 
 ```bash
-uv run <plugin-root>/scripts/jw_ssot.py split .   # only if config has ssot:
-uv run <plugin-root>/scripts/jw_ssot.py digest .
-uv run <plugin-root>/scripts/jw_roadmap.py .
-uv run <plugin-root>/scripts/jw_validate.py tasks.yaml
+uv run <plugin-root>/scripts/ssot.py split .   # only if config has ssot:
+uv run <plugin-root>/scripts/ssot.py digest .
+uv run <plugin-root>/scripts/roadmap.py .
+uv run <plugin-root>/scripts/validate.py tasks.yaml
 ```
 
 ## Step 6 — CLAUDE.md stanza

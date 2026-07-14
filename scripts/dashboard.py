@@ -5,7 +5,7 @@
 # ///
 """Cross-project terminal dashboard for all jahns-workflow projects.
 
-Usage: jw_dashboard.py [--project NAME]
+Usage: dashboard.py [--project NAME]
 Reads the global registry (~/.claude/jahns-workflow/projects.json). Entry forms:
   { "name": "...", "path": "/abs/local/clone" }   — local: git state + tasks.yaml from disk
   { "name": "...", "repo": "owner/name" }          — remote: tasks.yaml fetched via `gh api`
@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
-from jw_common import REGISTRY_PATH, git_branch_info, load_tasks  # noqa: E402
+from common import REGISTRY_PATH, git_branch_info, load_tasks  # noqa: E402
 
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
 BLUE, RED, GREEN, YELLOW = "\033[34m", "\033[31m", "\033[32m", "\033[33m"

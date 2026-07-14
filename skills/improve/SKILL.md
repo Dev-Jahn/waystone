@@ -20,10 +20,10 @@ Run the four deterministic projections in order (each writes into the improve ou
 `~/.claude/jahns-workflow/improve/`):
 
 ```bash
-uv run <plugin-root>/scripts/jw.py improve trace
-uv run <plugin-root>/scripts/jw.py improve reviews
-uv run <plugin-root>/scripts/jw.py improve evidence
-uv run <plugin-root>/scripts/jw.py improve audit
+uv run <plugin-root>/scripts/waystone.py improve trace
+uv run <plugin-root>/scripts/waystone.py improve reviews
+uv run <plugin-root>/scripts/waystone.py improve evidence
+uv run <plugin-root>/scripts/waystone.py improve audit
 ```
 
 - Default source is every Claude Code log (`$CLAUDE_CONFIG_DIR/projects`, else `~/.claude/projects`).
@@ -73,7 +73,7 @@ recommendation, never a generic wizard and never a batched "apply this plan". Th
 decision deterministically:
 
 ```bash
-uv run <plugin-root>/scripts/jw.py improve decide <rec-id> accept|reject [--title "..."] [--note "..."]
+uv run <plugin-root>/scripts/waystone.py improve decide <rec-id> accept|reject [--title "..."] [--note "..."]
 ```
 
 **Approval is recording.** It does not itself materialize or apply anything. When the user accepts a
@@ -95,7 +95,7 @@ This mapping is exhaustive. HARD: never map another lens or infer a new rule. On
 flag from facts already read and use the CLI only:
 
 ```bash
-uv run <plugin-root>/scripts/jw.py overlay add <rec-id> --rule <mapped-rule> \
+uv run <plugin-root>/scripts/waystone.py overlay add <rec-id> --rule <mapped-rule> \
   --summary "<observed numbers>" --pointers "<evidence pointer>" --from-rec <rec-id> \
   --expected-effect "<bounded expectation>" --risk "<known friction>" \
   --candidate-scope <project_candidate|user_candidate|unresolved> --observed-in <project-slug>

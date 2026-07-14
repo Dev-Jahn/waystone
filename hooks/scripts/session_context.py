@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from jw_common import git_branch_info, git_full_sha, load_config, load_tasks, next_actionable, resume_path, start_here_path  # noqa: E402
+from common import git_branch_info, git_full_sha, load_config, load_tasks, next_actionable, resume_path, start_here_path  # noqa: E402
 
 MAX_CHARS = 8000
 MAX_TASK_LINES = 8
@@ -25,13 +25,13 @@ CONTRACT_PATH = Path(__file__).resolve().parents[2] / "references" / "main-contr
 
 
 def _routing_line() -> str:
-    import jw_delegate
+    import delegate
 
-    path = jw_delegate._profile_path()
+    path = delegate._profile_path()
     if not path.is_file():
         return "routing: no profile — jw delegate will guide setup"
     try:
-        profile, _fingerprint = jw_delegate._load_profile()
+        profile, _fingerprint = delegate._load_profile()
         bindings = profile.get("bindings")
         if not isinstance(bindings, dict):
             raise ValueError("bindings is not a mapping")
@@ -50,8 +50,8 @@ def _routing_line() -> str:
 
 def _overlay_line(root: Path) -> str:
     try:
-        import jw_overlay
-        deltas = jw_overlay.list_deltas(root)
+        import overlay
+        deltas = overlay.list_deltas(root)
         unreadable = any(d.get("corrupt") for d in deltas)
         active = [d for d in deltas if not d.get("corrupt")
                   and d.get("status") in ("observing", "warning")]
@@ -70,11 +70,11 @@ def _overlay_line(root: Path) -> str:
 
 def _delegation_summary(root: Path) -> str:
     try:
-        import jw_delegate
+        import delegate
         ids = []
         unreadable = False
-        for did, rec in jw_delegate._iter_delegations(root):
-            status = jw_delegate._read_status_raw(rec)
+        for did, rec in delegate._iter_delegations(root):
+            status = delegate._read_status_raw(rec)
             if status is None:
                 unreadable = True
             elif status.get("state") == "needs-review":
@@ -218,7 +218,7 @@ def main() -> int:
         lines.append("")
         lines.append(digest.read_text(encoding="utf-8").rstrip())
     elif cfg.get("ssot"):
-        lines.append(f"SSOT: {cfg['ssot']} (no digest generated yet — run /jahns-workflow:round or jw_ssot.py digest)")
+        lines.append(f"SSOT: {cfg['ssot']} (no digest generated yet — run /jahns-workflow:round or ssot.py digest)")
 
     ctx = "\n".join(lines)
     if len(ctx) > MAX_CHARS:

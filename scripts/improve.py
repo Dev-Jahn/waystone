@@ -11,7 +11,7 @@
   jw improve decide  <rec-id> accept|reject [--title T] [--note N] [--out DIR]
 
 `trace` walks each source (default `$CLAUDE_CONFIG_DIR/projects`, else `~/.claude/projects`),
-streams every transcript file line-by-line through jw_cclog, and emits three regenerable artifacts
+streams every transcript file line-by-line through cclog, and emits three regenerable artifacts
 into --out (default `~/.claude/jahns-workflow/improve/`):
   sessions.jsonl        one row per transcript (main/subagent/workflow-subagent)
   delegations.jsonl     one row per agent_spawn tool_use
@@ -56,7 +56,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
-from jw_cclog import (  # noqa: E402
+from cclog import (  # noqa: E402
     PARSER_VERSION,
     SKIP_DIRS,
     TRANSCRIPT_KINDS,
@@ -66,7 +66,7 @@ from jw_cclog import (  # noqa: E402
     scope_of,
     stable_id,
 )
-from jw_common import (  # noqa: E402
+from common import (  # noqa: E402
     CONFIG_NAME,
     SEVERITIES,
     WorkflowError,
@@ -399,7 +399,7 @@ def _self_session_anchor(path: Path) -> tuple[int | None, str | None, int]:
                                     and b.get("name") == "Bash"):
                                 continue
                             cmd = (b.get("input") or {}).get("command")
-                            if isinstance(cmd, str) and "improve trace" in cmd and "jw" in cmd:
+                            if isinstance(cmd, str) and "improve trace" in cmd and "waystone" in cmd:
                                 tool_use_line = line_no
                                 break
     except OSError:
@@ -509,7 +509,7 @@ def run_trace(sources: list[Path], projects: set[str], out_dir: Path) -> dict:
 
 # ================================================================== reviews (§8)
 # Project review evidence, projected — NOT re-implemented. The on-disk feedback format is exactly
-# what `jw_review.ingest` writes: a metadata header, the byte-exact reviewer body, then an APPENDED
+# what `review.ingest` writes: a metadata header, the byte-exact reviewer body, then an APPENDED
 # markdown triage table under `## Findings (triage skeleton …)` whose rows are
 #   | JW-GPT-NNN — title | <severity> | <verdict> | <evidence> | <task id> |
 # We parse ONLY that appended table (the last such heading), never the verbatim body (§3.8: no
@@ -646,7 +646,7 @@ def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
 
 def _registry_path() -> Path:
     """Runtime-resolved global registry (honours HOME so tests can override it), matching
-    jw_common.REGISTRY_PATH's location without freezing it at import time."""
+    common.REGISTRY_PATH's location without freezing it at import time."""
     return Path.home() / ".claude" / "jahns-workflow" / "projects.json"
 
 
@@ -722,14 +722,14 @@ def _registry_entries(registry_path: Path) -> list[dict]:
 def _project_delegation_rows(root: Path) -> tuple[list[dict], int]:
     """Task-linked delegation evidence for one project. A missing contract is a definite absence of
     delegate-side verification evidence; corrupt exposure/status records are skipped and counted."""
-    import jw_delegate
+    import delegate
 
     rows: list[dict] = []
     skipped = 0
-    for did, rec in jw_delegate._iter_delegations(root):
+    for did, rec in delegate._iter_delegations(root):
         try:
-            exposure = jw_delegate._load_exposure(rec)
-            status = jw_delegate._read_status_raw(rec)
+            exposure = delegate._load_exposure(rec)
+            status = delegate._read_status_raw(rec)
         except WorkflowError:
             skipped += 1
             continue
@@ -739,7 +739,7 @@ def _project_delegation_rows(root: Path) -> tuple[list[dict], int]:
         verification_present = False
         if (rec / "artifact" / "contract.yaml").is_file():
             try:
-                contract = jw_delegate._load_contract(rec)
+                contract = delegate._load_contract(rec)
             except WorkflowError:
                 skipped += 1
                 continue

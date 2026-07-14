@@ -26,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from jw_common import (  # noqa: E402
+from common import (  # noqa: E402
     WorkflowError, _project_slug, find_project_root, load_config,
 )
 
@@ -51,7 +51,7 @@ RULES: dict[str, dict] = {
     },
     "round-close-open-findings-v1": {
         # §6 boundary table (R4, "the single definition of evaluation targets") lists review-ingest as
-        # a rule-2 target too; §4's "round-close, check" under-lists it — include it so the jw_review
+        # a rule-2 target too; §4's "round-close, check" under-lists it — include it so the review
         # ingest warn hook (§1) actually evaluates. Faithful minimal resolution of that inconsistency.
         "boundaries": {"round-close", "review-ingest", "check"},
         "corpus": "reviews",
@@ -80,10 +80,10 @@ def evaluate_rule2(root: Path, cfg: dict, severities, *, closing_done=frozenset(
     status decides open/closed. Triage rows with no linked task are provenance-unknown — reported as
     `unlinked`, never fired (invariant #11). `closing_done` overrides the status of tasks being closed
     in the same round to `done` (evaluate against the final state). Reuses the 0.7 reviews parser."""
-    import jw_improve
+    import improve
     severities = set(severities or [])
     closed_states = {"done", "dropped"}
-    by_round = jw_improve._finding_tasks_by_round(root)
+    by_round = improve._finding_tasks_by_round(root)
 
     rejected_ids: set[str] = set()
     unlinked = 0
@@ -99,7 +99,7 @@ def evaluate_rule2(root: Path, cfg: dict, severities, *, closing_done=frozenset(
             except OSError:
                 errors += 1
                 continue
-            for f in jw_improve._parse_triage(text):
+            for f in improve._parse_triage(text):
                 tid = f.get("task_id")
                 if not tid:
                     unlinked += 1
@@ -310,9 +310,9 @@ def retire(root: Path, delta_id: str, note: str | None = None) -> dict:
 
 # ---- shadow replay (§5 — deterministic projection; timestamp only in the delta event) ----
 def _replay_delegations(root: Path) -> dict:
-    import jw_delegate
+    import delegate
 
-    base = jw_delegate._delegations_dir(root)
+    base = delegate._delegations_dir(root)
     candidates = []
     if base.is_dir():
         candidates = [p.parent.parent for p in sorted(base.glob("*/artifact/contract.yaml"))]
@@ -321,7 +321,7 @@ def _replay_delegations(root: Path) -> dict:
     opportunities = 0
     for rec in candidates:
         try:
-            contract = jw_delegate._load_contract(rec)
+            contract = delegate._load_contract(rec)
         except WorkflowError:
             errors += 1
             continue
@@ -339,10 +339,10 @@ def _replay_delegations(root: Path) -> dict:
 
 
 def _replay_reviews(root: Path, params: dict) -> dict:
-    import jw_improve
+    import improve
 
     cfg = load_config(root)
-    rows = jw_improve._project_review_rows(_project_slug(root), root, cfg)
+    rows = improve._project_review_rows(_project_slug(root), root, cfg)
     opportunities = 0
     fired_rounds: list[str] = []
     errors = 0
@@ -421,24 +421,24 @@ def _emit(root: Path, boundary: str, delta_id: str, rule: str, delta_status: str
 def _rule1_targets(root: Path, boundary: str, context: dict) -> tuple[list[str], list[str]]:
     """(fired_dids, error_dids) for delegation-verification-evidence-v1 at this boundary. Records
     without a contract (failed-env/-runner/-artifact) are excluded — they are not evaluable (R8)."""
-    import jw_delegate
+    import delegate
     targets: list[tuple[str, Path]] = []
     if boundary in ("delegate-run", "delegate-apply"):
         did = context.get("delegation_id")
         if did:
-            rec = jw_delegate._record_dir(root, did)
+            rec = delegate._record_dir(root, did)
             if (rec / "artifact" / "contract.yaml").exists():
                 targets.append((did, rec))
     elif boundary == "check":
-        for did, rec in jw_delegate._iter_delegations(root):
-            st = jw_delegate._read_status_raw(rec)
+        for did, rec in delegate._iter_delegations(root):
+            st = delegate._read_status_raw(rec)
             if st and st.get("state") == "needs-review" and (rec / "artifact" / "contract.yaml").exists():
                 targets.append((did, rec))
     fired: list[str] = []
     errors: list[str] = []
     for did, rec in targets:
         try:
-            contract = jw_delegate._load_contract(rec)
+            contract = delegate._load_contract(rec)
         except WorkflowError:
             errors.append(did)  # corrupt/unparseable = evaluation-error, never a fire (no invention)
             continue
@@ -538,7 +538,7 @@ def _evaluate_boundary(root: Path, boundary: str, context: dict) -> list[dict]:
     return events
 
 
-# ---- exposure (§9 — round exposure record; delegation exposure lives in jw_delegate) ----
+# ---- exposure (§9 — round exposure record; delegation exposure lives in delegate) ----
 def _exposure_dir(root: Path) -> Path:
     return _plugin_base() / "exposure" / _project_slug(root)
 
@@ -546,9 +546,9 @@ def _exposure_dir(root: Path) -> Path:
 def _profile_summary() -> tuple[str | None, dict | None]:
     """(profile_fingerprint, {role: backend}) from the delegation profile, or (None, None) when it is
     absent — a round closes without any delegation, so the harness never guesses bindings."""
-    import jw_delegate
+    import delegate
     try:
-        profile, fp = jw_delegate._load_profile()
+        profile, fp = delegate._load_profile()
     except WorkflowError:
         return None, None
     bindings: dict[str, str] = {}

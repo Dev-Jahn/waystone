@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from jw_common import find_project_root, head_pushed  # noqa: E402
+from common import find_project_root, head_pushed  # noqa: E402
 
 
 def _root(argv: list[str]) -> Path | None:
@@ -60,7 +60,7 @@ def main(argv: list[str]) -> int:
     sub, rest = argv[0], argv[1:]
     root = _root(rest)
     if root is None:
-        print("jw_remote: no initialized project (missing .jahns-workflow.yml)", file=sys.stderr)
+        print("remote: no initialized project (missing .jahns-workflow.yml)", file=sys.stderr)
         return 1
     return {"verify": verify, "drift": drift}[sub](root)
 

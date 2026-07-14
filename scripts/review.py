@@ -41,7 +41,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
-from jw_common import (  # noqa: E402
+from common import (  # noqa: E402
     CONFIG_NAME, find_project_root, git_full_sha, load_config, normalize_config,
 )
 
@@ -345,7 +345,7 @@ def pr_bundle(root: Path, pr: int, repo: str | None = None) -> dict | None:
     rc, out = _gh(root, "pr", "view", str(pr), "--json",
                   "headRefOid,baseRefOid,statusCheckRollup,mergeStateStatus,state,isDraft,baseRefName,headRefName")
     if rc != 0:
-        print(f"jw_review: gh pr view {pr} failed: {out}", file=sys.stderr)
+        print(f"review: gh pr view {pr} failed: {out}", file=sys.stderr)
         return None
     j = json.loads(out)
     if repo is None:
@@ -501,11 +501,11 @@ def freeze(root: Path, pr: int, round_id: str | None) -> int:
         return 1
     policy = ctx["policy"]
     if policy is None:
-        print("jw_review freeze: cannot read the base-branch policy (.jahns-workflow.yml at the PR "
+        print("review freeze: cannot read the base-branch policy (.jahns-workflow.yml at the PR "
               "base SHA) — pr-mode review is gated on the protected base config.", file=sys.stderr)
         return 1
     if policy["review"]["mode"] != "pr":
-        print("jw_review freeze: the base branch's review.mode is not 'pr'. PR-mode review applies "
+        print("review freeze: the base branch's review.mode is not 'pr'. PR-mode review applies "
               "only once the base policy is pr — review the packet→pr transition PR in packet mode "
               "first, merge it, then pr-mode applies from the next PR.", file=sys.stderr)
         return 1
@@ -530,7 +530,7 @@ def freeze(root: Path, pr: int, round_id: str | None) -> int:
             + marker + "\n")
     rc, out = _gh(root, "pr", "comment", str(pr), "--body", body)
     if rc != 0:
-        print(f"jw_review freeze: gh pr comment failed: {out}", file=sys.stderr)
+        print(f"review freeze: gh pr comment failed: {out}", file=sys.stderr)
         return 1
     print(f"review cycle {n} frozen at {head[:12]} on PR #{pr} (reviewers: {', '.join(reviewers)})")
     return 0
@@ -542,7 +542,7 @@ def status(root: Path, pr: int | None) -> int:
         if ctx is None:
             return 1
         if ctx["policy"] is None:
-            print("jw_review status: cannot read the base-branch policy at the PR base SHA.", file=sys.stderr)
+            print("review status: cannot read the base-branch policy at the PR base SHA.", file=sys.stderr)
             return 1
         facts = facts_from_bundle(ctx["bundle"], ctx["policy"], ctx["repo"])
         print(f"PR #{pr} review status ({facts['pr_state']}{', DRAFT' if facts['is_draft'] else ''}):")
@@ -592,12 +592,12 @@ def ingest(root: Path, round_id: str | None, src: Path = INBOX, reviewer: str | 
     import datetime
     cfg = load_config(root)
     if not src.is_file():
-        print(f"jw_review ingest: no review at {src}. In a SEPARATE shell run `cat > {src}`, paste "
+        print(f"review ingest: no review at {src}. In a SEPARATE shell run `cat > {src}`, paste "
               f"the reviewer's reply, press Ctrl-D, then re-run.", file=sys.stderr)
         return 1
     body = src.read_bytes()
     if not body.strip():
-        print(f"jw_review ingest: {src} is empty — save the reply there first.", file=sys.stderr)
+        print(f"review ingest: {src} is empty — save the reply there first.", file=sys.stderr)
         return 1
     rdir = root / cfg["reviews_dir"]
     if round_id is None:
@@ -605,7 +605,7 @@ def ingest(root: Path, round_id: str | None, src: Path = INBOX, reviewer: str | 
         if reqs:
             round_id = reqs[-1]
         else:
-            print("jw_review ingest: no --round given and no *-request.md to infer it from.",
+            print("review ingest: no --round given and no *-request.md to infer it from.",
                   file=sys.stderr)
             return 1
     rdir.mkdir(parents=True, exist_ok=True)
@@ -641,10 +641,10 @@ def ingest(root: Path, round_id: str | None, src: Path = INBOX, reviewer: str | 
     print(f"  {len(findings)} finding(s) parsed — verify each before registering")
     # M2 §6: evaluate overlay warns at the review-ingest boundary (best-effort; never blocks).
     try:
-        import jw_overlay
-        jw_overlay.evaluate_boundary(root, "review-ingest", {"round_id": round_id})
+        import overlay
+        overlay.evaluate_boundary(root, "review-ingest", {"round_id": round_id})
     except Exception as e:  # noqa: BLE001
-        print(f"jw_review ingest: overlay warning unavailable ({e}) — ingest still succeeded",
+        print(f"review ingest: overlay warning unavailable ({e}) — ingest still succeeded",
               file=sys.stderr)
     return 0
 
@@ -656,14 +656,14 @@ def main(argv: list[str]) -> int:
     sub, rest = argv[0], argv[1:]
     root = _root(rest)
     if root is None:
-        print("jw_review: no initialized project (missing .jahns-workflow.yml)", file=sys.stderr)
+        print("review: no initialized project (missing .jahns-workflow.yml)", file=sys.stderr)
         return 1
     if sub == "ingest":
         return ingest(root, _opt(rest, "--round"), reviewer=_opt(rest, "--reviewer"))
     pr_s = _opt(rest, "--pr")
     if sub == "freeze":
         if not pr_s:
-            print("jw_review freeze: --pr N is required", file=sys.stderr)
+            print("review freeze: --pr N is required", file=sys.stderr)
             return 1
         return freeze(root, int(pr_s), _opt(rest, "--round"))
     return status(root, int(pr_s) if pr_s else None)

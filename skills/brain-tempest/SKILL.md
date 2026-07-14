@@ -102,7 +102,7 @@ you just learned the real north-star from the aside, not the choice.
 When you have enough, write `SSOT.md` at the project root — the git top-level if you're in a repo,
 otherwise the current directory. If an `SSOT.md` already exists, read it and deepen it rather than
 clobbering, or confirm before replacing (this workflow never silently overwrites the user's docs).
-It must feed the SSOT tooling (`jw_ssot.py`), which splits the file on level-2 `##` headings and
+It must feed the SSOT tooling (`ssot.py`), which splits the file on level-2 `##` headings and
 injects each section's **first paragraph** as the per-session digest. The structure is therefore
 load-bearing, not cosmetic:
 

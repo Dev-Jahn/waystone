@@ -17,9 +17,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import yaml  # noqa: E402
 
-import jw_roadmap  # noqa: E402
-from jw_common import find_project_root  # noqa: E402
-from jw_validate import validate  # noqa: E402
+import roadmap  # noqa: E402
+from common import find_project_root  # noqa: E402
+from validate import validate  # noqa: E402
 
 
 def main() -> int:
@@ -50,7 +50,7 @@ def main() -> int:
             print(f"  - {e}", file=sys.stderr)
         return 2
 
-    (root / "ROADMAP.md").write_text(jw_roadmap.render(root), encoding="utf-8")
+    (root / "ROADMAP.md").write_text(roadmap.render(root), encoding="utf-8")
     return 0
 
 

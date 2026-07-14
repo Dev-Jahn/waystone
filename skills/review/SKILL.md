@@ -24,7 +24,7 @@ deterministic ingest, which copies `/tmp/review.md` byte-exact into the feedback
 metadata header and consumes the drop-file:
 
 ```bash
-uv run <plugin-root>/scripts/jw.py review ingest . --round <round-id> --reviewer "<model, e.g. gpt-5.5-pro>"
+uv run <plugin-root>/scripts/waystone.py review ingest . --round <round-id> --reviewer "<model, e.g. gpt-5.5-pro>"
 ```
 
 Besides the byte-exact copy, ingest **appends** (never edits the verbatim body) a *finding triage
@@ -46,7 +46,7 @@ Reviewer findings are claims, not facts. For each distinct finding:
    - `REAL` — confirmed against evidence,
    - `REJECTED` — demonstrably wrong (state the evidence),
    - `NEEDS-RULING` — turns on an SSOT interpretation → register a `decision/...` task instead of acting.
-2. Register each REAL finding via the CLI — `uv run <plugin-root>/scripts/jw.py task add <fix|perf|docs>/<slug> . --title "..." --severity <blocker|major|minor> --origin review-<round-id> [--anchor §...]` — not by editing `tasks.yaml`. The add is validated and comment-preserving.
+2. Register each REAL finding via the CLI — `uv run <plugin-root>/scripts/waystone.py task add <fix|perf|docs>/<slug> . --title "..." --severity <blocker|major|minor> --origin review-<round-id> [--anchor §...]` — not by editing `tasks.yaml`. The add is validated and comment-preserving.
 
 If ingest parsed a `JW-GPT-NNN` triage-skeleton table, fill each row (in the user's configured
 language; quoted reviewer text verbatim): verdict → evidence → task id. A free-form reply has no
@@ -61,7 +61,7 @@ consumes downstream work; offer to start on them. Suggested commit message:
 `docs(review): ingest <round-id> feedback`.
 
 Then **refresh the re-entry pointer** (the review moved the frontier): get its path with
-`uv run <plugin-root>/scripts/jw.py resume --start-here-path .` and **Write** (overwrite, ≤ ~35
+`uv run <plugin-root>/scripts/waystone.py resume --start-here-path .` and **Write** (overwrite, ≤ ~35
 lines) the post-review frontier — open blockers/decisions and what to pick up next, detail linked
 to the feedback/PROGRESS files. The SessionStart hook injects this so the next session resumes
 without re-explaining. (Same file the round skill writes; see round Step 6.)
@@ -76,7 +76,7 @@ When the project uses PR-mode review, the same verify-then-register discipline a
 - A finding fixed in code produces a NEW head SHA, which makes the frozen cycle stale. Do not
   merge against a stale cycle — re-freeze (`jw review freeze --pr <N>`) so reviewers re-examine
   the new SHA. Codex re-reviews the new head; the macro reviewer does a full or delta review.
-- The merge is gated, not judged: `uv run <plugin-root>/scripts/jw.py round merge --pr <N> .`
+- The merge is gated, not judged: `uv run <plugin-root>/scripts/waystone.py round merge --pr <N> .`
   prints PASS only when the cycle is fresh, CI ok (if required), a fresh Codex review + resolved
   findings + a macro result are all bound to the current head, zero open blockers/decisions, and
   a human approval is bound to the current head. The user approves with

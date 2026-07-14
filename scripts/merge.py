@@ -27,9 +27,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
-from jw_common import load_config  # noqa: E402
-import jw_review  # noqa: E402
-import jw_validate  # noqa: E402
+from common import load_config  # noqa: E402
+import review  # noqa: E402
+import validate  # noqa: E402
 
 
 # ---- pure gate logic ---------------------------------------------------------
@@ -84,7 +84,7 @@ def merge_gate(g: dict) -> tuple[bool, list[str]]:
 
 # ---- CLI ---------------------------------------------------------------------
 def approve(root: Path, pr: int, sha: str) -> int:
-    ctx = jw_review.pr_context(root, pr)
+    ctx = review.pr_context(root, pr)
     if ctx is None:
         return 1
     if ctx["policy"] is None:
@@ -101,21 +101,21 @@ def approve(root: Path, pr: int, sha: str) -> int:
     # operators come from the BASE policy (consistent with the gate), not the local checkout.
     owner = repo.split("/", 1)[0] if repo else ""
     operators = tuple({owner, *ctx["policy"]["review"].get("operators", [])} - {""})
-    lc = jw_review.latest_cycle(jw_review.parse_bodies(bundle["bodies"]), operators)
+    lc = review.latest_cycle(review.parse_bodies(bundle["bodies"]), operators)
     if lc is None:
         print("jw approve: no review cycle is frozen yet — run `jw review freeze` first.", file=sys.stderr)
         return 1
-    rc, login = jw_review._gh(root, "api", "user", "-q", ".login")
+    rc, login = review._gh(root, "api", "user", "-q", ".login")
     if rc != 0 or not login:
         print("jw approve: could not resolve your GitHub login (gh api user) — an approval must "
               "bind to a real actor whose identity matches who posts it.", file=sys.stderr)
         return 1
     by = login
-    marker = jw_review.emit_marker("approval",
+    marker = review.emit_marker("approval",
                                    {"sha": head, "base_sha": base_sha, "cycle": lc["cycle"], "by": by})
     body = (f"Approved for merge at `{head[:12]}` (cycle {lc['cycle']}, base `{base_sha[:12]}`). "
             f"A new push, a base advance, or a re-freeze invalidates this automatically.\n\n{marker}\n")
-    rc, out = jw_review._gh(root, "pr", "comment", str(pr), "--body", body)
+    rc, out = review._gh(root, "pr", "comment", str(pr), "--body", body)
     if rc != 0:
         print(f"jw approve: gh pr comment failed: {out}", file=sys.stderr)
         return 1
@@ -128,7 +128,7 @@ def _gather(root: Path, pr: int) -> dict | None:
     the PR's BASE SHA — the protected target branch — NOT the PR head, so a candidate branch
     cannot relax its own merge rules (add itself as operator/approver, drop reviewers, disable
     CI). The CONTENT being merged (tasks.yaml blockers/decisions) is read from the head."""
-    ctx = jw_review.pr_context(root, pr)
+    ctx = review.pr_context(root, pr)
     if ctx is None:
         return None
     repo, bundle = ctx["repo"], ctx["bundle"]
@@ -137,7 +137,7 @@ def _gather(root: Path, pr: int) -> dict | None:
     read_ok = policy is not None
     data = {}
     if read_ok and repo and head:
-        tasks_text = jw_review.file_at_ref(root, repo, "tasks.yaml", head)  # CONTENT @ head
+        tasks_text = review.file_at_ref(root, repo, "tasks.yaml", head)  # CONTENT @ head
         if tasks_text is None:
             read_ok = False
         else:
@@ -148,13 +148,13 @@ def _gather(root: Path, pr: int) -> dict | None:
             else:
                 # head tasks.yaml must be schema-valid, not merely parseable — a malformed
                 # registry must not let the gate read zero blockers/decisions from garbage.
-                if jw_validate.validate(data):
+                if validate.validate(data):
                     read_ok = False
     else:
         read_ok = False
     if policy is None:
         policy = load_config(root)  # for facts only; read_ok is already False → gate blocks
-    facts = jw_review.facts_from_bundle(bundle, policy, repo)
+    facts = review.facts_from_bundle(bundle, policy, repo)
     reviewers = policy["review"]["reviewers"]
     # any configured reviewer other than codex is a mandatory macro reviewer — never guess by name
     # (a reviewer like 'research-auditor' must not be silently dropped from the gate).
@@ -167,7 +167,7 @@ def _gather(root: Path, pr: int) -> dict | None:
         "want_codex": "codex" in reviewers,
         "want_pro": bool(macro),
         "remote_contains_head": None,
-        "expected_base": jw_review._gh(root, "repo", "view", "--json", "defaultBranchRef",
+        "expected_base": review._gh(root, "repo", "view", "--json", "defaultBranchRef",
                                        "-q", ".defaultBranchRef.name")[1] or None,
         **tasks_gate_counts(data),
     }
@@ -198,7 +198,7 @@ def merge(root: Path, pr: int, execute: bool, method: str | None) -> int:
         print("jw merge --execute requires a method: --squash | --rebase | --merge", file=sys.stderr)
         return 1
     # bind the merge to the exact validated head — a push between gate and merge aborts it
-    rc, out = jw_review._gh(root, "pr", "merge", str(pr), f"--{method}",
+    rc, out = review._gh(root, "pr", "merge", str(pr), f"--{method}",
                             "--match-head-commit", g["current_head"])
     if rc != 0:
         print(f"jw merge: gh pr merge failed (head may have moved since the gate): {out}", file=sys.stderr)
@@ -212,16 +212,16 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 1
     sub, rest = argv[0], argv[1:]
-    root = jw_review._root(rest)
+    root = review._root(rest)
     if root is None:
-        print("jw_merge: no initialized project (missing .jahns-workflow.yml)", file=sys.stderr)
+        print("merge: no initialized project (missing .jahns-workflow.yml)", file=sys.stderr)
         return 1
-    pr_s = jw_review._opt(rest, "--pr")
+    pr_s = review._opt(rest, "--pr")
     if not pr_s:
         print(f"jw {sub}: --pr N is required", file=sys.stderr)
         return 1
     if sub == "approve":
-        sha = jw_review._opt(rest, "--sha")
+        sha = review._opt(rest, "--sha")
         if not sha:
             print("jw approve: --sha X is required", file=sys.stderr)
             return 1

@@ -21,7 +21,7 @@ rather than duplicating).
 
 ## Step 2 — Sync the task registry
 
-First register any newly discovered work as new tasks via the CLI — `uv run <plugin-root>/scripts/jw.py
+First register any newly discovered work as new tasks via the CLI — `uv run <plugin-root>/scripts/waystone.py
 task add <type>/<slug> . --title "..." [--severity ...] [--deps a,b]` (proper IDs + explanatory
 titles; set `anchor:` to the governing SSOT §-anchor when known) — rather than hand-editing the
 registry. Unresolved questions for the user become `decision/...` tasks; when a `decision/...` is
@@ -34,7 +34,7 @@ patch you `apply` or `discard` (the guided flow arrives in a later milestone).
 Then close the round in one atomic, deterministic step instead of hand-editing each field:
 
 ```bash
-uv run <plugin-root>/scripts/jw.py round close . --round <round-id> \
+uv run <plugin-root>/scripts/waystone.py round close . --round <round-id> \
     --done <comma-ids that fully passed> --touched <comma-ids worked but not done>
 ```
 
@@ -43,9 +43,9 @@ the registry, regenerates `ROADMAP.md` (and SSOT views if configured), and advan
 `state.last_round_commit`.
 A `gate/...` task goes in `--done` only if the bar actually passed (link evidence in PROGRESS).
 If `round close` reports the registry invalid, fix the reported issues before continuing.
-If lanes were used this round, first verify them: `uv run <plugin-root>/scripts/jw.py lanes verify .`.
+If lanes were used this round, first verify them: `uv run <plugin-root>/scripts/waystone.py lanes verify .`.
 
-Then keep the registry small: `uv run <plugin-root>/scripts/jw.py task archive .` relocates old
+Then keep the registry small: `uv run <plugin-root>/scripts/waystone.py task archive .` relocates old
 done/dropped tasks into `tasks.archive.yaml` once the registry crosses a size threshold (it keeps
 the most-recent few for decision context, and never archives a task a live one still depends on).
 It is a safe no-op below the threshold, so run it every round.
@@ -59,7 +59,7 @@ PROGRESS.md with the current month + the header pointers.
 
 ## Step 4 — Request review
 
-**Push gate first (both modes):** run `uv run <plugin-root>/scripts/jw.py remote verify .`. A review
+**Push gate first (both modes):** run `uv run <plugin-root>/scripts/waystone.py remote verify .`. A review
 must point at a pushed commit; if it exits non-zero, STOP and have the user push the round's commits.
 If your conventions end a round in a commit, commit the closeout (`docs(round): close <round-id>`)
 and push it FIRST so `tasks.yaml` / PROGRESS carry the round's final state.
@@ -82,7 +82,7 @@ If a repo-local `docs/review-profile.md` exists (the project's standing domain l
 reads it too — the brief points there.
 
 **PR mode** (`review.mode: pr`): also freeze a SHA-bound review cycle and post the `@codex` request:
-`uv run <plugin-root>/scripts/jw.py review freeze --pr <N> --round <round-id> .` (stamps the current
+`uv run <plugin-root>/scripts/waystone.py review freeze --pr <N> --round <round-id> .` (stamps the current
 PR head as cycle N + posts the request). The macro reviewer reads the PR + the request file. Check
 progress with `jw review status --pr <N>`; never treat "a comment appeared" as "review done" — a
 review is `(reviewer, cycle, reviewed_sha)`.
@@ -107,7 +107,7 @@ End with the **next-step reminder** (so the reply is preserved byte-exact, not r
 resume — picks up the live frontier without you re-explaining "where were we". Get its path:
 
 ```bash
-uv run <plugin-root>/scripts/jw.py resume --start-here-path .
+uv run <plugin-root>/scripts/waystone.py resume --start-here-path .
 ```
 
 Then **Write** that file (overwrite — never append), **≤ ~35 lines / ~2.5KB**:

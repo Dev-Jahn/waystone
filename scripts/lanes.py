@@ -16,7 +16,7 @@ sibling lanes merge and would false-fail healthy lanes).
     base_sha: <sha recorded when the lane was created>   # = the dependency's result if depends_on
     depends_on: [feat/bar]   # optional
 
-Usage (also `jw lanes verify`): jw_lanes.py verify [root]   exit 0 ok, 3 if any lane fails.
+Usage (also `jw lanes verify`): lanes.py verify [root]   exit 0 ok, 3 if any lane fails.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from jw_common import find_project_root, git_rc, is_ancestor, load_tasks  # noqa: E402
+from common import find_project_root, git_rc, is_ancestor, load_tasks  # noqa: E402
 
 
 def check_lane(root: Path, task_id: str, lane: dict) -> list[str]:
@@ -82,7 +82,7 @@ def main() -> int:
     positional = [a for i, a in enumerate(rest) if not a.startswith("--") and (i == 0 or rest[i - 1] != "--round")]
     root = Path(positional[0]).resolve() if positional else find_project_root(Path.cwd())
     if root is None:
-        print("jw_lanes: no initialized project", file=sys.stderr)
+        print("lanes: no initialized project", file=sys.stderr)
         return 1
     return verify(root, round_id)
 

@@ -15,7 +15,7 @@ error-prone. These verbs give the agent a small surface so it never touches the 
   jw task drop   <id> [root]                                                  status -> dropped
   jw task archive [root] [--threshold N] [--keep K]                           relocate old done/dropped
 
-Mutations are comment-preserving (the AST-bounded text surgery from jw_round) and validate the
+Mutations are comment-preserving (the AST-bounded text surgery from round) and validate the
 result before writing — a write that would break the schema is refused, nothing is written.
 `archive` moves done/dropped tasks (most-recent-by-round kept live, oldest archived, and never one a
 remaining task still depends on) into `tasks.archive.yaml` once the registry passes a size
@@ -29,9 +29,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
-import jw_round  # noqa: E402  — reuse the AST-bounded text-surgery helpers
-import jw_validate  # noqa: E402
-from jw_common import find_project_root, load_tasks  # noqa: E402
+import round  # noqa: E402  — reuse the AST-bounded text-surgery helpers
+import validate  # noqa: E402
+from common import find_project_root, load_tasks  # noqa: E402
 
 ARCHIVE_NAME = "tasks.archive.yaml"
 ARCHIVE_THRESHOLD = 100   # only archive once the registry has at least this many tasks
@@ -103,8 +103,8 @@ def append_task_block(text: str, fields: dict) -> str:
         f"    {k}: {_fmt(fields[k])}{nl}" for k in _FIELD_ORDER if fields.get(k) is not None
     )
 
-    root = jw_round._compose_mapping(text)
-    node = jw_round._top_level(root, "tasks")
+    root = round._compose_mapping(text)
+    node = round._top_level(root, "tasks")
     lines = text.splitlines(keepends=True)
 
     if isinstance(node, yaml.SequenceNode) and node.value:
@@ -123,7 +123,7 @@ def append_task_block(text: str, fields: dict) -> str:
     key_lines = [k.start_mark.line for k, _ in root.value
                  if isinstance(k, yaml.ScalarNode) and k.value == "tasks"]
     if not key_lines:
-        raise jw_round.WorkflowError("document has no top-level 'tasks' key")
+        raise round.WorkflowError("document has no top-level 'tasks' key")
     i = key_lines[0]
     lines[i] = f"tasks:{nl}"
     lines.insert(i + 1, block)
@@ -165,7 +165,7 @@ def remove_task_blocks(text: str, ids: list[str]) -> str:
     spans = []
     for tid in ids:
         try:
-            s, e = jw_round._task_item_span(text, tid)
+            s, e = round._task_item_span(text, tid)
         except KeyError:
             continue
         spans.append((s, min(e, len(lines))))
@@ -181,7 +181,7 @@ def _write_validated(tasks_path: Path, new_text: str, what: str) -> int:
     except yaml.YAMLError as e:
         print(f"task {what}: result is not valid YAML — nothing written ({e})", file=sys.stderr)
         return 2
-    errs = jw_validate.validate(data)
+    errs = validate.validate(data)
     if errs:
         print(f"task {what}: would make tasks.yaml invalid ({len(errs)} issue(s)) — nothing written:",
               file=sys.stderr)
@@ -196,7 +196,7 @@ def cmd_add(root: Path, fields: dict) -> int:
     tasks_path = root / "tasks.yaml"
     try:
         new_text = append_task_block(tasks_path.read_text(encoding="utf-8"), fields)
-    except jw_round.WorkflowError as e:
+    except round.WorkflowError as e:
         print(f"task add: {e}", file=sys.stderr)
         return 1
     rc = _write_validated(tasks_path, new_text, "add")
@@ -216,8 +216,8 @@ def cmd_set(root: Path, task_id: str, field: str, value: str) -> int:
         # produce a malformed document; the schema check then catches semantically-wrong values.
         formatted = _fmt(value)
     try:
-        new_text = jw_round.set_task_field(tasks_path.read_text(encoding="utf-8"), task_id, field, formatted)
-    except (KeyError, jw_round.WorkflowError) as e:
+        new_text = round.set_task_field(tasks_path.read_text(encoding="utf-8"), task_id, field, formatted)
+    except (KeyError, round.WorkflowError) as e:
         print(f"task set: {e}", file=sys.stderr)
         return 1
     rc = _write_validated(tasks_path, new_text, "set")
@@ -240,7 +240,7 @@ def cmd_archive(root: Path, threshold: int, keep: int) -> int:
     except yaml.YAMLError as e:
         print(f"task archive: removal produced invalid YAML — aborted ({e})", file=sys.stderr)
         return 2
-    errs = jw_validate.validate(new_data)
+    errs = validate.validate(new_data)
     if errs:  # selection keeps the registry dependency-closed, so this is a belt-and-suspenders gate
         print(f"task archive: removal would invalidate tasks.yaml ({len(errs)} issue(s)) — aborted:", file=sys.stderr)
         for e in errs[:10]:

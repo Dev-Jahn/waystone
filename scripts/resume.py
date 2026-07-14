@@ -11,7 +11,7 @@ pick up next) written to a plugin-local ephemeral file (NOT committed to the rep
 SessionStart hook reads it back after a compaction/resume. Called by PreCompact / SessionEnd
 hooks and at round close.
 
-Usage (also `jw resume`): jw_resume.py [root]   |   jw_resume.py --path [root]
+Usage (also `jw resume`): resume.py [root]   |   resume.py --path [root]
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from jw_common import (  # noqa: E402
+from common import (  # noqa: E402
     find_project_root, git, git_branch_info, git_full_sha, load_tasks,
     next_actionable, resume_path, start_here_path,
 )

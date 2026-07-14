@@ -36,7 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
-from jw_common import (  # noqa: E402
+from common import (  # noqa: E402
     WorkflowError, _project_slug, find_project_root, git_full_sha, load_config, load_tasks,
 )
 
@@ -67,7 +67,7 @@ class _RefusedWrite(WorkflowError):
     """A plugin-local directory could not be created — maps to exit 2 (refused write, §2)."""
 
 
-# ---- git plumbing (private; jw_common.git_rc has no env/cwd-index support) ----
+# ---- git plumbing (private; common.git_rc has no env/cwd-index support) ----
 def _git(cwd: Path, *args: str, env: dict | None = None, timeout: int = 30) -> tuple[int, str, str]:
     """Run git in `cwd`; return (rc, stdout, stderr). `env` overlays os.environ (for GIT_INDEX_FILE).
     Output decodes with surrogateescape — git output is not guaranteed UTF-8 (H1) and a status/scan
@@ -508,9 +508,9 @@ def _diff_patch(cwd: Path, base: str, result: str) -> bytes:
 
 def _active_overlays(root: Path) -> list[dict]:
     """Active overlay deltas at run time; corrupt records fail immutable exposure capture loud."""
-    import jw_overlay
+    import overlay
     return [{"id": d["id"], "status": d["status"]}
-            for d in jw_overlay.active_deltas_for_exposure(root)]
+            for d in overlay.active_deltas_for_exposure(root)]
 
 
 def _write_exposure(record_dir, did, root, packet, task_id, head_sha, base_sha, dirty, binding,
@@ -645,8 +645,8 @@ def _warn_boundary(root: Path, boundary: str, context: dict) -> None:
     """Best-effort overlay warn at a delegation boundary. evaluate_boundary already swallows its own
     exceptions; the extra guard covers an import failure — a warn must never affect the host exit (S5)."""
     try:
-        import jw_overlay
-        jw_overlay.evaluate_boundary(root, boundary, context)
+        import overlay
+        overlay.evaluate_boundary(root, boundary, context)
     except Exception as e:  # noqa: BLE001
         print(f"jw delegate: overlay warning unavailable at {boundary} ({e}) — host command continued",
               file=sys.stderr)

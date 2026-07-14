@@ -21,18 +21,18 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 
-import jw_cclog  # noqa: E402
-import jw_common  # noqa: E402
-import jw_delegate  # noqa: E402
-import jw_improve  # noqa: E402
-import jw_lanes  # noqa: E402
-import jw_overlay  # noqa: E402
-import jw_merge  # noqa: E402
-import jw_resume  # noqa: E402
-import jw_review  # noqa: E402
-import jw_round  # noqa: E402
-import jw_tasks  # noqa: E402
-import jw_validate  # noqa: E402
+import cclog  # noqa: E402
+import common  # noqa: E402
+import delegate  # noqa: E402
+import improve  # noqa: E402
+import lanes  # noqa: E402
+import overlay  # noqa: E402
+import merge  # noqa: E402
+import resume  # noqa: E402
+import review  # noqa: E402
+import round  # noqa: E402
+import tasks  # noqa: E402
+import validate  # noqa: E402
 import yaml  # noqa: E402
 
 
@@ -51,51 +51,51 @@ def init_repo(root: Path):
 
 class MarkerTests(unittest.TestCase):
     def test_emit_parse_roundtrip(self):
-        s = jw_review.emit_marker("review-cycle", {"round_id": "2026-06-15-x", "cycle": 1,
+        s = review.emit_marker("review-cycle", {"round_id": "2026-06-15-x", "cycle": 1,
                                                    "target_sha": "a" * 40, "reviewers": ["codex", "gpt-5.5-pro"]})
-        got = jw_review.parse_markers(s)
+        got = review.parse_markers(s)
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["_kind"], "review-cycle")
         self.assertEqual(got[0]["cycle"], 1)
         self.assertEqual(got[0]["target_sha"], "a" * 40)
 
     def test_latest_and_next_cycle(self):
-        text = (jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": "a" * 40})
-                + "\n" + jw_review.emit_marker("review-cycle", {"cycle": 2, "target_sha": "b" * 40}))
-        ms = jw_review.parse_markers(text)
-        self.assertEqual(jw_review.latest_cycle(ms)["cycle"], 2)
-        self.assertEqual(jw_review.next_cycle_number(ms), 3)
-        self.assertEqual(jw_review.next_cycle_number([]), 1)
+        text = (review.emit_marker("review-cycle", {"cycle": 1, "target_sha": "a" * 40})
+                + "\n" + review.emit_marker("review-cycle", {"cycle": 2, "target_sha": "b" * 40}))
+        ms = review.parse_markers(text)
+        self.assertEqual(review.latest_cycle(ms)["cycle"], 2)
+        self.assertEqual(review.next_cycle_number(ms), 3)
+        self.assertEqual(review.next_cycle_number([]), 1)
 
     def test_classify_fresh_vs_stale(self):
         head = "b" * 40
         # cycle frozen at a different sha => stale
-        ms = jw_review.parse_markers(jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": "a" * 40}))
-        self.assertFalse(jw_review.classify(ms, head)["cycle_fresh"])
+        ms = review.parse_markers(review.emit_marker("review-cycle", {"cycle": 1, "target_sha": "a" * 40}))
+        self.assertFalse(review.classify(ms, head)["cycle_fresh"])
         # frozen at head => fresh
-        ms = jw_review.parse_markers(jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}))
-        self.assertTrue(jw_review.classify(ms, head)["cycle_fresh"])
+        ms = review.parse_markers(review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}))
+        self.assertTrue(review.classify(ms, head)["cycle_fresh"])
 
     def _bodies(self, head, *, reviewer="gpt-5.5-pro", cycle=1, verdict="shipped",
                 approver="owner", decision=None):
         return [
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner", "at": "2026-06-01T00:00:00Z"},
-            {"body": jw_review.emit_marker("review-result", {"reviewer": reviewer, "review_cycle": cycle,
+            {"body": review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner", "at": "2026-06-01T00:00:00Z"},
+            {"body": review.emit_marker("review-result", {"reviewer": reviewer, "review_cycle": cycle,
                                                              "reviewed_sha": head, "verdict": verdict,
                                                              "decision_required": decision or []}), "author": reviewer, "at": "2026-06-01T01:00:00Z"},
-            {"body": jw_review.emit_marker("approval", {"sha": head, "cycle": 1, "by": approver}), "author": approver, "at": "2026-06-01T03:00:00Z"},
-            {"body": jw_review.emit_marker("findings", {"cycle": 1, "resolved": True}), "author": "owner", "at": "2026-06-01T02:00:00Z"},
+            {"body": review.emit_marker("approval", {"sha": head, "cycle": 1, "by": approver}), "author": approver, "at": "2026-06-01T03:00:00Z"},
+            {"body": review.emit_marker("findings", {"cycle": 1, "resolved": True}), "author": "owner", "at": "2026-06-01T02:00:00Z"},
         ]
 
     def test_classify_valid_binding(self):
         head = "c" * 40
-        c = jw_review.classify(jw_review.parse_bodies(self._bodies(head)), head,
+        c = review.classify(review.parse_bodies(self._bodies(head)), head,
                                macro_reviewers=("gpt-5.5-pro",), approvers=("owner",))
         self.assertTrue(c["pro_result_at_head"])
         self.assertTrue(c["approved_at_head"])
         self.assertTrue(c["findings_resolved"])
         # different head invalidates all three (SHA-binding)
-        c2 = jw_review.classify(jw_review.parse_bodies(self._bodies(head)), "d" * 40,
+        c2 = review.classify(review.parse_bodies(self._bodies(head)), "d" * 40,
                                 macro_reviewers=("gpt-5.5-pro",), approvers=("owner",))
         self.assertFalse(c2["pro_result_at_head"])
         self.assertFalse(c2["approved_at_head"])
@@ -104,39 +104,39 @@ class MarkerTests(unittest.TestCase):
         head = "c" * 40
         mr, ap = ("gpt-5.5-pro",), ("owner",)
         # wrong reviewer
-        c = jw_review.classify(jw_review.parse_bodies(self._bodies(head, reviewer="random-user")), head, macro_reviewers=mr, approvers=ap)
+        c = review.classify(review.parse_bodies(self._bodies(head, reviewer="random-user")), head, macro_reviewers=mr, approvers=ap)
         self.assertFalse(c["pro_result_at_head"])
         # wrong cycle (result for cycle 99, latest is 1)
-        c = jw_review.classify(jw_review.parse_bodies(self._bodies(head, cycle=99)), head, macro_reviewers=mr, approvers=ap)
+        c = review.classify(review.parse_bodies(self._bodies(head, cycle=99)), head, macro_reviewers=mr, approvers=ap)
         self.assertFalse(c["pro_result_at_head"])
         # not-shipped verdict
-        c = jw_review.classify(jw_review.parse_bodies(self._bodies(head, verdict="not-shipped")), head, macro_reviewers=mr, approvers=ap)
+        c = review.classify(review.parse_bodies(self._bodies(head, verdict="not-shipped")), head, macro_reviewers=mr, approvers=ap)
         self.assertFalse(c["pro_result_at_head"])
         # decision required
-        c = jw_review.classify(jw_review.parse_bodies(self._bodies(head, decision=["stop"])), head, macro_reviewers=mr, approvers=ap)
+        c = review.classify(review.parse_bodies(self._bodies(head, decision=["stop"])), head, macro_reviewers=mr, approvers=ap)
         self.assertFalse(c["pro_result_at_head"])
         # approval by untrusted author
-        c = jw_review.classify(jw_review.parse_bodies(self._bodies(head, approver="anyone")), head, macro_reviewers=mr, approvers=ap)
+        c = review.classify(review.parse_bodies(self._bodies(head, approver="anyone")), head, macro_reviewers=mr, approvers=ap)
         self.assertFalse(c["approved_at_head"])
 
     def test_fenced_marker_ignored(self):
         head = "c" * 40
-        fenced = "```yaml\n" + jw_review.emit_marker("approval", {"sha": head, "by": "owner"}) + "\n```"
-        self.assertEqual(jw_review.parse_markers(fenced), [])
-        c = jw_review.classify(jw_review.parse_bodies([{"body": fenced, "author": "owner"}]), head, approvers=("owner",))
+        fenced = "```yaml\n" + review.emit_marker("approval", {"sha": head, "by": "owner"}) + "\n```"
+        self.assertEqual(review.parse_markers(fenced), [])
+        c = review.classify(review.parse_bodies([{"body": fenced, "author": "owner"}]), head, approvers=("owner",))
         self.assertFalse(c["approved_at_head"])
 
     def test_findings_resolved_strict_bool(self):
         # a non-True 'resolved' (e.g. arbitrary string) must not count as resolved
-        m = jw_review.parse_markers(jw_review.emit_marker("findings", {"cycle": 1, "resolved": "maybe"}))
-        c = jw_review.classify([{"_kind": "review-cycle", "cycle": 1, "target_sha": "x"}, *m], "x")
+        m = review.parse_markers(review.emit_marker("findings", {"cycle": 1, "resolved": "maybe"}))
+        c = review.classify([{"_kind": "review-cycle", "cycle": 1, "target_sha": "x"}, *m], "x")
         self.assertFalse(c["findings_resolved"])
 
     def test_ci_strict(self):
         for bad in ("ACTION_REQUIRED", "NEUTRAL", "SKIPPED", "STALE", "WHATEVER"):
-            self.assertEqual(jw_review.ci_state({"checks": [{"conclusion": bad}]}), "failing", bad)
-        self.assertEqual(jw_review.ci_state({"checks": [{"conclusion": "SUCCESS"}]}), "passing")
-        self.assertEqual(jw_review.ci_state({"checks": [{"conclusion": "PENDING"}]}), "pending")
+            self.assertEqual(review.ci_state({"checks": [{"conclusion": bad}]}), "failing", bad)
+        self.assertEqual(review.ci_state({"checks": [{"conclusion": "SUCCESS"}]}), "passing")
+        self.assertEqual(review.ci_state({"checks": [{"conclusion": "PENDING"}]}), "pending")
 
     def _op_bodies(self, head, *, result_author="owner", findings_author="owner",
                    cycle_author="owner", reviewer="gpt-5.5-pro", cycle=1, verdict="shipped",
@@ -144,53 +144,53 @@ class MarkerTests(unittest.TestCase):
         """Bodies where the GitHub author (who POSTED) is distinct from the logical reviewer id —
         the realistic PR-mode case (a human operator posts the macro reviewer's reply)."""
         return [
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": cycle_author, "at": "2026-06-01T00:00:00Z"},
-            {"body": jw_review.emit_marker("review-result", {"reviewer": reviewer, "review_cycle": cycle,
+            {"body": review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": cycle_author, "at": "2026-06-01T00:00:00Z"},
+            {"body": review.emit_marker("review-result", {"reviewer": reviewer, "review_cycle": cycle,
                 "reviewed_sha": head, "verdict": verdict, "decision_required": []}), "author": result_author, "at": "2026-06-01T01:00:00Z"},
-            {"body": jw_review.emit_marker("approval", {"sha": head, "cycle": 1, "by": approver}), "author": approver, "at": "2026-06-01T03:00:00Z"},
-            {"body": jw_review.emit_marker("findings", {"cycle": 1, "resolved": resolved}), "author": findings_author, "at": "2026-06-01T02:00:00Z"},
+            {"body": review.emit_marker("approval", {"sha": head, "cycle": 1, "by": approver}), "author": approver, "at": "2026-06-01T03:00:00Z"},
+            {"body": review.emit_marker("findings", {"cycle": 1, "resolved": resolved}), "author": findings_author, "at": "2026-06-01T02:00:00Z"},
         ]
 
     def test_classify_operator_provenance(self):
         head = "e" * 40
         ops, mr, ap = ("owner",), ("gpt-5.5-pro",), ("owner",)
-        c = jw_review.classify(jw_review.parse_bodies(self._op_bodies(head)), head,
+        c = review.classify(review.parse_bodies(self._op_bodies(head)), head,
                                macro_reviewers=mr, approvers=ap, operators=ops)
         self.assertTrue(c["pro_result_at_head"])
         self.assertTrue(c["findings_resolved"])
         self.assertTrue(c["cycle_fresh"])
         # a non-operator forging the macro result (still claiming reviewer gpt-5.5-pro) is ignored
-        c = jw_review.classify(jw_review.parse_bodies(self._op_bodies(head, result_author="attacker")),
+        c = review.classify(review.parse_bodies(self._op_bodies(head, result_author="attacker")),
                                head, macro_reviewers=mr, approvers=ap, operators=ops)
         self.assertFalse(c["pro_result_at_head"])
         # a non-operator forging findings-resolved is ignored
-        c = jw_review.classify(jw_review.parse_bodies(self._op_bodies(head, findings_author="attacker")),
+        c = review.classify(review.parse_bodies(self._op_bodies(head, findings_author="attacker")),
                                head, macro_reviewers=mr, approvers=ap, operators=ops)
         self.assertFalse(c["findings_resolved"])
         # a non-operator can't hijack the latest cycle with a higher-numbered freeze
         bodies = self._op_bodies(head)
-        bodies.append({"body": jw_review.emit_marker("review-cycle", {"cycle": 9, "target_sha": "f" * 40}),
+        bodies.append({"body": review.emit_marker("review-cycle", {"cycle": 9, "target_sha": "f" * 40}),
                        "author": "attacker"})
-        c = jw_review.classify(jw_review.parse_bodies(bodies), head, macro_reviewers=mr, approvers=ap, operators=ops)
+        c = review.classify(review.parse_bodies(bodies), head, macro_reviewers=mr, approvers=ap, operators=ops)
         self.assertEqual(c["latest_cycle"], 1)
         self.assertTrue(c["cycle_fresh"])
 
     def test_approval_by_must_match_author(self):
         head = "e" * 40
         # an approval whose claimed `by` differs from who actually posted it is rejected
-        bodies = [{"body": jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner"},
-                  {"body": jw_review.emit_marker("approval", {"sha": head, "cycle": 1, "by": "owner"}), "author": "impersonator"}]
-        c = jw_review.classify(jw_review.parse_bodies(bodies), head, approvers=("owner", "impersonator"))
+        bodies = [{"body": review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner"},
+                  {"body": review.emit_marker("approval", {"sha": head, "cycle": 1, "by": "owner"}), "author": "impersonator"}]
+        c = review.classify(review.parse_bodies(bodies), head, approvers=("owner", "impersonator"))
         self.assertFalse(c["approved_at_head"])
 
     def test_cycle_conflict_fails_closed(self):
         head = "e" * 40
         # two operator freeze markers for the same latest cycle, different SHA → not fresh
         bodies = [
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 2, "target_sha": head}), "author": "owner"},
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 2, "target_sha": "f" * 40}), "author": "owner"},
+            {"body": review.emit_marker("review-cycle", {"cycle": 2, "target_sha": head}), "author": "owner"},
+            {"body": review.emit_marker("review-cycle", {"cycle": 2, "target_sha": "f" * 40}), "author": "owner"},
         ]
-        c = jw_review.classify(jw_review.parse_bodies(bodies), head, operators=("owner",))
+        c = review.classify(review.parse_bodies(bodies), head, operators=("owner",))
         self.assertTrue(c["cycle_conflict"])
         self.assertFalse(c["cycle_fresh"])
 
@@ -198,36 +198,36 @@ class MarkerTests(unittest.TestCase):
         head = "e" * 40
         # an earlier resolved:true followed by a later resolved:false must re-block
         bodies = [
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner"},
-            {"body": jw_review.emit_marker("findings", {"cycle": 1, "resolved": True}), "author": "owner", "at": "2026-06-19T01:00:00Z"},
-            {"body": jw_review.emit_marker("findings", {"cycle": 1, "resolved": False}), "author": "owner", "at": "2026-06-19T02:00:00Z"},
+            {"body": review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner"},
+            {"body": review.emit_marker("findings", {"cycle": 1, "resolved": True}), "author": "owner", "at": "2026-06-19T01:00:00Z"},
+            {"body": review.emit_marker("findings", {"cycle": 1, "resolved": False}), "author": "owner", "at": "2026-06-19T02:00:00Z"},
         ]
-        c = jw_review.classify(jw_review.parse_bodies(bodies), head, operators=("owner",))
+        c = review.classify(review.parse_bodies(bodies), head, operators=("owner",))
         self.assertFalse(c["findings_resolved"])
 
     def test_codex_fresh_commit_binding(self):
         head = "a" * 40
         # (1) formal review whose commit_id == head
-        self.assertTrue(jw_review.codex_fresh(
-            [{"author": jw_review.CODEX_BOT, "commit_id": head, "state": "COMMENTED"}], [], head))
+        self.assertTrue(review.codex_fresh(
+            [{"author": review.CODEX_BOT, "commit_id": head, "state": "COMMENTED"}], [], head))
         # a review of a DIFFERENT commit does not count for this head
-        self.assertFalse(jw_review.codex_fresh(
-            [{"author": jw_review.CODEX_BOT, "commit_id": "b" * 40, "state": "COMMENTED"}], [], head))
+        self.assertFalse(review.codex_fresh(
+            [{"author": review.CODEX_BOT, "commit_id": "b" * 40, "state": "COMMENTED"}], [], head))
         # a non-codex author does not count (formal-review path)
-        self.assertFalse(jw_review.codex_fresh(
+        self.assertFalse(review.codex_fresh(
             [{"author": "someone", "commit_id": head, "state": "APPROVED"}], [], head))
         # (2) the connector's no-issue COMMENT naming the head short-SHA counts (real codex path).
         # GraphQL (gh pr view) drops the [bot] suffix — must still match.
         comment = {"author": "chatgpt-codex-connector", "body": f"Codex Review: no issues.\nReviewed commit: `{head[:10]}`"}
-        self.assertTrue(jw_review.codex_fresh([], [comment], head))
+        self.assertTrue(review.codex_fresh([], [comment], head))
         # a codex comment naming a DIFFERENT (old) head does not count
-        stale = {"author": jw_review.CODEX_BOT, "body": "Reviewed commit: `" + ("b" * 10) + "`"}
-        self.assertFalse(jw_review.codex_fresh([], [stale], head))
+        stale = {"author": review.CODEX_BOT, "body": "Reviewed commit: `" + ("b" * 10) + "`"}
+        self.assertFalse(review.codex_fresh([], [stale], head))
         # a non-codex commenter naming the head can't forge it (login is GitHub-verified)
         forged = {"author": "attacker", "body": f"Reviewed commit: `{head[:10]}`"}
-        self.assertFalse(jw_review.codex_fresh([], [forged], head))
+        self.assertFalse(review.codex_fresh([], [forged], head))
         # nothing at all (bare 👍 reaction) → fail-closed
-        self.assertFalse(jw_review.codex_fresh([], [], head))
+        self.assertFalse(review.codex_fresh([], [], head))
 
     def test_file_at_ref_uses_explicit_get(self):
         import base64 as _b64
@@ -237,12 +237,12 @@ class MarkerTests(unittest.TestCase):
             captured["args"] = args
             return (0, _b64.b64encode(b"hello: world\n").decode())
 
-        orig = jw_review._gh
-        jw_review._gh = fake_gh
+        orig = review._gh
+        review._gh = fake_gh
         try:
-            out = jw_review.file_at_ref(Path("/x"), "o/r", "tasks.yaml", "sha123")
+            out = review.file_at_ref(Path("/x"), "o/r", "tasks.yaml", "sha123")
         finally:
-            jw_review._gh = orig
+            review._gh = orig
         self.assertEqual(out, "hello: world\n")
         self.assertIn("--method", captured["args"])
         self.assertEqual(captured["args"][captured["args"].index("--method") + 1], "GET")
@@ -250,36 +250,36 @@ class MarkerTests(unittest.TestCase):
     def test_base_sha_binding(self):
         # B4: a cycle frozen at (head H, base B1) is stale once the base moves to B2
         head = "f" * 40
-        cyc = {"body": jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head, "base_sha": "b1" + "0" * 38}),
+        cyc = {"body": review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head, "base_sha": "b1" + "0" * 38}),
                "author": "owner"}
-        ms = jw_review.parse_bodies([cyc])
-        self.assertTrue(jw_review.classify(ms, head, operators=("owner",), current_base="b1" + "0" * 38)["cycle_fresh"])
-        self.assertFalse(jw_review.classify(ms, head, operators=("owner",), current_base="b2" + "0" * 38)["cycle_fresh"])
+        ms = review.parse_bodies([cyc])
+        self.assertTrue(review.classify(ms, head, operators=("owner",), current_base="b1" + "0" * 38)["cycle_fresh"])
+        self.assertFalse(review.classify(ms, head, operators=("owner",), current_base="b2" + "0" * 38)["cycle_fresh"])
 
     def test_result_uses_latest_not_any(self):
         # B2: a later not-shipped (with a stop decision) cancels an earlier shipped
         head = "c" * 40
         bodies = [
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner"},
-            {"body": jw_review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
+            {"body": review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner"},
+            {"body": review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
                 "reviewed_sha": head, "verdict": "shipped", "decision_required": []}),
              "author": "owner", "at": "2026-06-19T01:00:00Z"},
-            {"body": jw_review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
+            {"body": review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
                 "reviewed_sha": head, "verdict": "not-shipped", "decision_required": ["stop"]}),
              "author": "owner", "at": "2026-06-19T02:00:00Z"},
         ]
-        c = jw_review.classify(jw_review.parse_bodies(bodies), head, macro_reviewers=("gpt-5.5-pro",), operators=("owner",))
+        c = review.classify(review.parse_bodies(bodies), head, macro_reviewers=("gpt-5.5-pro",), operators=("owner",))
         self.assertFalse(c["pro_result_at_head"])
 
     def test_all_macro_reviewers_required(self):
         # B2: with two configured macro reviewers, one passing result is not enough
         head = "c" * 40
         bodies = [
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner"},
-            {"body": jw_review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
+            {"body": review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner"},
+            {"body": review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
                 "reviewed_sha": head, "verdict": "shipped", "decision_required": []}), "author": "owner"},
         ]
-        c = jw_review.classify(jw_review.parse_bodies(bodies), head,
+        c = review.classify(review.parse_bodies(bodies), head,
                                macro_reviewers=("gpt-5.5-pro", "other-reviewer"), operators=("owner",))
         self.assertFalse(c["pro_result_at_head"])  # 'other-reviewer' has no result
 
@@ -287,16 +287,16 @@ class MarkerTests(unittest.TestCase):
         # B3: a Codex signal newer than the findings resolution / approval re-blocks both
         head = "c" * 40
         bodies = [
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner"},
-            {"body": jw_review.emit_marker("findings", {"cycle": 1, "resolved": True}), "author": "owner", "at": "2026-06-19T01:00:00Z"},
-            {"body": jw_review.emit_marker("approval", {"sha": head, "cycle": 1, "by": "owner"}), "author": "owner", "at": "2026-06-19T01:30:00Z"},
+            {"body": review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner"},
+            {"body": review.emit_marker("findings", {"cycle": 1, "resolved": True}), "author": "owner", "at": "2026-06-19T01:00:00Z"},
+            {"body": review.emit_marker("approval", {"sha": head, "cycle": 1, "by": "owner"}), "author": "owner", "at": "2026-06-19T01:30:00Z"},
         ]
-        ms = jw_review.parse_bodies(bodies)
+        ms = review.parse_bodies(bodies)
         # no later codex signal → both hold
-        ok = jw_review.classify(ms, head, approvers=("owner",), operators=("owner",), codex_signal_at=None)
+        ok = review.classify(ms, head, approvers=("owner",), operators=("owner",), codex_signal_at=None)
         self.assertTrue(ok["findings_resolved"]); self.assertTrue(ok["approved_at_head"])
         # a Codex signal at T03:00 (after resolution & approval) → both go stale
-        blocked = jw_review.classify(ms, head, approvers=("owner",), operators=("owner",),
+        blocked = review.classify(ms, head, approvers=("owner",), operators=("owner",),
                                      codex_signal_at="2026-06-19T03:00:00Z")
         self.assertFalse(blocked["findings_resolved"]); self.assertFalse(blocked["approved_at_head"])
 
@@ -305,66 +305,66 @@ class MarkerTests(unittest.TestCase):
         head = "1234567890" + "a" * 30
         neg = {"author": "chatgpt-codex-connector",
                "body": f"Reviewed commit: `deadbeef00`.\nI did NOT review {head[:10]}; rerun required."}
-        self.assertFalse(jw_review.codex_fresh([], [neg], head))
+        self.assertFalse(review.codex_fresh([], [neg], head))
         pos = {"author": "chatgpt-codex-connector", "body": f"**Reviewed commit:** `{head[:10]}`"}
-        self.assertTrue(jw_review.codex_fresh([], [pos], head))
+        self.assertTrue(review.codex_fresh([], [pos], head))
 
     def test_ci_completed_not_passing(self):
         # M7: COMPLETED is a run status, not a success conclusion
-        self.assertEqual(jw_review.ci_state({"checks": [{"conclusion": "COMPLETED"}]}), "failing")
-        self.assertEqual(jw_review.ci_state({"checks": [{"state": "COMPLETED"}]}), "failing")
-        self.assertEqual(jw_review.ci_state({"checks": [{"conclusion": "SUCCESS"}, {"conclusion": "COMPLETED"}]}), "failing")
+        self.assertEqual(review.ci_state({"checks": [{"conclusion": "COMPLETED"}]}), "failing")
+        self.assertEqual(review.ci_state({"checks": [{"state": "COMPLETED"}]}), "failing")
+        self.assertEqual(review.ci_state({"checks": [{"conclusion": "SUCCESS"}, {"conclusion": "COMPLETED"}]}), "failing")
 
     def test_rest_reviews_flattens_slurped_pages(self):
         # M6: --slurp returns an array of per-page arrays; rest_reviews must flatten them
         import json as _json
         pages = [[{"id": 1, "user": {"login": "a"}, "commit_id": "x", "state": "COMMENTED", "submitted_at": "t1"}],
                  [{"id": 2, "user": {"login": "b"}, "commit_id": "y", "state": "APPROVED", "submitted_at": "t2"}]]
-        orig = jw_review._gh
-        jw_review._gh = lambda root, *a: (0, _json.dumps(pages))
+        orig = review._gh
+        review._gh = lambda root, *a: (0, _json.dumps(pages))
         try:
-            out = jw_review.rest_reviews(Path("/x"), "o/r", 5)
+            out = review.rest_reviews(Path("/x"), "o/r", 5)
         finally:
-            jw_review._gh = orig
+            review._gh = orig
         self.assertEqual([r["id"] for r in out], [1, 2])
         self.assertEqual(out[1]["author"], "b")
 
     # ---- v0.2.5: cycle-bound evidence (no reuse across a re-freeze) ----
     def test_old_codex_signal_stale_after_refreeze(self):
         head = "f" * 40
-        reviews = [{"author": jw_review.CODEX_BOT, "commit_id": head, "state": "COMMENTED",
+        reviews = [{"author": review.CODEX_BOT, "commit_id": head, "state": "COMMENTED",
                     "at": "2026-06-19T01:00:00Z", "id": 1}]
-        self.assertTrue(jw_review.codex_fresh(reviews, [], head))  # no freeze gate → counts
+        self.assertTrue(review.codex_fresh(reviews, [], head))  # no freeze gate → counts
         # re-freeze at a later time → the pre-freeze Codex review no longer counts
-        self.assertEqual(jw_review.codex_signals_at_head(reviews, [], head, since_at="2026-06-20T05:00:00Z"), [])
+        self.assertEqual(review.codex_signals_at_head(reviews, [], head, since_at="2026-06-20T05:00:00Z"), [])
 
     def test_old_approval_rejected_for_new_cycle_and_base(self):
         head, B2 = "f" * 40, "b2" + "0" * 38
-        cyc2 = {"body": jw_review.emit_marker("review-cycle", {"cycle": 2, "target_sha": head, "base_sha": B2}),
+        cyc2 = {"body": review.emit_marker("review-cycle", {"cycle": 2, "target_sha": head, "base_sha": B2}),
                 "author": "owner", "at": "2026-06-20T05:00:00Z"}
-        old = {"body": jw_review.emit_marker("approval", {"sha": head, "cycle": 1, "by": "owner"}),
+        old = {"body": review.emit_marker("approval", {"sha": head, "cycle": 1, "by": "owner"}),
                "author": "owner", "at": "2026-06-19T02:00:00Z"}  # cycle 1, no base
-        c = jw_review.classify(jw_review.parse_bodies([cyc2, old]), head,
+        c = review.classify(review.parse_bodies([cyc2, old]), head,
                                approvers=("owner",), operators=("owner",), current_base=B2)
         self.assertFalse(c["approved_at_head"])
         # a fresh approval bound to (cycle 2, head, base B2) is accepted
-        new = {"body": jw_review.emit_marker("approval", {"sha": head, "base_sha": B2, "cycle": 2, "by": "owner"}),
+        new = {"body": review.emit_marker("approval", {"sha": head, "base_sha": B2, "cycle": 2, "by": "owner"}),
                "author": "owner", "at": "2026-06-20T06:00:00Z"}
-        c2 = jw_review.classify(jw_review.parse_bodies([cyc2, new]), head,
+        c2 = review.classify(review.parse_bodies([cyc2, new]), head,
                                 approvers=("owner",), operators=("owner",), current_base=B2)
         self.assertTrue(c2["approved_at_head"])
 
     def test_approval_before_evidence_invalid(self):
         head = "c" * 40
         bodies = [
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner", "at": "2026-06-19T00:00:00Z"},
-            {"body": jw_review.emit_marker("approval", {"sha": head, "cycle": 1, "by": "owner"}),
+            {"body": review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner", "at": "2026-06-19T00:00:00Z"},
+            {"body": review.emit_marker("approval", {"sha": head, "cycle": 1, "by": "owner"}),
              "author": "owner", "at": "2026-06-19T01:00:00Z"},  # approved early
-            {"body": jw_review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
+            {"body": review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
                 "reviewed_sha": head, "verdict": "shipped", "decision_required": []}),
              "author": "owner", "at": "2026-06-19T02:00:00Z"},  # evidence arrived later
         ]
-        c = jw_review.classify(jw_review.parse_bodies(bodies), head,
+        c = review.classify(review.parse_bodies(bodies), head,
                                macro_reviewers=("gpt-5.5-pro",), approvers=("owner",), operators=("owner",))
         self.assertTrue(c["pro_result_at_head"])
         self.assertFalse(c["approved_at_head"])  # approval predates the result it claims to clear
@@ -373,22 +373,22 @@ class MarkerTests(unittest.TestCase):
         head = "c" * 40
         T = "2026-06-20T05:00:00Z"
         bodies = [
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner", "at": "2026-06-19T00:00:00Z"},
-            {"body": jw_review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
+            {"body": review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head}), "author": "owner", "at": "2026-06-19T00:00:00Z"},
+            {"body": review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
                 "reviewed_sha": head, "verdict": "shipped", "decision_required": []}), "author": "owner", "at": T},
-            {"body": jw_review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
+            {"body": review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
                 "reviewed_sha": head, "verdict": "not-shipped", "decision_required": ["stop"]}), "author": "owner", "at": T},
         ]
-        c = jw_review.classify(jw_review.parse_bodies(bodies), head, macro_reviewers=("gpt-5.5-pro",), operators=("owner",))
+        c = review.classify(review.parse_bodies(bodies), head, macro_reviewers=("gpt-5.5-pro",), operators=("owner",))
         self.assertFalse(c["pro_result_at_head"])
 
     def test_base_conflict_same_cycle_fails_closed(self):
         head, B1, B2 = "f" * 40, "b1" + "0" * 38, "b2" + "0" * 38
         bodies = [
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head, "base_sha": B1}), "author": "owner", "at": "2026-06-19T00:00:00Z"},
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head, "base_sha": B2}), "author": "owner", "at": "2026-06-19T00:00:01Z"},
+            {"body": review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head, "base_sha": B1}), "author": "owner", "at": "2026-06-19T00:00:00Z"},
+            {"body": review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head, "base_sha": B2}), "author": "owner", "at": "2026-06-19T00:00:01Z"},
         ]
-        c = jw_review.classify(jw_review.parse_bodies(bodies), head, operators=("owner",), current_base=B2)
+        c = review.classify(review.parse_bodies(bodies), head, operators=("owner",), current_base=B2)
         self.assertTrue(c["cycle_conflict"])
         self.assertFalse(c["cycle_fresh"])
 
@@ -396,17 +396,17 @@ class MarkerTests(unittest.TestCase):
     def test_strict_ordering_equal_timestamp_fails(self):
         head, B, T = "c" * 40, "b" * 40, "2026-06-22T00:00:00Z"
         # a Codex review AT the freeze time is not strictly after → stale
-        revs = [{"author": jw_review.CODEX_BOT, "commit_id": head, "state": "COMMENTED", "at": T, "id": 1}]
-        self.assertEqual(jw_review.codex_signals_at_head(revs, [], head, since_at=T), [])
+        revs = [{"author": review.CODEX_BOT, "commit_id": head, "state": "COMMENTED", "at": T, "id": 1}]
+        self.assertEqual(review.codex_signals_at_head(revs, [], head, since_at=T), [])
         # an approval at the SAME second as its evidence is order-ambiguous → invalid
         bodies = [
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head, "base_sha": B}), "author": "owner", "at": "2026-06-21T00:00:00Z"},
-            {"body": jw_review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
+            {"body": review.emit_marker("review-cycle", {"cycle": 1, "target_sha": head, "base_sha": B}), "author": "owner", "at": "2026-06-21T00:00:00Z"},
+            {"body": review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
                 "reviewed_sha": head, "verdict": "shipped", "decision_required": []}), "author": "owner", "at": T},
-            {"body": jw_review.emit_marker("findings", {"cycle": 1, "resolved": True}), "author": "owner", "at": T},
-            {"body": jw_review.emit_marker("approval", {"sha": head, "base_sha": B, "cycle": 1, "by": "owner"}), "author": "owner", "at": T},
+            {"body": review.emit_marker("findings", {"cycle": 1, "resolved": True}), "author": "owner", "at": T},
+            {"body": review.emit_marker("approval", {"sha": head, "base_sha": B, "cycle": 1, "by": "owner"}), "author": "owner", "at": T},
         ]
-        c = jw_review.classify(jw_review.parse_bodies(bodies), head, macro_reviewers=("gpt-5.5-pro",),
+        c = review.classify(review.parse_bodies(bodies), head, macro_reviewers=("gpt-5.5-pro",),
                                approvers=("owner",), operators=("owner",), current_base=B, codex_signal_at=None)
         self.assertTrue(c["pro_result_at_head"])
         self.assertFalse(c["approved_at_head"])
@@ -414,15 +414,15 @@ class MarkerTests(unittest.TestCase):
     def test_refreeze_same_cycle_advances_boundary(self):
         head, B = "c" * 40, "b" * 40
         bodies = [
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 2, "target_sha": head, "base_sha": B}), "author": "owner", "at": "2026-06-22T00:00:00Z"},
-            {"body": jw_review.emit_marker("review-cycle", {"cycle": 2, "target_sha": head, "base_sha": B}), "author": "owner", "at": "2026-06-22T02:00:00Z"},
+            {"body": review.emit_marker("review-cycle", {"cycle": 2, "target_sha": head, "base_sha": B}), "author": "owner", "at": "2026-06-22T00:00:00Z"},
+            {"body": review.emit_marker("review-cycle", {"cycle": 2, "target_sha": head, "base_sha": B}), "author": "owner", "at": "2026-06-22T02:00:00Z"},
         ]
-        ms = jw_review.parse_bodies(bodies)
-        self.assertEqual(jw_review.latest_cycle(ms, ("owner",))["_at"], "2026-06-22T02:00:00Z")  # later re-freeze wins
+        ms = review.parse_bodies(bodies)
+        self.assertEqual(review.latest_cycle(ms, ("owner",))["_at"], "2026-06-22T02:00:00Z")  # later re-freeze wins
         # a Codex review between the two freezes is stale vs the advanced boundary
-        revs = [{"author": jw_review.CODEX_BOT, "commit_id": head, "state": "COMMENTED", "at": "2026-06-22T01:00:00Z", "id": 1}]
-        self.assertEqual(jw_review.codex_signals_at_head(revs, [], head, since_at="2026-06-22T02:00:00Z"), [])
-        c = jw_review.classify(ms, head, operators=("owner",), current_base=B)
+        revs = [{"author": review.CODEX_BOT, "commit_id": head, "state": "COMMENTED", "at": "2026-06-22T01:00:00Z", "id": 1}]
+        self.assertEqual(review.codex_signals_at_head(revs, [], head, since_at="2026-06-22T02:00:00Z"), [])
+        c = review.classify(ms, head, operators=("owner",), current_base=B)
         self.assertFalse(c["cycle_conflict"])  # same head/base → re-freeze, not a conflict
         self.assertTrue(c["cycle_fresh"])
 
@@ -430,12 +430,12 @@ class MarkerTests(unittest.TestCase):
         import json as _json
         pages = [[{"id": 1, "user": {"login": "a"}, "body": "first", "created_at": "t0", "updated_at": "t0"}],
                  [{"id": 2, "user": {"login": "b"}, "body": "edited later", "created_at": "t0", "updated_at": "t5"}]]
-        orig = jw_review._gh
-        jw_review._gh = lambda root, *a: (0, _json.dumps(pages))
+        orig = review._gh
+        review._gh = lambda root, *a: (0, _json.dumps(pages))
         try:
-            out = jw_review.rest_comments(Path("/x"), "o/r", 9)
+            out = review.rest_comments(Path("/x"), "o/r", 9)
         finally:
-            jw_review._gh = orig
+            review._gh = orig
         self.assertEqual([c["id"] for c in out], [1, 2])           # both pages flattened
         self.assertEqual(out[1]["at"], "t5")                       # effective time = updated_at
 
@@ -446,15 +446,15 @@ class MarkerTests(unittest.TestCase):
                     f"Not reviewed commit: `{head[:10]}`",
                     f"> **Reviewed commit:** `{head[:10]}` stale quote",
                     f"foo reviewed commit:** `{head[:10]}` bar"):
-            self.assertFalse(jw_review.codex_fresh([], [{"author": bot, "body": neg}], head), neg)
-        self.assertTrue(jw_review.codex_fresh([], [{"author": bot, "body": f"**Reviewed commit:** `{head[:10]}`"}], head))
+            self.assertFalse(review.codex_fresh([], [{"author": bot, "body": neg}], head), neg)
+        self.assertTrue(review.codex_fresh([], [{"author": bot, "body": f"**Reviewed commit:** `{head[:10]}`"}], head))
 
     def test_freeze_request_lists_custom_macro_reviewer(self):
         captured = {}
         # freeze reads the BASE policy via pr_context; a custom non-codex reviewer must be prompted
         ctx = {"repo": "o/r", "pr": 3, "head": "a" * 40, "base_sha": "b" * 40, "base": "main",
                "bundle": {"head": "a" * 40, "base_sha": "b" * 40, "bodies": []},
-               "policy": jw_common.normalize_config(
+               "policy": common.normalize_config(
                    {"version": 1, "project": "x", "review": {"mode": "pr", "reviewers": ["codex", "research-auditor"]}})}
 
         def fake_gh(root, *args):
@@ -462,13 +462,13 @@ class MarkerTests(unittest.TestCase):
                 captured["body"] = args[args.index("--body") + 1]
             return (0, "")
 
-        saved = (jw_review.pr_context, jw_review._gh)
-        jw_review.pr_context = lambda root, pr: ctx
-        jw_review._gh = fake_gh
+        saved = (review.pr_context, review._gh)
+        review.pr_context = lambda root, pr: ctx
+        review._gh = fake_gh
         try:
-            jw_review.freeze(Path("/x"), 3, "2026-06-22-r")
+            review.freeze(Path("/x"), 3, "2026-06-22-r")
         finally:
-            jw_review.pr_context, jw_review._gh = saved
+            review.pr_context, review._gh = saved
         self.assertIn("research-auditor", captured.get("body", ""))  # custom reviewer prompted, not name-guessed
         self.assertIn("@codex review", captured["body"])
 
@@ -480,7 +480,7 @@ PASS = dict(cycle_fresh=True, require_ci=True, ci="passing", want_codex=True, co
 
 class MergeGateTests(unittest.TestCase):
     def test_all_pass(self):
-        ok, fails = jw_merge.merge_gate(dict(PASS))
+        ok, fails = merge.merge_gate(dict(PASS))
         self.assertTrue(ok, fails)
         self.assertEqual(fails, [])
 
@@ -494,49 +494,49 @@ class MergeGateTests(unittest.TestCase):
         }
         for key, (val, needle) in cases.items():
             g = dict(PASS); g[key] = val
-            ok, fails = jw_merge.merge_gate(g)
+            ok, fails = merge.merge_gate(g)
             self.assertFalse(ok, key)
             self.assertTrue(any(needle.lower() in f.lower() for f in fails), (key, fails))
 
     def test_ci_only_blocks_when_required(self):
         g = dict(PASS); g["ci"] = "failing"
-        self.assertFalse(jw_merge.merge_gate(g)[0])
+        self.assertFalse(merge.merge_gate(g)[0])
         g["require_ci"] = False
-        self.assertTrue(jw_merge.merge_gate(g)[0])
+        self.assertTrue(merge.merge_gate(g)[0])
         # ci 'none' with require_ci blocks
         g2 = dict(PASS); g2["ci"] = "none"
-        self.assertFalse(jw_merge.merge_gate(g2)[0])
+        self.assertFalse(merge.merge_gate(g2)[0])
 
     def test_blockers_and_decisions_block(self):
         g = dict(PASS); g["open_blockers"] = ["fix/x"]
-        self.assertFalse(jw_merge.merge_gate(g)[0])
+        self.assertFalse(merge.merge_gate(g)[0])
         g = dict(PASS); g["open_decisions"] = ["decision/y"]
-        self.assertFalse(jw_merge.merge_gate(g)[0])
+        self.assertFalse(merge.merge_gate(g)[0])
 
     def test_unpushed_local_head_blocks(self):
         g = dict(PASS); g["remote_contains_head"] = False
-        self.assertFalse(jw_merge.merge_gate(g)[0])
+        self.assertFalse(merge.merge_gate(g)[0])
 
     def test_gate_only_requires_configured_reviewers(self):
         # codex not wanted: a missing/false codex review must not block
         g = dict(PASS); g["want_codex"] = False; g["codex_fresh"] = False; g["findings_resolved"] = False
-        self.assertTrue(jw_merge.merge_gate(g)[0], jw_merge.merge_gate(g)[1])
+        self.assertTrue(merge.merge_gate(g)[0], merge.merge_gate(g)[1])
         # pro not wanted: a missing pro result must not block
         g = dict(PASS); g["want_pro"] = False; g["pro_result_at_head"] = False
-        self.assertTrue(jw_merge.merge_gate(g)[0], jw_merge.merge_gate(g)[1])
+        self.assertTrue(merge.merge_gate(g)[0], merge.merge_gate(g)[1])
         # but when wanted, they still block
         g = dict(PASS); g["want_codex"] = True; g["codex_fresh"] = False
-        self.assertFalse(jw_merge.merge_gate(g)[0])
+        self.assertFalse(merge.merge_gate(g)[0])
 
     def test_pr_state_and_head_read_block(self):
         g = dict(PASS); g["head_read_ok"] = False
-        ok, fails = jw_merge.merge_gate(g)
+        ok, fails = merge.merge_gate(g)
         self.assertFalse(ok); self.assertTrue(any("policy@base" in f or "tasks@head" in f for f in fails))
         for key, val in (("pr_state", "MERGED"), ("is_draft", True)):
             g = dict(PASS); g[key] = val
-            self.assertFalse(jw_merge.merge_gate(g)[0], key)
+            self.assertFalse(merge.merge_gate(g)[0], key)
         g = dict(PASS); g["base"] = "feature"; g["expected_base"] = "main"
-        self.assertFalse(jw_merge.merge_gate(g)[0])
+        self.assertFalse(merge.merge_gate(g)[0])
 
 
 class TasksGateTests(unittest.TestCase):
@@ -548,23 +548,23 @@ class TasksGateTests(unittest.TestCase):
             {"id": "decision/d", "status": "done"},
             {"id": "feat/e", "status": "active"},
         ]}
-        c = jw_merge.tasks_gate_counts(data)
+        c = merge.tasks_gate_counts(data)
         self.assertEqual(c["open_blockers"], ["fix/a"])
         self.assertEqual(c["open_decisions"], ["decision/c"])
 
     def test_defensive_on_malformed(self):
         # a non-list `tasks` must not crash and must not silently report zero open items as valid
         for bad in ({"tasks": "not-a-list"}, {"tasks": 5}, "garbage", None):
-            self.assertEqual(jw_merge.tasks_gate_counts(bad), {"open_blockers": [], "open_decisions": []}, bad)
+            self.assertEqual(merge.tasks_gate_counts(bad), {"open_blockers": [], "open_decisions": []}, bad)
         # such a registry also fails schema validation (the gate's head_read_ok hook)
-        self.assertTrue(jw_validate.validate({"version": 1, "project": "x", "tasks": "not-a-list"}))
+        self.assertTrue(validate.validate({"version": 1, "project": "x", "tasks": "not-a-list"}))
 
     def test_validator_malformed_deps_no_crash(self):
         # M8: a non-list `deps` must be a clean validation error, never a process crash
         for bad in (5, "feat/x", None, {"a": 1}):
             data = {"version": 1, "project": "proj", "tasks": [
                 {"id": "feat/foo", "title": "a properly explained task", "deps": bad}]}
-            errs = jw_validate.validate(data)  # must not raise
+            errs = validate.validate(data)  # must not raise
             if bad is not None:  # None == absent → no deps error
                 self.assertTrue(any("deps" in e for e in errs), bad)
 
@@ -580,12 +580,12 @@ class RemoteTests(unittest.TestCase):
             init_repo(work)
             git(work, "remote", "add", "origin", str(bare))
             git(work, "push", "-q", "-u", "origin", "main")
-            pushed, info = jw_common.head_pushed(work, fetch=True)
+            pushed, info = common.head_pushed(work, fetch=True)
             self.assertTrue(pushed, info)
             # new local commit, not pushed
             (work / "f.txt").write_text("1")
             git(work, "commit", "-aqm", "c1")
-            pushed2, info2 = jw_common.head_pushed(work, fetch=True)
+            pushed2, info2 = common.head_pushed(work, fetch=True)
             self.assertFalse(pushed2, info2)
             self.assertEqual(info2.get("behind"), 0)
 
@@ -593,7 +593,7 @@ class RemoteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             work = Path(d)
             init_repo(work)
-            pushed, info = jw_common.head_pushed(work, fetch=False)
+            pushed, info = common.head_pushed(work, fetch=False)
             self.assertFalse(pushed)
             self.assertIn("reason", info)
 
@@ -607,7 +607,7 @@ class RemoteTests(unittest.TestCase):
             git(work, "push", "-q", "-u", "origin", "main")
             import shutil
             shutil.rmtree(bare)  # remote now unreachable
-            pushed, info = jw_common.head_pushed(work, fetch=True)
+            pushed, info = common.head_pushed(work, fetch=True)
             self.assertFalse(pushed)  # must NOT trust the stale ref
             self.assertIn("fetch failed", info.get("reason", ""))
 
@@ -618,10 +618,10 @@ class ResumeStartHereTests(unittest.TestCase):
     def test_start_here_path_distinct_and_deterministic(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            self.assertEqual(jw_common.start_here_path(root), jw_common.start_here_path(root))  # per-repo stable
-            self.assertNotEqual(jw_common.start_here_path(root), jw_common.resume_path(root))   # vs ephemeral
-            self.assertIn("start_here", str(jw_common.start_here_path(root)))
-            self.assertNotEqual(jw_common.start_here_path(root), jw_common.start_here_path(root / "sub"))
+            self.assertEqual(common.start_here_path(root), common.start_here_path(root))  # per-repo stable
+            self.assertNotEqual(common.start_here_path(root), common.resume_path(root))   # vs ephemeral
+            self.assertIn("start_here", str(common.start_here_path(root)))
+            self.assertNotEqual(common.start_here_path(root), common.start_here_path(root / "sub"))
 
     def _with_home(self, home: Path, fn):
         import os
@@ -648,10 +648,10 @@ class ResumeStartHereTests(unittest.TestCase):
             home.mkdir()
 
             def run():
-                sys.argv = ["jw_resume.py", "--start-here-path", str(root)]
+                sys.argv = ["resume.py", "--start-here-path", str(root)]
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
-                    rc = jw_resume.main()
+                    rc = resume.main()
                 return rc, buf.getvalue().strip()
 
             rc, printed = self._with_home(home, run)
@@ -677,7 +677,7 @@ class ResumeStartHereTests(unittest.TestCase):
 
             def ctx_for(start_here_body: str) -> str:
                 def run():
-                    sh = jw_common.start_here_path(root)
+                    sh = common.start_here_path(root)
                     sh.parent.mkdir(parents=True, exist_ok=True)
                     sh.write_text(start_here_body, encoding="utf-8")
                     sys.argv = ["session_context.py", str(root)]
@@ -702,7 +702,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / ".jahns-workflow.yml").write_text(body)
-            return jw_common.load_config(root)
+            return common.load_config(root)
 
     def test_default_review_mode_packet(self):
         cfg = self._cfg("version: 1\nproject: x\n")
@@ -761,40 +761,40 @@ tasks:
 
 class TextSurgeryTests(unittest.TestCase):
     def test_set_existing_field(self):
-        out = jw_round.set_task_field(TASKS_FIXTURE, "feat/alpha", "status", "done")
+        out = round.set_task_field(TASKS_FIXTURE, "feat/alpha", "status", "done")
         self.assertIn("status: done", out)
         self.assertIn("# registry — comments must be preserved", out)  # comment preserved
         self.assertIn('title: "first task"', out)  # other fields intact
         self.assertEqual(out.count("status: active"), 0)
 
     def test_insert_missing_field(self):
-        out = jw_round.set_task_field(TASKS_FIXTURE, "feat/alpha", "round", "2026-06-19-z")
+        out = round.set_task_field(TASKS_FIXTURE, "feat/alpha", "round", "2026-06-19-z")
         self.assertIn("round: 2026-06-19-z", out)
         # inserted into feat/a block, not gate/b
         a_block = out.split("gate/beta")[0]
         self.assertIn("round: 2026-06-19-z", a_block)
 
     def test_only_targets_named_task(self):
-        out = jw_round.set_task_field(TASKS_FIXTURE, "gate/beta", "status", "done")
+        out = round.set_task_field(TASKS_FIXTURE, "gate/beta", "status", "done")
         self.assertIn("status: active", out)  # feat/a untouched
         self.assertEqual(out.count("status: done"), 1)
 
     def test_missing_task_raises(self):
         with self.assertRaises(KeyError):
-            jw_round.set_task_field(TASKS_FIXTURE, "feat/nope", "status", "done")
+            round.set_task_field(TASKS_FIXTURE, "feat/nope", "status", "done")
 
     def test_set_config_scalar_nested(self):
         cfg = "version: 1\nstate:\n  last_push_commit: null\n  last_round_commit: null\n"
-        out = jw_round.set_config_scalar(cfg, "last_round_commit", "abc123")
+        out = round.set_config_scalar(cfg, "last_round_commit", "abc123")
         self.assertIn("  last_round_commit: abc123", out)
         self.assertIn("  last_push_commit: null", out)  # sibling preserved
         with self.assertRaises(KeyError):
-            jw_round.set_config_scalar(cfg, "nonexistent_key", "v")
+            round.set_config_scalar(cfg, "nonexistent_key", "v")
 
     def test_set_config_scalar_section_exact_child(self):
         # a deeper nested key of the same name must NOT be touched — only the direct child
         cfg = "state:\n  last_round_commit: null\n  nested:\n    last_round_commit: deep\n"
-        out = jw_round.set_config_scalar(cfg, "last_round_commit", "X", section="state")
+        out = round.set_config_scalar(cfg, "last_round_commit", "X", section="state")
         self.assertIn("  last_round_commit: X", out)
         self.assertIn("    last_round_commit: deep", out)
 
@@ -804,12 +804,12 @@ class TextSurgeryTests(unittest.TestCase):
         doc = ("version: 1\nproject: x\ntasks:\n"
                '  - id: feat/alpha\n    title: "base task alpha"\n    status: done\n'
                '  - id: feat/gamma\n    title: "gamma depends on alpha"\n    status: active\n    deps:\n      - feat/alpha\n')
-        out = jw_round.set_task_field(doc, "feat/gamma", "deps", '["feat/alpha"]')
+        out = round.set_task_field(doc, "feat/gamma", "deps", '["feat/alpha"]')
         data = yaml.safe_load(out)  # parses only if the `- feat/alpha` block line was not orphaned
         byid = {t["id"]: t for t in data["tasks"]}
         self.assertEqual(byid["feat/gamma"]["deps"], ["feat/alpha"])
         self.assertNotIn("      - feat/alpha", out)
-        self.assertEqual(jw_validate.validate(data), [])
+        self.assertEqual(validate.validate(data), [])
 
 
 class NextActionableTests(unittest.TestCase):
@@ -821,7 +821,7 @@ class NextActionableTests(unittest.TestCase):
             {"id": "feat/d", "title": "D", "status": "active", "deps": []},
             {"id": "gate/e", "title": "E", "status": "blocked", "deps": ["feat/a"]},  # stale-blocked
         ]}
-        got = dict(jw_common.next_actionable(data))
+        got = dict(common.next_actionable(data))
         self.assertIn("feat/b", got)   # dep a done
         self.assertIn("feat/d", got)   # no deps
         self.assertIn("gate/e", got)   # stale-blocked: dep a done → actionable now
@@ -837,12 +837,12 @@ class LaneTests(unittest.TestCase):
             base = git(root, "rev-parse", "HEAD").stdout.strip()
             git(root, "checkout", "-q", "-b", "feat/foo")
             (root / "g.txt").write_text("1"); git(root, "add", "-A"); git(root, "commit", "-qm", "c1")
-            self.assertEqual(jw_lanes.check_lane(root, "feat/foo", {"branch": "feat/foo", "base_sha": base}), [])
+            self.assertEqual(lanes.check_lane(root, "feat/foo", {"branch": "feat/foo", "base_sha": base}), [])
             # a base the branch does NOT contain: make an unrelated commit on a sibling branch
             git(root, "checkout", "-q", "main")
             (root / "h.txt").write_text("2"); git(root, "add", "-A"); git(root, "commit", "-qm", "sib")
             sib = git(root, "rev-parse", "HEAD").stdout.strip()
-            fails = jw_lanes.check_lane(root, "feat/foo", {"branch": "feat/foo", "base_sha": sib})
+            fails = lanes.check_lane(root, "feat/foo", {"branch": "feat/foo", "base_sha": sib})
             self.assertTrue(fails and "does NOT contain" in fails[0])
 
     def test_missing_branch(self):
@@ -850,7 +850,7 @@ class LaneTests(unittest.TestCase):
             root = Path(d)
             init_repo(root)
             base = git(root, "rev-parse", "HEAD").stdout.strip()
-            fails = jw_lanes.check_lane(root, "t", {"branch": "no/such", "base_sha": base})
+            fails = lanes.check_lane(root, "t", {"branch": "no/such", "base_sha": base})
             self.assertTrue(fails and "does not exist" in fails[0])
 
     def test_done_lane_with_deleted_branch_not_verified(self):
@@ -862,7 +862,7 @@ class LaneTests(unittest.TestCase):
                 "version: 1\nproject: x\ntasks:\n"
                 "  - id: feat/old-lane\n    title: 'a merged & cleaned-up lane'\n    status: done\n"
                 "    lane:\n      branch: deleted/gone\n      base_sha: deadbeef\n")
-            self.assertEqual(jw_lanes.verify(root), 0)  # done lane skipped, not a permanent failure
+            self.assertEqual(lanes.verify(root), 0)  # done lane skipped, not a permanent failure
 
 
 class RoundCloseTests(unittest.TestCase):
@@ -874,7 +874,7 @@ class RoundCloseTests(unittest.TestCase):
                 "version: 1\nproject: x\nstate:\n  last_round_commit: null\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             git(root, "add", "-A"); git(root, "commit", "-qm", "setup")
-            rc = jw_round.close(root, "2026-06-19-z", done=["feat/alpha"], touched=["gate/beta"], commit="HEAD")
+            rc = round.close(root, "2026-06-19-z", done=["feat/alpha"], touched=["gate/beta"], commit="HEAD")
             self.assertEqual(rc, 0)
             txt = (root / "tasks.yaml").read_text()
             # feat/a flipped to done and stamped
@@ -902,7 +902,7 @@ class RoundCloseTests(unittest.TestCase):
             root = Path(d)
             self._setup(root, "version: 1\nproject: x\n")  # no state.last_round_commit
             before = (root / "tasks.yaml").read_text()
-            rc = jw_round.close(root, "2026-06-19-z", done=["feat/alpha"], touched=[], commit="HEAD")
+            rc = round.close(root, "2026-06-19-z", done=["feat/alpha"], touched=[], commit="HEAD")
             self.assertEqual(rc, 1)
             self.assertEqual((root / "tasks.yaml").read_text(), before)  # nothing written
             self.assertFalse((root / "ROADMAP.md").exists())
@@ -912,7 +912,7 @@ class RoundCloseTests(unittest.TestCase):
             root = Path(d)
             self._setup(root, "version: 1\nproject: x\nstate:\n  last_round_commit: null\n")
             before = (root / "tasks.yaml").read_text()
-            rc = jw_round.close(root, "2026-06-19-z", done=["feat/alpha"], touched=[], commit="nope-not-a-ref")
+            rc = round.close(root, "2026-06-19-z", done=["feat/alpha"], touched=[], commit="nope-not-a-ref")
             self.assertEqual(rc, 1)
             self.assertEqual((root / "tasks.yaml").read_text(), before)
 
@@ -922,7 +922,7 @@ class RoundCloseTests(unittest.TestCase):
             self._setup(root, "version: 1\nproject: x\nstate:\n  last_round_commit: null\n")
             before = (root / "tasks.yaml").read_text()
             # gate/beta depends on feat/alpha (active) — closing gate/beta as done must fail
-            rc = jw_round.close(root, "2026-06-19-z", done=["gate/beta"], touched=[], commit="HEAD")
+            rc = round.close(root, "2026-06-19-z", done=["gate/beta"], touched=[], commit="HEAD")
             self.assertEqual(rc, 1)
             self.assertEqual((root / "tasks.yaml").read_text(), before)
 
@@ -932,12 +932,12 @@ class RoundCloseTests(unittest.TestCase):
             self._setup(root, "version: 1\nproject: x\nstate:\n  last_round_commit: null\n")
             # closing a dependency (feat/alpha) and its dependent (gate/beta) in ONE round is valid:
             # the dep is done in the final state
-            rc = jw_round.close(root, "2026-06-19-z", done=["feat/alpha", "gate/beta"], touched=[], commit="HEAD")
+            rc = round.close(root, "2026-06-19-z", done=["feat/alpha", "gate/beta"], touched=[], commit="HEAD")
             self.assertEqual(rc, 0)
             self.assertEqual((root / "tasks.yaml").read_text().count("status: done"), 2)
 
     def test_close_rolls_back_on_render_failure(self):
-        import jw_roadmap
+        import roadmap
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             self._setup(root, "version: 1\nproject: x\nstate:\n  last_round_commit: null\n")
@@ -947,12 +947,12 @@ class RoundCloseTests(unittest.TestCase):
             def boom(_root):
                 raise RuntimeError("render exploded mid-commit")
 
-            orig = jw_roadmap.render
-            jw_roadmap.render = boom
+            orig = roadmap.render
+            roadmap.render = boom
             try:
-                rc = jw_round.close(root, "2026-06-19-z", done=["feat/alpha"], touched=["gate/beta"], commit="HEAD")
+                rc = round.close(root, "2026-06-19-z", done=["feat/alpha"], touched=["gate/beta"], commit="HEAD")
             finally:
-                jw_roadmap.render = orig
+                roadmap.render = orig
             self.assertEqual(rc, 1)
             # primary files restored; ROADMAP not left behind
             self.assertEqual((root / "tasks.yaml").read_text(), before_tasks)
@@ -960,7 +960,7 @@ class RoundCloseTests(unittest.TestCase):
             self.assertFalse((root / "ROADMAP.md").exists())
 
     def test_close_restores_generated_ssot_on_digest_failure(self):
-        import jw_ssot
+        import ssot
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             init_repo(root)
@@ -970,7 +970,7 @@ class RoundCloseTests(unittest.TestCase):
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             (root / "SSOT.md").write_text("# Title\n\n## A\nalpha\n\n## B\nbeta\n")
             git(root, "add", "-A"); git(root, "commit", "-qm", "setup")
-            jw_ssot.regenerate(root)
+            ssot.regenerate(root)
             gen = root / "docs/ssot"
             v1_hash = (gen / ".hash").read_text()
             v1_digest = (gen / "DIGEST.md").read_text()
@@ -981,12 +981,12 @@ class RoundCloseTests(unittest.TestCase):
             def boom(_root):
                 raise RuntimeError("SSOT regen exploded mid-commit")
 
-            orig = jw_ssot.regenerate
-            jw_ssot.regenerate = boom
+            orig = ssot.regenerate
+            ssot.regenerate = boom
             try:
-                rc = jw_round.close(root, "2026-06-19-z", done=["feat/alpha"], touched=[], commit="HEAD")
+                rc = round.close(root, "2026-06-19-z", done=["feat/alpha"], touched=[], commit="HEAD")
             finally:
-                jw_ssot.regenerate = orig
+                ssot.regenerate = orig
             self.assertEqual(rc, 1)
             # generated dir fully rolled back: split/.hash/DIGEST all consistent at v1
             self.assertEqual((gen / ".hash").read_text(), v1_hash)
@@ -1014,19 +1014,19 @@ class BasePolicyTests(unittest.TestCase):
                 return STRICT_BASE if ref == bundle["base_sha"] else RELAXED_HEAD
             return TASKS  # tasks.yaml @ head
 
-        saved = (jw_review.resolve_repo, jw_review.pr_bundle, jw_review.file_at_ref, jw_review._gh)
-        jw_review.resolve_repo = lambda root: "owner/repo"
-        jw_review.pr_bundle = lambda root, pr, repo=None: bundle
-        jw_review.file_at_ref = fake_file_at_ref
-        jw_review._gh = lambda root, *a: (0, "main")
+        saved = (review.resolve_repo, review.pr_bundle, review.file_at_ref, review._gh)
+        review.resolve_repo = lambda root: "owner/repo"
+        review.pr_bundle = lambda root, pr, repo=None: bundle
+        review.file_at_ref = fake_file_at_ref
+        review._gh = lambda root, *a: (0, "main")
         try:
             with tempfile.TemporaryDirectory() as d:
                 # a local config must exist for the load_config fallback; the gate must ignore it
                 # in favour of the base-SHA policy
                 (Path(d) / ".jahns-workflow.yml").write_text("version: 1\nproject: x\nreview:\n  mode: pr\n")
-                g = jw_merge._gather(Path(d), 7)
+                g = merge._gather(Path(d), 7)
         finally:
-            jw_review.resolve_repo, jw_review.pr_bundle, jw_review.file_at_ref, jw_review._gh = saved
+            review.resolve_repo, review.pr_bundle, review.file_at_ref, review._gh = saved
         # policy taken from the STRICT base, not the RELAXED head
         self.assertTrue(g["head_read_ok"])
         self.assertTrue(g["require_ci"])   # base = true (head said false)
@@ -1043,18 +1043,18 @@ class BasePolicyTests(unittest.TestCase):
                 "  require_ci: false\n  operators: [owner]\n  approvers: [owner]\n")
         bundle = {"head": "H" * 40, "base_sha": "B" * 40, "bodies": [], "reviews": [], "checks": [],
                   "merge_state": "", "state": "OPEN", "is_draft": False, "base": "main", "head_ref": "feat/x"}
-        saved = (jw_review.resolve_repo, jw_review.pr_bundle, jw_review.file_at_ref, jw_review._gh)
-        jw_review.resolve_repo = lambda root: "owner/repo"
-        jw_review.pr_bundle = lambda root, pr, repo=None: bundle
-        jw_review.file_at_ref = lambda root, repo, path, ref: (BASE if path == ".jahns-workflow.yml"
+        saved = (review.resolve_repo, review.pr_bundle, review.file_at_ref, review._gh)
+        review.resolve_repo = lambda root: "owner/repo"
+        review.pr_bundle = lambda root, pr, repo=None: bundle
+        review.file_at_ref = lambda root, repo, path, ref: (BASE if path == ".jahns-workflow.yml"
                                                                else "version: 1\nproject: x\ntasks: []\n")
-        jw_review._gh = lambda root, *a: (0, "main")
+        review._gh = lambda root, *a: (0, "main")
         try:
             with tempfile.TemporaryDirectory() as d:
                 (Path(d) / ".jahns-workflow.yml").write_text("version: 1\nproject: x\nreview:\n  mode: pr\n")
-                g = jw_merge._gather(Path(d), 7)
+                g = merge._gather(Path(d), 7)
         finally:
-            jw_review.resolve_repo, jw_review.pr_bundle, jw_review.file_at_ref, jw_review._gh = saved
+            review.resolve_repo, review.pr_bundle, review.file_at_ref, review._gh = saved
         self.assertTrue(g["want_pro"])  # research-auditor must be required, not name-guessed away
 
 
@@ -1071,7 +1071,7 @@ class IngestTests(unittest.TestCase):
             # tricky bytes: CRLF, trailing spaces, multibyte utf-8, NO final newline
             body = "## Review\r\n  trailing   \nutf8: é한\nno final newline".encode("utf-8")
             src.write_bytes(body)
-            rc = jw_review.ingest(root, "2026-06-22-x", src=src, reviewer="gpt-5.5-pro")
+            rc = review.ingest(root, "2026-06-22-x", src=src, reviewer="gpt-5.5-pro")
             self.assertEqual(rc, 0)
             dest = root / "docs/reviews/2026-06-22-x-feedback.md"
             content = dest.read_bytes()
@@ -1085,13 +1085,13 @@ class IngestTests(unittest.TestCase):
     def test_missing_inbox_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:
             root = self._root(d)
-            self.assertEqual(jw_review.ingest(root, "2026-06-22-x", src=root / "nope.md"), 1)
+            self.assertEqual(review.ingest(root, "2026-06-22-x", src=root / "nope.md"), 1)
 
     def test_empty_inbox_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:
             root = self._root(d)
             src = root / "inbox.md"; src.write_bytes(b"   \n\n")
-            self.assertEqual(jw_review.ingest(root, "2026-06-22-x", src=src), 1)
+            self.assertEqual(review.ingest(root, "2026-06-22-x", src=src), 1)
             self.assertTrue(src.exists())  # not consumed on failure
 
     def test_round_inferred_from_request(self):
@@ -1100,7 +1100,7 @@ class IngestTests(unittest.TestCase):
             rdir = root / "docs/reviews"; rdir.mkdir(parents=True)
             (rdir / "2026-06-20-a-request.md").write_text("req")
             src = root / "inbox.md"; src.write_bytes(b"review body")
-            self.assertEqual(jw_review.ingest(root, None, src=src), 0)
+            self.assertEqual(review.ingest(root, None, src=src), 0)
             self.assertTrue((rdir / "2026-06-20-a-feedback.md").is_file())
 
     def test_warn_failure_is_noticed_without_changing_ingest_exit(self):
@@ -1110,15 +1110,15 @@ class IngestTests(unittest.TestCase):
             root = self._root(d)
             src = root / "inbox.md"
             src.write_bytes(b"review body")
-            orig = jw_overlay.evaluate_boundary
-            jw_overlay.evaluate_boundary = lambda *a, **k: (_ for _ in ()).throw(
+            orig = overlay.evaluate_boundary
+            overlay.evaluate_boundary = lambda *a, **k: (_ for _ in ()).throw(
                 RuntimeError("synthetic warn crash"))
             err = io.StringIO()
             try:
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-                    rc = jw_review.ingest(root, "2026-06-22-x", src=src)
+                    rc = review.ingest(root, "2026-06-22-x", src=src)
             finally:
-                jw_overlay.evaluate_boundary = orig
+                overlay.evaluate_boundary = orig
             self.assertEqual(rc, 0)
             self.assertIn("overlay warning", err.getvalue())
             self.assertIn("synthetic warn crash", err.getvalue())
@@ -1133,34 +1133,34 @@ class FrozenAcceptanceTests(unittest.TestCase):
         f = {"cycle": 1, "target_sha": self.HEAD}
         if base:
             f["base_sha"] = base
-        return {"body": jw_review.emit_marker("review-cycle", f), "author": "owner", "at": at}
+        return {"body": review.emit_marker("review-cycle", f), "author": "owner", "at": at}
 
     # ---- A: PR review protocol reducer ----
     def test_a1_macro_result_before_freeze_rejected(self):
         bodies = [
-            {"body": jw_review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
+            {"body": review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
                 "reviewed_sha": self.HEAD, "verdict": "shipped", "decision_required": []}),
              "author": "owner", "at": "2026-06-20T00:00:00Z"},
             self._cycle("2026-06-20T02:00:00Z", self.BASE),  # freeze AFTER the result
         ]
-        c = jw_review.classify(jw_review.parse_bodies(bodies), self.HEAD,
+        c = review.classify(review.parse_bodies(bodies), self.HEAD,
                                macro_reviewers=("gpt-5.5-pro",), operators=("owner",), current_base=self.BASE)
         self.assertFalse(c["pro_result_at_head"])
 
     def test_a1_approval_before_freeze_rejected(self):
         bodies = [
-            {"body": jw_review.emit_marker("approval", {"sha": self.HEAD, "base_sha": self.BASE, "cycle": 1, "by": "owner"}),
+            {"body": review.emit_marker("approval", {"sha": self.HEAD, "base_sha": self.BASE, "cycle": 1, "by": "owner"}),
              "author": "owner", "at": "2026-06-20T00:00:00Z"},
             self._cycle("2026-06-20T02:00:00Z", self.BASE),  # freeze AFTER the approval
         ]
-        c = jw_review.classify(jw_review.parse_bodies(bodies), self.HEAD,
+        c = review.classify(review.parse_bodies(bodies), self.HEAD,
                                approvers=("owner",), operators=("owner",), current_base=self.BASE)
         self.assertFalse(c["approved_at_head"])
 
     def test_a2_typed_marker_round_trip(self):
-        s = jw_review.emit_marker("review-result", {"reviewer": "r", "review_cycle": 2, "reviewed_sha": self.HEAD,
+        s = review.emit_marker("review-result", {"reviewer": "r", "review_cycle": 2, "reviewed_sha": self.HEAD,
                                                     "verdict": "shipped", "decision_required": ["D-1", "D-2"]})
-        m = jw_review.parse_markers(s)[0]
+        m = review.parse_markers(s)[0]
         self.assertEqual(m["review_cycle"], 2)
         self.assertEqual(m["decision_required"], ["D-1", "D-2"])  # a real list, not "D-1, D-2"
 
@@ -1175,13 +1175,13 @@ class FrozenAcceptanceTests(unittest.TestCase):
             {"_kind": "approval", "sha": self.HEAD, "cycle": 1, "by": ""},              # empty by
         ]
         for m in bad:
-            self.assertFalse(jw_review.marker_valid(m), m)
-        self.assertTrue(jw_review.marker_valid(
+            self.assertFalse(review.marker_valid(m), m)
+        self.assertTrue(review.marker_valid(
             {"_kind": "findings", "cycle": 1, "resolved": True}))  # the well-typed control
 
     def test_a3_pending_review_body_not_parsed_as_marker(self):
         import json as _json
-        marker = jw_review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
+        marker = review.emit_marker("review-result", {"reviewer": "gpt-5.5-pro", "review_cycle": 1,
             "reviewed_sha": self.HEAD, "verdict": "shipped", "decision_required": []})
 
         def fake_gh(root, *args):
@@ -1197,32 +1197,32 @@ class FrozenAcceptanceTests(unittest.TestCase):
                     "state": "PENDING", "commit_id": self.HEAD, "submitted_at": ""}]]))
             return (0, "o/r")
 
-        orig = jw_review._gh
-        jw_review._gh = fake_gh
+        orig = review._gh
+        review._gh = fake_gh
         try:
-            bundle = jw_review.pr_bundle(Path("/x"), 1, "o/r")
+            bundle = review.pr_bundle(Path("/x"), 1, "o/r")
         finally:
-            jw_review._gh = orig
+            review._gh = orig
         self.assertNotIn(marker, [b["body"] for b in bundle["bodies"]])  # review body is NOT a marker source
-        self.assertEqual(jw_review.parse_bodies(bundle["bodies"]), [])
+        self.assertEqual(review.parse_bodies(bundle["bodies"]), [])
 
     def test_a4_base_packet_policy_blocks_local_pr(self):
         BASE_PACKET = "version: 1\nproject: x\nreview:\n  mode: packet\n  reviewers: []\n"
         bundle = {"head": self.HEAD, "base_sha": self.BASE, "bodies": [], "reviews": [], "checks": [],
                   "merge_state": "", "state": "OPEN", "is_draft": False, "base": "main", "head_ref": "x"}
-        saved = (jw_review.resolve_repo, jw_review.pr_bundle, jw_review.file_at_ref, jw_review._gh)
-        jw_review.resolve_repo = lambda root: "owner/repo"
-        jw_review.pr_bundle = lambda root, pr, repo=None: bundle
-        jw_review.file_at_ref = lambda root, repo, path, ref: (BASE_PACKET if path == ".jahns-workflow.yml"
+        saved = (review.resolve_repo, review.pr_bundle, review.file_at_ref, review._gh)
+        review.resolve_repo = lambda root: "owner/repo"
+        review.pr_bundle = lambda root, pr, repo=None: bundle
+        review.file_at_ref = lambda root, repo, path, ref: (BASE_PACKET if path == ".jahns-workflow.yml"
                                                                else "version: 1\nproject: x\ntasks: []\n")
-        jw_review._gh = lambda root, *a: (0, "main")
+        review._gh = lambda root, *a: (0, "main")
         try:
             with tempfile.TemporaryDirectory() as d:
                 # local config says pr — but the BASE policy (packet) is authoritative
                 (Path(d) / ".jahns-workflow.yml").write_text("version: 1\nproject: x\nreview:\n  mode: pr\n")
-                g = jw_merge._gather(Path(d), 7)
+                g = merge._gather(Path(d), 7)
         finally:
-            jw_review.resolve_repo, jw_review.pr_bundle, jw_review.file_at_ref, jw_review._gh = saved
+            review.resolve_repo, review.pr_bundle, review.file_at_ref, review._gh = saved
         self.assertEqual(g["policy_mode"], "packet")
         self.assertFalse(g["want_codex"])
         self.assertFalse(g["want_pro"])  # base packet/empty reviewers — local pr can't add reviewers
@@ -1231,53 +1231,53 @@ class FrozenAcceptanceTests(unittest.TestCase):
     def test_b1_decoy_task_outside_tasks_untouched(self):
         doc = ("metadata:\n  - id: feat/alpha\n    status: active\n"
                "tasks:\n  - id: feat/alpha\n    title: the real alpha task\n    status: active\n")
-        out = jw_round.set_task_field(doc, "feat/alpha", "status", "done")
+        out = round.set_task_field(doc, "feat/alpha", "status", "done")
         self.assertIn("metadata:\n  - id: feat/alpha\n    status: active", out)  # decoy untouched
         self.assertIn("    title: the real alpha task\n    status: done", out)   # real one edited
 
     def test_b1_duplicate_task_id_fails_closed(self):
         doc = "tasks:\n  - id: feat/x\n    status: active\n  - id: feat/x\n    status: active\n"
-        with self.assertRaises(jw_common.WorkflowError):
-            jw_round.set_task_field(doc, "feat/x", "status", "done")
+        with self.assertRaises(common.WorkflowError):
+            round.set_task_field(doc, "feat/x", "status", "done")
 
     def test_b2_nested_state_not_mistaken_for_top_level(self):
         cfg = "foo:\n  state:\n    last_round_commit: decoy\nstate:\n  last_round_commit: real\n"
-        out = jw_round.set_config_scalar(cfg, "last_round_commit", "NEW", section="state")
+        out = round.set_config_scalar(cfg, "last_round_commit", "NEW", section="state")
         self.assertIn("    last_round_commit: decoy", out)  # nested decoy untouched
         self.assertIn("\nstate:\n  last_round_commit: NEW", out)  # top-level edited
 
     # ---- C: closeout transaction / generated-view validation ----
     def test_c1_library_raises_workflowerror_not_systemexit(self):
-        import jw_ssot
+        import ssot
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\nssot: missing.md\n")
-            with self.assertRaises(jw_common.WorkflowError):  # NOT SystemExit (which slips rollbacks)
-                jw_ssot.regenerate(root)
+            with self.assertRaises(common.WorkflowError):  # NOT SystemExit (which slips rollbacks)
+                ssot.regenerate(root)
 
     def test_c2_check_detects_missing_and_extra_views(self):
-        import jw_ssot
+        import ssot
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / ".jahns-workflow.yml").write_text(
                 "version: 1\nproject: x\nssot: S.md\ngenerated_dir: docs/ssot\n")
             (root / "S.md").write_text("# T\n\n## A\nalpha\n")
-            jw_ssot.regenerate(root)
-            self.assertEqual(jw_ssot.check(root), 0)
+            ssot.regenerate(root)
+            self.assertEqual(ssot.check(root), 0)
             (root / "docs/ssot/DIGEST.md").unlink()            # missing view
-            self.assertEqual(jw_ssot.check(root), 3)
-            jw_ssot.regenerate(root)
+            self.assertEqual(ssot.check(root), 3)
+            ssot.regenerate(root)
             (root / "docs/ssot/sections/99-stale.md").write_text("stale")  # extra section
-            self.assertEqual(jw_ssot.check(root), 3)
+            self.assertEqual(ssot.check(root), 3)
 
     def test_c3_non_string_and_duplicate_deps_rejected(self):
         base = {"version": 1, "project": "p", "tasks": [
             {"id": "feat/foo", "title": "a properly explained task", "deps": [123]}]}
-        self.assertTrue(any("dep" in e for e in jw_validate.validate(base)))
+        self.assertTrue(any("dep" in e for e in validate.validate(base)))
         dup = {"version": 1, "project": "p", "tasks": [
             {"id": "feat/bar", "title": "another explained task", "deps": ["feat/foo", "feat/foo"]},
             {"id": "feat/foo", "title": "a properly explained task"}]}
-        self.assertTrue(any("duplicate dep" in e for e in jw_validate.validate(dup)))
+        self.assertTrue(any("duplicate dep" in e for e in validate.validate(dup)))
 
 
 class IntegrationSmokeTests(unittest.TestCase):
@@ -1315,7 +1315,7 @@ class IntegrationSmokeTests(unittest.TestCase):
     def test_full_lifecycle_pass_then_refreeze_stale(self):
         import contextlib
         import io
-        mk = jw_review.emit_marker
+        mk = review.emit_marker
         comments = [
             {"id": 1, "user": {"login": "owner"}, "updated_at": "2026-06-22T01:00:00Z",
              "body": mk("review-cycle", {"cycle": 1, "target_sha": self.HEAD, "base_sha": self.BASE})},
@@ -1330,21 +1330,21 @@ class IntegrationSmokeTests(unittest.TestCase):
         reviews = [{"id": 9, "user": {"login": self.CODEX}, "body": "", "state": "COMMENTED",
                     "commit_id": self.HEAD, "submitted_at": "2026-06-22T02:00:00Z"}]  # after freeze, at head
 
-        orig = jw_review._gh
-        jw_review._gh = self._gh(comments, reviews)
+        orig = review._gh
+        review._gh = self._gh(comments, reviews)
         try:
             with tempfile.TemporaryDirectory() as d:
                 (Path(d) / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
                 root = Path(d)
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    rc_pass = jw_merge.merge(root, 7, execute=False, method=None)
+                    rc_pass = merge.merge(root, 7, execute=False, method=None)
                     # re-freeze cycle 2 (same head/base, later) — every cycle-1 evidence must go stale
                     comments.append({"id": 5, "user": {"login": "owner"}, "updated_at": "2026-06-22T06:00:00Z",
                         "body": mk("review-cycle", {"cycle": 2, "target_sha": self.HEAD, "base_sha": self.BASE})})
-                    jw_review._gh = self._gh(comments, reviews)
-                    rc_stale = jw_merge.merge(root, 7, execute=False, method=None)
+                    review._gh = self._gh(comments, reviews)
+                    rc_stale = merge.merge(root, 7, execute=False, method=None)
         finally:
-            jw_review._gh = orig
+            review._gh = orig
         self.assertEqual(rc_pass, 0)    # full lifecycle → gate PASS (dry run)
         self.assertEqual(rc_stale, 3)   # after re-freeze, cycle-1 evidence is stale → BLOCKED
 
@@ -1356,29 +1356,29 @@ class TaskCliTests(unittest.TestCase):
             {"id": "fix/b", "title": "beta fix here", "status": "done"},
             {"id": "feat/c", "title": "gamma task here", "status": "pending"},
         ]}
-        self.assertEqual(len(jw_tasks.render_list(data)), 3)
-        active = jw_tasks.render_list(data, status="active")
+        self.assertEqual(len(tasks.render_list(data)), 3)
+        active = tasks.render_list(data, status="active")
         self.assertEqual(len(active), 1)
         self.assertIn("feat/a", active[0])
-        feats = jw_tasks.render_list(data, type_="feat")
+        feats = tasks.render_list(data, type_="feat")
         self.assertEqual({ln.split()[0] for ln in feats}, {"feat/a", "feat/c"})
 
     def test_show_missing_raises(self):
         with self.assertRaises(KeyError):
-            jw_tasks.render_show({"tasks": []}, "feat/x")
+            tasks.render_show({"tasks": []}, "feat/x")
 
     def test_show_returns_record(self):
         data = {"tasks": [{"id": "feat/a", "title": "alpha task here", "status": "active"}]}
-        out = jw_tasks.render_show(data, "feat/a")
+        out = tasks.render_show(data, "feat/a")
         self.assertIn("feat/a", out)
         self.assertIn("alpha task here", out)
 
     def test_add_appends_valid_block(self):
-        out = jw_tasks.append_task_block(TASKS_FIXTURE, {
+        out = tasks.append_task_block(TASKS_FIXTURE, {
             "id": "fix/gamma", "title": "a newly registered fix", "status": "pending",
             "severity": "major", "deps": ["feat/alpha"]})
         data = yaml.safe_load(out)
-        self.assertEqual(jw_validate.validate(data), [])
+        self.assertEqual(validate.validate(data), [])
         self.assertIn("# registry — comments must be preserved", out)  # comment preserved
         self.assertEqual([t["id"] for t in data["tasks"]], ["feat/alpha", "gate/beta", "fix/gamma"])
         g = next(t for t in data["tasks"] if t["id"] == "fix/gamma")
@@ -1386,10 +1386,10 @@ class TaskCliTests(unittest.TestCase):
         self.assertEqual(g["deps"], ["feat/alpha"])
 
     def test_add_into_empty_tasks(self):
-        out = jw_tasks.append_task_block(
+        out = tasks.append_task_block(
             "version: 1\nproject: x\ntasks: []\n", {"id": "feat/first", "title": "the very first task"})
         data = yaml.safe_load(out)
-        self.assertEqual(jw_validate.validate(data), [])
+        self.assertEqual(validate.validate(data), [])
         self.assertEqual([t["id"] for t in data["tasks"]], ["feat/first"])
 
     def test_main_add_set_drop_end_to_end(self):
@@ -1397,14 +1397,14 @@ class TaskCliTests(unittest.TestCase):
             root = Path(d)
             (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
-            self.assertEqual(jw_tasks.main(["add", "fix/new", str(root), "--title", "a brand new fix task"]), 0)
-            self.assertEqual(jw_tasks.main(["set", "fix/new", "status", "active", str(root)]), 0)
-            self.assertEqual(jw_tasks.main(["drop", "gate/beta", str(root)]), 0)
+            self.assertEqual(tasks.main(["add", "fix/new", str(root), "--title", "a brand new fix task"]), 0)
+            self.assertEqual(tasks.main(["set", "fix/new", "status", "active", str(root)]), 0)
+            self.assertEqual(tasks.main(["drop", "gate/beta", str(root)]), 0)
             data = yaml.safe_load((root / "tasks.yaml").read_text())
             byid = {t["id"]: t for t in data["tasks"]}
             self.assertEqual(byid["fix/new"]["status"], "active")
             self.assertEqual(byid["gate/beta"]["status"], "dropped")
-            self.assertEqual(jw_validate.validate(data), [])
+            self.assertEqual(validate.validate(data), [])
             self.assertIn("# registry — comments must be preserved", (root / "tasks.yaml").read_text())
 
     def test_main_add_rejects_invalid_id(self):
@@ -1413,7 +1413,7 @@ class TaskCliTests(unittest.TestCase):
             (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             before = (root / "tasks.yaml").read_text()
-            self.assertEqual(jw_tasks.main(["add", "P0", str(root), "--title", "a banned codename task"]), 2)
+            self.assertEqual(tasks.main(["add", "P0", str(root), "--title", "a banned codename task"]), 2)
             self.assertEqual((root / "tasks.yaml").read_text(), before)  # fail-closed, nothing written
 
     def test_set_deps_repoints_and_extends(self):
@@ -1426,15 +1426,15 @@ class TaskCliTests(unittest.TestCase):
             (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(doc)
             # re-point gamma's dep alpha→beta (the list-field edit that was impossible before)
-            self.assertEqual(jw_tasks.main(["set", "feat/gamma", "deps", "feat/beta", str(root)]), 0)
+            self.assertEqual(tasks.main(["set", "feat/gamma", "deps", "feat/beta", str(root)]), 0)
             byid = {t["id"]: t for t in yaml.safe_load((root / "tasks.yaml").read_text())["tasks"]}
             self.assertEqual(byid["feat/gamma"]["deps"], ["feat/beta"])
             # extend to several ids, comma-separated (same convention as `add --deps`)
-            self.assertEqual(jw_tasks.main(["set", "feat/gamma", "deps", "feat/alpha,feat/beta", str(root)]), 0)
+            self.assertEqual(tasks.main(["set", "feat/gamma", "deps", "feat/alpha,feat/beta", str(root)]), 0)
             byid = {t["id"]: t for t in yaml.safe_load((root / "tasks.yaml").read_text())["tasks"]}
             self.assertEqual(byid["feat/gamma"]["deps"], ["feat/alpha", "feat/beta"])
             # clear with an empty value
-            self.assertEqual(jw_tasks.main(["set", "feat/gamma", "deps", "", str(root)]), 0)
+            self.assertEqual(tasks.main(["set", "feat/gamma", "deps", "", str(root)]), 0)
             byid = {t["id"]: t for t in yaml.safe_load((root / "tasks.yaml").read_text())["tasks"]}
             self.assertEqual(byid["feat/gamma"]["deps"], [])
 
@@ -1447,7 +1447,7 @@ class TaskCliTests(unittest.TestCase):
             root = Path(d)
             (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(doc)
-            self.assertEqual(jw_tasks.main(["set", "feat/gamma", "deps", "feat/beta", str(root)]), 0)
+            self.assertEqual(tasks.main(["set", "feat/gamma", "deps", "feat/beta", str(root)]), 0)
             text = (root / "tasks.yaml").read_text()
             self.assertEqual({t["id"]: t for t in yaml.safe_load(text)["tasks"]}["feat/gamma"]["deps"], ["feat/beta"])
             self.assertNotIn("- feat/alpha", text)  # block dep fully removed, not orphaned
@@ -1466,11 +1466,11 @@ def _registry(n_done, n_active=2):
 class TaskArchiveTests(unittest.TestCase):
     def test_under_threshold_noop(self):
         data = yaml.safe_load(_registry(3))
-        self.assertEqual(jw_tasks.select_for_archive(data, threshold=100, keep=10), [])
+        self.assertEqual(tasks.select_for_archive(data, threshold=100, keep=10), [])
 
     def test_selects_old_terminal_keeps_recent(self):
         data = yaml.safe_load(_registry(20, 2))  # 22 tasks total
-        ids = jw_tasks.select_for_archive(data, threshold=10, keep=5)
+        ids = tasks.select_for_archive(data, threshold=10, keep=5)
         self.assertEqual(len(ids), 15)                       # 20 done − last 5 kept
         self.assertIn("fix/done-000", ids)                   # oldest archived
         self.assertNotIn("fix/done-019", ids)                # among the last 5 kept
@@ -1480,7 +1480,7 @@ class TaskArchiveTests(unittest.TestCase):
         text = _registry(20, 0) + ("  - id: feat/live\n    title: \"a live task needing an old dep\"\n"
                                     "    status: active\n    deps: [fix/done-000]\n")
         data = yaml.safe_load(text)
-        ids = jw_tasks.select_for_archive(data, threshold=10, keep=5)
+        ids = tasks.select_for_archive(data, threshold=10, keep=5)
         self.assertNotIn("fix/done-000", ids)  # protected: a remaining task still depends on it
 
     def test_archive_main_moves_accumulates_and_stays_valid(self):
@@ -1488,14 +1488,14 @@ class TaskArchiveTests(unittest.TestCase):
             root = Path(d)
             (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(_registry(20, 2))
-            self.assertEqual(jw_tasks.main(["archive", str(root), "--threshold", "10", "--keep", "5"]), 0)
+            self.assertEqual(tasks.main(["archive", str(root), "--threshold", "10", "--keep", "5"]), 0)
             data = yaml.safe_load((root / "tasks.yaml").read_text())
-            self.assertEqual(jw_validate.validate(data), [])
+            self.assertEqual(validate.validate(data), [])
             self.assertEqual(len(data["tasks"]), 7)          # 5 kept done + 2 active
             arch = yaml.safe_load((root / "tasks.archive.yaml").read_text())
             self.assertEqual(len(arch["tasks"]), 15)
             # registry now has 7 tasks (< threshold 10): a second run is a clean no-op
-            self.assertEqual(jw_tasks.main(["archive", str(root), "--threshold", "10", "--keep", "5"]), 0)
+            self.assertEqual(tasks.main(["archive", str(root), "--threshold", "10", "--keep", "5"]), 0)
             self.assertEqual(len(yaml.safe_load((root / "tasks.archive.yaml").read_text())["tasks"]), 15)
 
 
@@ -1549,9 +1549,9 @@ class TaskRegressionTests(unittest.TestCase):
              '  - id: feat/last\n    title: "the last existing task"\n    status: active')  # no trailing \n
 
     def test_add_no_trailing_newline_keeps_last_task(self):
-        out = jw_tasks.append_task_block(self.NO_NL, {"id": "fix/added", "title": "an added fix task"})
+        out = tasks.append_task_block(self.NO_NL, {"id": "fix/added", "title": "an added fix task"})
         data = yaml.safe_load(out)
-        self.assertEqual(jw_validate.validate(data), [])
+        self.assertEqual(validate.validate(data), [])
         byid = {t["id"]: t for t in data["tasks"]}
         self.assertEqual(byid["feat/last"]["status"], "active")  # not stolen by the inserted block
         self.assertIn("fix/added", byid)
@@ -1561,12 +1561,12 @@ class TaskRegressionTests(unittest.TestCase):
             root = Path(d)
             (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(self.NO_NL)
-            self.assertEqual(jw_tasks.main(["set", "feat/last", "status", "done", str(root)]), 0)
+            self.assertEqual(tasks.main(["set", "feat/last", "status", "done", str(root)]), 0)
             data = yaml.safe_load((root / "tasks.yaml").read_text())
             self.assertEqual(data["tasks"][0]["status"], "done")  # actually updated, not a silent no-op
 
     def test_remove_last_task_no_trailing_newline(self):
-        out = jw_tasks.remove_task_blocks(
+        out = tasks.remove_task_blocks(
             self.NO_NL + '\n  - id: fix/tail\n    title: "the tail done task"\n    status: done',
             ["fix/tail"])
         data = yaml.safe_load(out)
@@ -1576,8 +1576,8 @@ class TaskRegressionTests(unittest.TestCase):
     def test_add_preserves_crlf(self):
         base = ('version: 1\r\nproject: x\r\ntasks:\r\n'
                 '  - id: feat/win\r\n    title: "a windows task"\r\n    status: active\r\n')
-        out = jw_tasks.append_task_block(base, {"id": "fix/win2", "title": "another windows task"})
-        self.assertEqual(jw_validate.validate(yaml.safe_load(out)), [])
+        out = tasks.append_task_block(base, {"id": "fix/win2", "title": "another windows task"})
+        self.assertEqual(validate.validate(yaml.safe_load(out)), [])
         self.assertNotIn("\n", out.replace("\r\n", ""))  # no bare LF introduced
 
     def test_set_value_with_colon(self):
@@ -1585,7 +1585,7 @@ class TaskRegressionTests(unittest.TestCase):
             root = Path(d)
             (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
-            self.assertEqual(jw_tasks.main(["set", "feat/alpha", "notes", "blocked by X: see ticket 5", str(root)]), 0)
+            self.assertEqual(tasks.main(["set", "feat/alpha", "notes", "blocked by X: see ticket 5", str(root)]), 0)
             data = {t["id"]: t for t in yaml.safe_load((root / "tasks.yaml").read_text())["tasks"]}
             self.assertEqual(data["feat/alpha"]["notes"], "blocked by X: see ticket 5")
 
@@ -1595,7 +1595,7 @@ class TaskRegressionTests(unittest.TestCase):
             (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             before = (root / "tasks.yaml").read_text()
-            self.assertEqual(jw_tasks.main(["set", "feat/alpha", "status", "bogus", str(root)]), 2)
+            self.assertEqual(tasks.main(["set", "feat/alpha", "status", "bogus", str(root)]), 2)
             self.assertEqual((root / "tasks.yaml").read_text(), before)
 
     def test_transitive_deps_protected(self):
@@ -1603,14 +1603,14 @@ class TaskRegressionTests(unittest.TestCase):
                 '  - id: fix/leaf\n    title: "oldest done leaf task"\n    status: done\n'
                 '  - id: fix/mid\n    title: "middle done task here"\n    status: done\n    deps: [fix/leaf]\n'
                 '  - id: feat/top\n    title: "active task at the top"\n    status: active\n    deps: [fix/mid]\n')
-        ids = jw_tasks.select_for_archive(yaml.safe_load(text), threshold=3, keep=0)
+        ids = tasks.select_for_archive(yaml.safe_load(text), threshold=3, keep=0)
         self.assertEqual(ids, [])  # mid pinned by top, leaf pinned transitively by mid → registry stays valid
 
     def test_recency_by_round_keeps_latest_closed(self):
         text = ("version: 1\nproject: x\ntasks:\n"
                 '  - id: fix/early-file\n    title: "closed recently but early in file"\n    status: done\n    round: 2026-06-01-z\n'
                 '  - id: fix/late-file\n    title: "closed long ago but late in file"\n    status: done\n    round: 2026-01-01-a\n')
-        ids = jw_tasks.select_for_archive(yaml.safe_load(text), threshold=2, keep=1)
+        ids = tasks.select_for_archive(yaml.safe_load(text), threshold=2, keep=1)
         self.assertEqual(ids, ["fix/late-file"])  # earlier round archived despite later file position
 
     def test_negative_keep_rejected(self):
@@ -1619,7 +1619,7 @@ class TaskRegressionTests(unittest.TestCase):
             (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(_registry(20, 2))
             before = (root / "tasks.yaml").read_text()
-            self.assertEqual(jw_tasks.main(["archive", str(root), "--threshold", "10", "--keep", "-1"]), 1)
+            self.assertEqual(tasks.main(["archive", str(root), "--threshold", "10", "--keep", "-1"]), 1)
             self.assertEqual((root / "tasks.yaml").read_text(), before)
 
     def test_malformed_archive_file_aborts(self):
@@ -1629,7 +1629,7 @@ class TaskRegressionTests(unittest.TestCase):
             (root / "tasks.yaml").write_text(_registry(20, 2))
             (root / "tasks.archive.yaml").write_text("just a string, not a registry\n")
             before = (root / "tasks.yaml").read_text()
-            self.assertEqual(jw_tasks.main(["archive", str(root), "--threshold", "10", "--keep", "5"]), 2)
+            self.assertEqual(tasks.main(["archive", str(root), "--threshold", "10", "--keep", "5"]), 2)
             self.assertEqual((root / "tasks.yaml").read_text(), before)                       # live registry untouched
             self.assertEqual((root / "tasks.archive.yaml").read_text(), "just a string, not a registry\n")  # history preserved
 
@@ -1645,7 +1645,7 @@ class TaskRegressionTests(unittest.TestCase):
             self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
 
 
-# ============================================================ v0.7.0 M1: jw_cclog / jw_improve
+# ============================================================ v0.7.0 M1: cclog / improve
 import json as _json  # noqa: E402
 
 _UUID = "0123abcd-1234-1234-1234-0123456789ab"
@@ -1665,7 +1665,7 @@ def _parse(path: Path, **kw):
     defaults = dict(file_id="f1", server=None, project="proj", session_id="sess",
                     agent_id=None, workflow_id=None, is_sidechain_file=False)
     defaults.update(kw)
-    return jw_cclog.parse_transcript_file(path, **defaults)
+    return cclog.parse_transcript_file(path, **defaults)
 
 
 def _run_with_home(home: Path, fn):
@@ -1748,7 +1748,7 @@ class CclogParseTests(unittest.TestCase):
             tf = [e for e in out["events"] if e["uuid"] == "a1"][0]
             self.assertIsNone(tf["text"])  # thinking is an opaque stub
             self.assertEqual(tf["event_subtype"], "thinking_marker")
-            g = [x for x in jw_cclog.coalesce_messages(out["events"], out["tool_calls"])
+            g = [x for x in cclog.coalesce_messages(out["events"], out["tool_calls"])
                  if x["message_id"] == "mA"][0]
             self.assertEqual(g["fragment_count"], 3)
             self.assertEqual(g["output_tokens"], 20)   # last representative, NOT 5+5+20
@@ -1878,10 +1878,10 @@ class CclogLayoutTests(unittest.TestCase):
     """New real-layout detectors: detect_kind + scope_of."""
 
     def _k(self, *parts):
-        return jw_cclog.detect_kind(parts)
+        return cclog.detect_kind(parts)
 
     def _s(self, *parts):
-        return jw_cclog.scope_of(parts)
+        return cclog.scope_of(parts)
 
     def test_main_transcript(self):
         parts = ("-Users-jahn-x", f"{_UUID}.jsonl")
@@ -1946,13 +1946,13 @@ class ImproveDiscoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / "projects"
             self._tree(src)
-            kinds_all = sorted(k for _, _, k in jw_improve.discover([src], set()))
+            kinds_all = sorted(k for _, _, k in improve.discover([src], set()))
             self.assertIn("main_transcript", kinds_all)
             self.assertIn("tool_result", kinds_all)
-            only_a = jw_improve.discover([src], {"slug-a"})
+            only_a = improve.discover([src], {"slug-a"})
             self.assertEqual([k for _, _, k in only_a], ["main_transcript"])
             # a spurious project surfaces as zero transcripts, no special-casing
-            only_b = jw_improve.discover([src], {"slug-b"})
+            only_b = improve.discover([src], {"slug-b"})
             self.assertEqual([k for _, _, k in only_b], ["tool_result"])
 
     def test_cli_default_out_honors_home(self):
@@ -1967,7 +1967,7 @@ class ImproveDiscoveryTests(unittest.TestCase):
             def run():
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
-                    rc = jw_improve.main(["trace", "--source", str(src)])
+                    rc = improve.main(["trace", "--source", str(src)])
                 return rc
 
             rc = _run_with_home(home, run)
@@ -2061,7 +2061,7 @@ class ImproveTraceTests(unittest.TestCase):
             src.mkdir()
             aid = self._fixture(src)
             out = Path(d) / "out"
-            jw_improve.run_trace([src], set(), out)
+            improve.run_trace([src], set(), out)
             sessions, dels, cov = self._load(out)
 
             self.assertEqual(cov["row_totals"], {"sessions": 2, "delegations": 1})
@@ -2124,7 +2124,7 @@ class ImproveTraceTests(unittest.TestCase):
             self.assertEqual(cov["record_parse_errors"], 0)
             self.assertEqual(cov["files_by_kind"]["main_transcript"], 1)
             self.assertEqual(cov["files_by_kind"]["subagent_transcript"], 1)
-            self.assertEqual(cov["parser_version"], jw_cclog.PARSER_VERSION)
+            self.assertEqual(cov["parser_version"], cclog.PARSER_VERSION)
 
     def test_byte_identical_reruns(self):
         with tempfile.TemporaryDirectory() as d:
@@ -2132,8 +2132,8 @@ class ImproveTraceTests(unittest.TestCase):
             src.mkdir()
             self._fixture(src)
             out1, out2 = Path(d) / "o1", Path(d) / "o2"
-            jw_improve.run_trace([src], set(), out1)
-            jw_improve.run_trace([src], set(), out2)
+            improve.run_trace([src], set(), out1)
+            improve.run_trace([src], set(), out2)
             for name in ("sessions.jsonl", "delegations.jsonl", "parse_coverage.json"):
                 self.assertEqual((out1 / name).read_bytes(), (out2 / name).read_bytes(),
                                  f"{name} not byte-identical across re-runs")
@@ -2179,7 +2179,7 @@ class ImproveSelfSessionTests(unittest.TestCase):
                 os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
             else:
                 os.environ["CLAUDE_CODE_SESSION_ID"] = sid
-            return jw_improve.run_trace(list(sources), set(), out)
+            return improve.run_trace(list(sources), set(), out)
 
     def _sessions(self, out):
         return [_json.loads(ln) for ln in (out / "sessions.jsonl").read_text().splitlines() if ln]
@@ -2218,7 +2218,7 @@ class ImproveSelfSessionTests(unittest.TestCase):
                 self._bash("a2", "t2", "echo hi"),                   # 2 pre-anchor shell
                 self._result("r2", "t2"),                            # 3
                 self._cmd_tag("c1"),                                 # 4 ANCHOR
-                self._bash("a5", "t5", "uv run jw.py improve trace"),  # 5 excluded
+                self._bash("a5", "t5", "uv run waystone.py improve trace"),  # 5 excluded
                 self._result("r5", "t5"),                            # 6 excluded
                 self._agent("a7", "t7"),                             # 7 excluded delegation
             ])
@@ -2238,7 +2238,7 @@ class ImproveSelfSessionTests(unittest.TestCase):
                 self._u("u1", "implement"),                          # 1 turn
                 self._bash("a2", "t2", "echo hi"),                   # 2 pre-anchor shell
                 self._result("r2", "t2"),                            # 3
-                self._bash("a4", "t4", "uv run /x/jw.py improve trace --out /tmp/o"),  # 4 ANCHOR
+                self._bash("a4", "t4", "uv run /x/waystone.py improve trace --out /tmp/o"),  # 4 ANCHOR
                 self._result("r4", "t4"),                            # 5 excluded
             ])
             out = Path(d) / "out"
@@ -2333,20 +2333,20 @@ class ImproveSelfSessionTests(unittest.TestCase):
     def test_audit_coverage_caveats_carries_self_session(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
-            cov = {"parser_version": jw_cclog.PARSER_VERSION, "files_skipped": 0,
+            cov = {"parser_version": cclog.PARSER_VERSION, "files_skipped": 0,
                    "record_parse_errors": 0, "replayed_records_skipped": 0, "partial_tail_lines": 0,
                    "unknown_raw_types": {}, "row_totals": {"sessions": 0, "delegations": 0},
                    "self_session": {"session_id": _UUID, "file_found": True,
                                     "anchor": "command-tag", "lines_excluded": 3}}
             (d / "parse_coverage.json").write_text(_json.dumps(cov))
-            facts = jw_improve.run_audit(d)
+            facts = improve.run_audit(d)
             cc = [l for l in facts["lenses"] if l["lens"] == "coverage_caveats"][0]
             self.assertEqual(cc["summary"]["self_session"],
                              {"session_id": _UUID, "file_found": True,
                               "anchor": "command-tag", "lines_excluded": 3})
 
 
-# feedback file exactly as jw_review.ingest writes it: metadata header, byte-exact reviewer body
+# feedback file exactly as review.ingest writes it: metadata header, byte-exact reviewer body
 # (which itself contains `### JW-GPT-NNN` blocks + `- Severity:` lines we must NOT parse), then an
 # APPENDED triage table under `## Findings (triage skeleton …)` — the only thing improve reviews reads.
 _TRIAGE_FEEDBACK = """<!-- jahns-workflow feedback: verbatim body below; triage skeleton appended. -->
@@ -2416,7 +2416,7 @@ class ImproveReviewsTests(unittest.TestCase):
             d = Path(d)
             registry = self._fixture(d)
             out = d / "out"
-            jw_improve.run_reviews(registry, out)
+            improve.run_reviews(registry, out)
             rows, cov = self._load(out)
 
             # coverage: one scanned, remote-only + missing-path skipped (fail-loud, not fatal)
@@ -2462,18 +2462,18 @@ class ImproveReviewsTests(unittest.TestCase):
 
     def test_triage_ignores_verbatim_body(self):
         # the verbatim body's `### JW-GPT-*` blocks must not be parsed — only the appended table
-        findings = jw_improve._parse_triage(_TRIAGE_FEEDBACK)
+        findings = improve._parse_triage(_TRIAGE_FEEDBACK)
         self.assertEqual([f["id"] for f in findings], ["JW-GPT-001", "JW-GPT-002", "JW-GPT-003"])
         # a feedback body with NO appended skeleton yields nothing
-        self.assertEqual(jw_improve._parse_triage("just prose, no table\n### JW-GPT-9 — x"), [])
+        self.assertEqual(improve._parse_triage("just prose, no table\n### JW-GPT-9 — x"), [])
 
     def test_byte_identical_reruns(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             registry = self._fixture(d)
             o1, o2 = d / "o1", d / "o2"
-            jw_improve.run_reviews(registry, o1)
-            jw_improve.run_reviews(registry, o2)
+            improve.run_reviews(registry, o1)
+            improve.run_reviews(registry, o2)
             for name in ("reviews.jsonl", "reviews_coverage.json"):
                 self.assertEqual((o1 / name).read_bytes(), (o2 / name).read_bytes(),
                                  f"{name} not byte-identical across re-runs")
@@ -2492,7 +2492,7 @@ class ImproveReviewsTests(unittest.TestCase):
             def run():
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
-                    rc = jw_improve.main(["reviews"])
+                    rc = improve.main(["reviews"])
                 return rc
 
             rc = _run_with_home(home, run)
@@ -2567,7 +2567,7 @@ class ImproveAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             self._write_inputs(d)
-            facts = jw_improve.run_audit(d)
+            facts = improve.run_audit(d)
             self.assertEqual(facts["skipped_lenses"], [])
             lenses = {l["lens"]: l for l in facts["lenses"]}
             self.assertEqual(sorted(lenses), [
@@ -2622,7 +2622,7 @@ class ImproveAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             self._write_inputs(d, delegations=False, reviews=False, coverage=False)  # sessions only
-            facts = jw_improve.run_audit(d)
+            facts = improve.run_audit(d)
             self.assertEqual({s["lens"] for s in facts["skipped_lenses"]},
                              {"delegation_pattern", "review_association", "coverage_caveats"})
             self.assertEqual({l["lens"] for l in facts["lenses"]},
@@ -2636,9 +2636,9 @@ class ImproveAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             self._write_inputs(d)
-            jw_improve.run_audit(d)
+            improve.run_audit(d)
             first = (d / "facts.json").read_bytes()
-            jw_improve.run_audit(d)
+            improve.run_audit(d)
             self.assertEqual(first, (d / "facts.json").read_bytes())
 
 
@@ -2651,7 +2651,7 @@ class ImproveDecideTests(unittest.TestCase):
     def test_append_shape(self):
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / "improve"
-            rc = jw_improve.main(
+            rc = improve.main(
                 ["decide", "main_direct_work/heavy-mains", "accept",
                  "--title", "delegate heavy mains", "--note", "seen in 3 sessions", "--out", str(out)])
             self.assertEqual(rc, 0)
@@ -2669,7 +2669,7 @@ class ImproveDecideTests(unittest.TestCase):
     def test_optional_fields_omitted(self):
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / "improve"
-            rc = jw_improve.main(["decide", "retry_loops/same-cmd", "reject", "--out", str(out)])
+            rc = improve.main(["decide", "retry_loops/same-cmd", "reject", "--out", str(out)])
             self.assertEqual(rc, 0)
             rec = self._lines(out / "decisions.jsonl")[0]
             self.assertNotIn("title", rec)
@@ -2680,8 +2680,8 @@ class ImproveDecideTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / "improve"
             rid = "verification_debt/add-verify"
-            self.assertEqual(jw_improve.main(["decide", rid, "reject", "--out", str(out)]), 0)
-            self.assertEqual(jw_improve.main(["decide", rid, "accept", "--out", str(out)]), 0)
+            self.assertEqual(improve.main(["decide", rid, "reject", "--out", str(out)]), 0)
+            self.assertEqual(improve.main(["decide", rid, "accept", "--out", str(out)]), 0)
             lines = self._lines(out / "decisions.jsonl")
             self.assertEqual(len(lines), 2)  # both preserved (append-only history)
             self.assertEqual([l["decision"] for l in lines], ["reject", "accept"])
@@ -2693,17 +2693,17 @@ class ImproveDecideTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / "improve"
             # missing decision verb
-            self.assertEqual(jw_improve.main(["decide", "main_direct_work/x", "--out", str(out)]), 1)
+            self.assertEqual(improve.main(["decide", "main_direct_work/x", "--out", str(out)]), 1)
             # decision must be accept|reject
-            self.assertEqual(jw_improve.main(["decide", "main_direct_work/x", "maybe", "--out", str(out)]), 1)
+            self.assertEqual(improve.main(["decide", "main_direct_work/x", "maybe", "--out", str(out)]), 1)
             # rec-id must be <lens>/<kebab-gist> (single slash)
-            self.assertEqual(jw_improve.main(["decide", "noslash", "accept", "--out", str(out)]), 1)
+            self.assertEqual(improve.main(["decide", "noslash", "accept", "--out", str(out)]), 1)
             # no uppercase / non-kebab gist
-            self.assertEqual(jw_improve.main(["decide", "Lens/Bad_Gist", "accept", "--out", str(out)]), 1)
+            self.assertEqual(improve.main(["decide", "Lens/Bad_Gist", "accept", "--out", str(out)]), 1)
             # gist may not end in a hyphen
-            self.assertEqual(jw_improve.main(["decide", "lens/bad-", "accept", "--out", str(out)]), 1)
+            self.assertEqual(improve.main(["decide", "lens/bad-", "accept", "--out", str(out)]), 1)
             # unknown flag rejected
-            self.assertEqual(jw_improve.main(["decide", "lens/ok", "accept", "--bogus", "x", "--out", str(out)]), 1)
+            self.assertEqual(improve.main(["decide", "lens/ok", "accept", "--bogus", "x", "--out", str(out)]), 1)
             # a precondition failure never creates the log
             self.assertFalse((out / "decisions.jsonl").exists())
 
@@ -2718,14 +2718,14 @@ class ImproveDecideTests(unittest.TestCase):
             def run():
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
-                    return jw_improve.main(["decide", "context_heavy/trim", "accept"])
+                    return improve.main(["decide", "context_heavy/trim", "accept"])
             rc = _run_with_home(home, run)
             self.assertEqual(rc, 0)
             default_log = home / ".claude" / "jahns-workflow" / "improve" / "decisions.jsonl"
             self.assertTrue(default_log.is_file())  # default --out honors HOME
 
             explicit = d / "elsewhere"
-            rc2 = _run_with_home(home, lambda: jw_improve.main(
+            rc2 = _run_with_home(home, lambda: improve.main(
                 ["decide", "context_heavy/trim", "reject", "--out", str(explicit)]))
             self.assertEqual(rc2, 0)
             self.assertTrue((explicit / "decisions.jsonl").is_file())  # override lands elsewhere
@@ -2743,7 +2743,7 @@ class ImproveM1DefectTests(unittest.TestCase):
 
     # ---- finding 3: verify-cmd regex must require a runner/verb, not a bare tests/ path ----
     def test_verify_cmd_requires_runner(self):
-        c = jw_improve.classify_verification
+        c = improve.classify_verification
         self.assertIsNone(c("cat tests/x.py"))
         self.assertIsNone(c("git diff tests/"))
         self.assertIsNone(c("ls tests/"))
@@ -2765,7 +2765,7 @@ class ImproveM1DefectTests(unittest.TestCase):
                  "tools": {"by_category": {"file_write": 2}},
                  "verification": {"runs": 0}, "build": {"runs": 0}, "unclassified_shell": 0},
             ])
-            facts = jw_improve.run_audit(d)
+            facts = improve.run_audit(d)
             vd = {l["lens"]: l for l in facts["lenses"]}["verification_debt"]
             self.assertEqual(vd["rule"], "verification-debt-v2")
             pp = vd["per_project"]["-p"]
@@ -2783,7 +2783,7 @@ class ImproveM1DefectTests(unittest.TestCase):
                  "subagent_type": None, "model_requested": None,
                  "resolved_model": {"provenance": "unknown"}, "status": {"provenance": "unknown"},
                  "is_async": {"provenance": "unknown"}} for i in (1, 2, 3)])
-            facts = jw_improve.run_audit(d)
+            facts = improve.run_audit(d)
             dp = {l["lens"]: l for l in facts["lenses"]}["delegation_pattern"]
             self.assertEqual(dp["rule"], "delegation-pattern-v2")
             pp = dp["per_project"]["-p"]
@@ -2812,7 +2812,7 @@ class ImproveM1DefectTests(unittest.TestCase):
             registry = d / "projects.json"
             registry.write_text(_json.dumps({"projects": [{"name": "proj-a", "path": str(proj)}]}))
             out = d / "out"
-            jw_improve.run_reviews(registry, out)
+            improve.run_reviews(registry, out)
             rows = [_json.loads(ln) for ln in (out / "reviews.jsonl").read_text().splitlines() if ln]
             self.assertEqual(len(rows), 1)
             r = rows[0]
@@ -2825,11 +2825,11 @@ class ImproveM1DefectTests(unittest.TestCase):
 
     # ---- finding 7: a relative --out/--in is refused (exit 1) for every subcommand ----
     def test_relative_out_in_refused(self):
-        self.assertEqual(self._quiet(lambda: jw_improve.main(
+        self.assertEqual(self._quiet(lambda: improve.main(
             ["trace", "--source", "/tmp", "--out", "rel/out"])), 1)
-        self.assertEqual(self._quiet(lambda: jw_improve.main(["reviews", "--out", "rel/out"])), 1)
-        self.assertEqual(self._quiet(lambda: jw_improve.main(["audit", "--in", "rel/in"])), 1)
-        self.assertEqual(self._quiet(lambda: jw_improve.main(
+        self.assertEqual(self._quiet(lambda: improve.main(["reviews", "--out", "rel/out"])), 1)
+        self.assertEqual(self._quiet(lambda: improve.main(["audit", "--in", "rel/in"])), 1)
+        self.assertEqual(self._quiet(lambda: improve.main(
             ["decide", "lens/x", "accept", "--out", "rel/out"])), 1)
 
     # ---- finding 8: registry MISSING is soft (exit 0); EXISTING but corrupt fails loud ----
@@ -2837,22 +2837,22 @@ class ImproveM1DefectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             out = d / "out"
-            cov = jw_improve.run_reviews(d / "nope.json", out)  # MISSING -> 0 projects, no raise
+            cov = improve.run_reviews(d / "nope.json", out)  # MISSING -> 0 projects, no raise
             self.assertEqual(cov["projects_total"], 0)
             bad = d / "bad.json"
             bad.write_text("{ not json ")
-            with self.assertRaises(jw_common.WorkflowError):
-                jw_improve.run_reviews(bad, out)                # unparseable -> fail loud
+            with self.assertRaises(common.WorkflowError):
+                improve.run_reviews(bad, out)                # unparseable -> fail loud
             wrong = d / "wrong.json"
             wrong.write_text("[1, 2, 3]")
-            with self.assertRaises(jw_common.WorkflowError):
-                jw_improve.run_reviews(wrong, out)              # wrong shape -> fail loud
+            with self.assertRaises(common.WorkflowError):
+                improve.run_reviews(wrong, out)              # wrong shape -> fail loud
             # exit-code contract via the CLI (corrupt registry under a fake HOME) -> rc 1, not 0
             home = d / "home"
             (home / ".claude" / "jahns-workflow").mkdir(parents=True)
             (home / ".claude" / "jahns-workflow" / "projects.json").write_text("{ nope ")
             rc = _run_with_home(home, lambda: self._quiet(
-                lambda: jw_improve.main(["reviews", "--out", str(d / "o2")])))
+                lambda: improve.main(["reviews", "--out", str(d / "o2")])))
             self.assertEqual(rc, 1)
 
     # ---- finding 1: an unreadable INPUT transcript is recorded, not fatal, exit 0 ----
@@ -2874,7 +2874,7 @@ class ImproveM1DefectTests(unittest.TestCase):
             os.chmod(badf, 0)
             out = d / "out"
             try:
-                cov = jw_improve.run_trace([src], set(), out)
+                cov = improve.run_trace([src], set(), out)
             finally:
                 os.chmod(badf, stat.S_IRUSR | stat.S_IWUSR)
             self.assertEqual(cov["row_totals"]["sessions"], 1)      # good session still projected
@@ -2897,7 +2897,7 @@ class ImproveM1DefectTests(unittest.TestCase):
             locked.mkdir()
             os.chmod(locked, stat.S_IRUSR | stat.S_IXUSR)  # no write bit
             try:
-                rc = self._quiet(lambda: jw_improve.main(
+                rc = self._quiet(lambda: improve.main(
                     ["trace", "--source", str(src), "--out", str(locked / "sub")]))
             finally:
                 os.chmod(locked, stat.S_IRWXU)
@@ -2907,7 +2907,7 @@ class ImproveM1DefectTests(unittest.TestCase):
     def test_explicit_missing_source_exit_1(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
-            rc = self._quiet(lambda: jw_improve.main(
+            rc = self._quiet(lambda: improve.main(
                 ["trace", "--source", str(d / "does-not-exist"), "--out", str(d / "out")]))
             self.assertEqual(rc, 1)
 
@@ -2915,7 +2915,7 @@ class ImproveM1DefectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             missing = d / "gone"
-            cov = jw_improve.run_trace([missing], set(), d / "out")
+            cov = improve.run_trace([missing], set(), d / "out")
             self.assertEqual(cov["sources_missing"], [str(missing)])
             self.assertEqual(cov["row_totals"]["sessions"], 0)
 
@@ -2938,7 +2938,7 @@ class ImproveM1DefectTests(unittest.TestCase):
                      "is_error": False}]}},
             ])
             out = d / "out"
-            jw_improve.run_trace([src], set(), out)
+            improve.run_trace([src], set(), out)
             sess = [_json.loads(ln) for ln in
                     (out / "sessions.jsonl").read_text().splitlines() if ln][0]
             ch = sess["context_heavy"]
@@ -2948,26 +2948,26 @@ class ImproveM1DefectTests(unittest.TestCase):
 
 class AcceptFieldTests(unittest.TestCase):
     """0.8.0 M1: the optional task `accept` field (YAML list of acceptance criteria) — validated by
-    jw_validate, but NOT settable via `jw task add/set` (comma-split would distort free text)."""
+    validate, but NOT settable via `jw task add/set` (comma-split would distort free text)."""
 
     def test_validate_accepts_string_list(self):
         data = {"version": 1, "project": "x", "tasks": [
             {"id": "feat/alpha", "title": "a valid task here", "status": "active",
              "accept": ["uv run pytest passes", "no new ruff findings"]}]}
-        self.assertEqual(jw_validate.validate(data), [])
+        self.assertEqual(validate.validate(data), [])
 
     def test_validate_rejects_non_list_accept(self):
         data = {"version": 1, "project": "x", "tasks": [
             {"id": "feat/alpha", "title": "a valid task here", "status": "active",
              "accept": "just a string"}]}
-        errs = jw_validate.validate(data)
+        errs = validate.validate(data)
         self.assertTrue(any("accept" in e for e in errs))
 
     def test_validate_rejects_non_str_element(self):
         data = {"version": 1, "project": "x", "tasks": [
             {"id": "feat/alpha", "title": "a valid task here", "status": "active",
              "accept": ["ok", 42]}]}
-        errs = jw_validate.validate(data)
+        errs = validate.validate(data)
         self.assertTrue(any("accept" in e for e in errs))
 
     def test_task_add_rejects_accept_flag(self):
@@ -2976,7 +2976,7 @@ class AcceptFieldTests(unittest.TestCase):
             (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             before = (root / "tasks.yaml").read_text()
-            rc = jw_tasks.main(["add", "feat/new", str(root), "--title",
+            rc = tasks.main(["add", "feat/new", str(root), "--title",
                                 "a fresh task here", "--accept", "some criterion"])
             self.assertEqual(rc, 1)
             self.assertEqual((root / "tasks.yaml").read_text(), before)  # nothing written
@@ -2987,7 +2987,7 @@ class AcceptFieldTests(unittest.TestCase):
             (root / ".jahns-workflow.yml").write_text("version: 1\nproject: x\n")
             (root / "tasks.yaml").write_text(TASKS_FIXTURE)
             before = (root / "tasks.yaml").read_text()
-            rc = jw_tasks.main(["set", "feat/alpha", "accept", "some criterion", str(root)])
+            rc = tasks.main(["set", "feat/alpha", "accept", "some criterion", str(root)])
             self.assertEqual(rc, 1)
             self.assertEqual((root / "tasks.yaml").read_text(), before)
 
@@ -3005,7 +3005,7 @@ class DelegateSnapshotTests(unittest.TestCase):
             root = self._repo(d)
             head = git(root, "rev-parse", "HEAD").stdout.strip()
             before = git(root, "rev-list", "--count", "HEAD").stdout.strip()
-            sha, dirty = jw_delegate._snapshot(root, "snap")
+            sha, dirty = delegate._snapshot(root, "snap")
             self.assertFalse(dirty)
             self.assertEqual(sha, head)  # no snapshot commit created
             self.assertEqual(git(root, "rev-list", "--count", "HEAD").stdout.strip(), before)
@@ -3019,7 +3019,7 @@ class DelegateSnapshotTests(unittest.TestCase):
             (root / "secret.txt").write_text("nope")          # ignored
             (root / "staged.txt").write_text("stg")
             git(root, "add", "staged.txt")                    # staged addition
-            sha, dirty = jw_delegate._snapshot(root, "snap")
+            sha, dirty = delegate._snapshot(root, "snap")
             self.assertTrue(dirty)
             tree = git(root, "ls-tree", "-r", "--name-only", sha).stdout.split()
             self.assertIn("new_untracked.txt", tree)
@@ -3035,7 +3035,7 @@ class DelegateSnapshotTests(unittest.TestCase):
             git(root, "add", "new.txt")
             status_before = git(root, "status", "--porcelain").stdout
             head_before = git(root, "rev-parse", "HEAD").stdout
-            jw_delegate._snapshot(root, "snap")
+            delegate._snapshot(root, "snap")
             self.assertEqual(git(root, "status", "--porcelain").stdout, status_before)
             self.assertEqual(git(root, "rev-parse", "HEAD").stdout, head_before)
 
@@ -3043,15 +3043,15 @@ class DelegateSnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             git(root, "init", "-q", "-b", "main")
-            with self.assertRaises(jw_delegate.WorkflowError):
-                jw_delegate._check_snapshot_preconditions(root)
+            with self.assertRaises(delegate.WorkflowError):
+                delegate._check_snapshot_preconditions(root)
 
     def test_precondition_submodule(self):
         with tempfile.TemporaryDirectory() as d:
             root = self._repo(d)
             (root / ".gitmodules").write_text("[submodule \"x\"]\n")
-            with self.assertRaises(jw_delegate.WorkflowError):
-                jw_delegate._check_snapshot_preconditions(root)
+            with self.assertRaises(delegate.WorkflowError):
+                delegate._check_snapshot_preconditions(root)
 
     def test_precondition_unmerged_index(self):
         with tempfile.TemporaryDirectory() as d:
@@ -3064,27 +3064,27 @@ class DelegateSnapshotTests(unittest.TestCase):
             git(root, "commit", "-qam", "main")
             git(root, "merge", "other")  # conflicts -> unmerged entries
             self.assertTrue(git(root, "ls-files", "-u").stdout.strip())
-            with self.assertRaises(jw_delegate.WorkflowError):
-                jw_delegate._check_snapshot_preconditions(root)
+            with self.assertRaises(delegate.WorkflowError):
+                delegate._check_snapshot_preconditions(root)
 
     def test_precondition_rebase_dir(self):
         with tempfile.TemporaryDirectory() as d:
             root = self._repo(d)
             (root / ".git" / "rebase-merge").mkdir()
-            with self.assertRaises(jw_delegate.WorkflowError):
-                jw_delegate._check_snapshot_preconditions(root)
+            with self.assertRaises(delegate.WorkflowError):
+                delegate._check_snapshot_preconditions(root)
 
     def test_precondition_cherry_pick_head(self):
         with tempfile.TemporaryDirectory() as d:
             root = self._repo(d)
             (root / ".git" / "CHERRY_PICK_HEAD").write_text("deadbeef\n")
-            with self.assertRaises(jw_delegate.WorkflowError):
-                jw_delegate._check_snapshot_preconditions(root)
+            with self.assertRaises(delegate.WorkflowError):
+                delegate._check_snapshot_preconditions(root)
 
     def test_preconditions_pass_on_clean_repo(self):
         with tempfile.TemporaryDirectory() as d:
             root = self._repo(d)
-            jw_delegate._check_snapshot_preconditions(root)  # no raise
+            delegate._check_snapshot_preconditions(root)  # no raise
 
     def test_precondition_reserved_report_filename(self):
         # H2: a pre-existing JW_REPORT.yaml would be baked into the base, then consumed as the
@@ -3092,12 +3092,12 @@ class DelegateSnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = self._repo(d)
             (root / "JW_REPORT.yaml").write_text("stale: report\n")
-            with self.assertRaises(jw_delegate.WorkflowError) as cm:
-                jw_delegate._check_snapshot_preconditions(root)
+            with self.assertRaises(delegate.WorkflowError) as cm:
+                delegate._check_snapshot_preconditions(root)
             self.assertIn("reserved", str(cm.exception))
 
     def test_make_did_shape(self):
-        did = jw_delegate._make_did("feat/xyz")
+        did = delegate._make_did("feat/xyz")
         self.assertRegex(did, r"^\d{8}T\d{6}Z-feat-xyz$")
 
 
@@ -3118,45 +3118,45 @@ class DelegateProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             home = Path(d) / "home"
             home.mkdir()
-            with self.assertRaises(jw_delegate.WorkflowError):
-                _run_with_home(home, jw_delegate._load_profile)
+            with self.assertRaises(delegate.WorkflowError):
+                _run_with_home(home, delegate._load_profile)
 
     def test_resolve_binding_ok_and_fingerprint(self):
         with tempfile.TemporaryDirectory() as d:
             home = Path(d) / "home"
             _write_profile(home)
-            profile, fp = _run_with_home(home, jw_delegate._load_profile)
+            profile, fp = _run_with_home(home, delegate._load_profile)
             self.assertTrue(fp.startswith("sha256:"))
-            b = jw_delegate._resolve_binding(profile, "implementer")
+            b = delegate._resolve_binding(profile, "implementer")
             self.assertEqual(b["backend"], "codex:gpt-5.4-codex")
             self.assertEqual(b["execution"], "external-runner")
             self.assertEqual(b["source"], "profile")
 
     def test_missing_role_binding_raises(self):
         profile = yaml.safe_load(_PROFILE_BODY)
-        with self.assertRaises(jw_delegate.WorkflowError):
-            jw_delegate._resolve_binding(profile, "verifier")
+        with self.assertRaises(delegate.WorkflowError):
+            delegate._resolve_binding(profile, "verifier")
 
     def test_unsupported_execution_raises(self):
         profile = {"bindings": {"implementer": {"execution": "in-process", "backend": "codex:x"}}}
-        with self.assertRaises(jw_delegate.WorkflowError):
-            jw_delegate._resolve_binding(profile, "implementer")
+        with self.assertRaises(delegate.WorkflowError):
+            delegate._resolve_binding(profile, "implementer")
 
     def test_bad_backend_format_raises(self):
         profile = {"bindings": {"implementer": {"execution": "external-runner", "backend": "codexonly"}}}
-        with self.assertRaises(jw_delegate.WorkflowError):
-            jw_delegate._resolve_binding(profile, "implementer")
+        with self.assertRaises(delegate.WorkflowError):
+            delegate._resolve_binding(profile, "implementer")
 
     def test_non_codex_backend_not_implemented(self):
-        with self.assertRaises(jw_delegate.WorkflowError):
-            jw_delegate._runner_model("claude:sonnet")
-        self.assertEqual(jw_delegate._runner_model("codex:gpt-5.4-codex"), "gpt-5.4-codex")
+        with self.assertRaises(delegate.WorkflowError):
+            delegate._runner_model("claude:sonnet")
+        self.assertEqual(delegate._runner_model("codex:gpt-5.4-codex"), "gpt-5.4-codex")
 
     def test_invalid_effort_field_is_rejected(self):
         profile = {"bindings": {"implementer": {
             "execution": "external-runner", "backend": "codex:x", "effort": "extreme"}}}
-        with self.assertRaises(jw_delegate.WorkflowError) as cm:
-            jw_delegate._resolve_binding(profile, "implementer")
+        with self.assertRaises(delegate.WorkflowError) as cm:
+            delegate._resolve_binding(profile, "implementer")
         self.assertIn("effort", str(cm.exception))
 
 
@@ -3176,7 +3176,7 @@ class DelegatePacketTests(unittest.TestCase):
 
     def test_packet_merges_accept_and_flags_dedup_order(self):
         data = _packet_registry()
-        packet, acceptance = jw_delegate._build_packet(data, "feat/xyz",
+        packet, acceptance = delegate._build_packet(data, "feat/xyz",
                                                        ["flag criterion", "registry criterion one"], Path("/x"))
         self.assertEqual(packet["schema"], "jw-packet-1")
         self.assertEqual(acceptance, ["registry criterion one", "flag criterion"])  # order + dedup
@@ -3185,13 +3185,13 @@ class DelegatePacketTests(unittest.TestCase):
 
     def test_empty_acceptance_raises(self):
         data = {"project": "d", "tasks": [{"id": "feat/na", "title": "no acceptance here", "status": "active"}]}
-        with self.assertRaises(jw_delegate.WorkflowError) as cm:
-            jw_delegate._build_packet(data, "feat/na", [], Path("/x"))
+        with self.assertRaises(delegate.WorkflowError) as cm:
+            delegate._build_packet(data, "feat/na", [], Path("/x"))
         self.assertIn("no acceptance criteria", str(cm.exception))
 
     def test_blocked_task_message(self):
-        with self.assertRaises(jw_delegate.WorkflowError) as cm:
-            jw_delegate._build_packet(_packet_registry(), "feat/blk", ["c"], Path("/x"))
+        with self.assertRaises(delegate.WorkflowError) as cm:
+            delegate._build_packet(_packet_registry(), "feat/blk", ["c"], Path("/x"))
         msg = str(cm.exception)
         self.assertIn("blocked", msg)
         # R10: must NOT assert deps are unmet (stale-blocked exists) — offer the conditional path
@@ -3199,12 +3199,12 @@ class DelegatePacketTests(unittest.TestCase):
         self.assertNotIn("unmet", msg.lower())
 
     def test_done_task_rejected(self):
-        with self.assertRaises(jw_delegate.WorkflowError):
-            jw_delegate._build_packet(_packet_registry(), "feat/dn", ["c"], Path("/x"))
+        with self.assertRaises(delegate.WorkflowError):
+            delegate._build_packet(_packet_registry(), "feat/dn", ["c"], Path("/x"))
 
     def test_unknown_task_rejected(self):
-        with self.assertRaises(jw_delegate.WorkflowError):
-            jw_delegate._build_packet(_packet_registry(), "feat/nope", ["c"], Path("/x"))
+        with self.assertRaises(delegate.WorkflowError):
+            delegate._build_packet(_packet_registry(), "feat/nope", ["c"], Path("/x"))
 
 
 class DelegateRunTests(unittest.TestCase):
@@ -3237,15 +3237,15 @@ class DelegateRunTests(unittest.TestCase):
         return fake
 
     def _run(self, root, home, fake, task="feat/xyz", accept=None):
-        orig = jw_delegate._run_codex
-        jw_delegate._run_codex = fake
+        orig = delegate._run_codex
+        delegate._run_codex = fake
         try:
-            return _run_with_home(home, lambda: jw_delegate.run_delegation(root, task, "implementer", accept or []))
+            return _run_with_home(home, lambda: delegate.run_delegation(root, task, "implementer", accept or []))
         finally:
-            jw_delegate._run_codex = orig
+            delegate._run_codex = orig
 
     def _record_dir(self, root, home):
-        return _run_with_home(home, lambda: sorted(jw_delegate._delegations_dir(root).iterdir())[-1])
+        return _run_with_home(home, lambda: sorted(delegate._delegations_dir(root).iterdir())[-1])
 
     def test_success_path_contract_and_exposure(self):
         with tempfile.TemporaryDirectory() as d:
@@ -3259,11 +3259,11 @@ class DelegateRunTests(unittest.TestCase):
                 rc = self._run(root, home, fake)
             self.assertEqual(rc, 0)
             rec = self._record_dir(root, home)
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "needs-review")
+            self.assertEqual(delegate._read_status(rec)["state"], "needs-review")
             # prompt carries acceptance criterion text
             self.assertIn("criterion alpha here", (rec / "prompt.txt").read_text())
             # JW_REPORT consumed from the worktree (not left to pollute the patch)
-            wt = _run_with_home(home, lambda: jw_delegate._worktree_path(root, rec.name))
+            wt = _run_with_home(home, lambda: delegate._worktree_path(root, rec.name))
             self.assertFalse((wt / "JW_REPORT.yaml").exists())
             contract = yaml.safe_load((rec / "artifact" / "contract.yaml").read_text())
             self.assertEqual(contract["schema"], "jw-artifact-1")
@@ -3309,7 +3309,7 @@ class DelegateRunTests(unittest.TestCase):
             contract = yaml.safe_load((rec / "artifact" / "contract.yaml").read_text())
             self.assertTrue(contract["empty"])
             self.assertFalse((rec / "artifact" / "changes.patch").exists())
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "needs-review")
+            self.assertEqual(delegate._read_status(rec)["state"], "needs-review")
 
     def test_binary_change_preserved_in_patch(self):
         with tempfile.TemporaryDirectory() as d:
@@ -3340,11 +3340,11 @@ class DelegateRunTests(unittest.TestCase):
             import contextlib
             import io
             with contextlib.redirect_stdout(io.StringIO()):
-                with self.assertRaises(jw_delegate.WorkflowError):
+                with self.assertRaises(delegate.WorkflowError):
                     self._run(root, home, fake)
             self.assertEqual(called["n"], 0)  # runner never invoked
             rec = self._record_dir(root, home)
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "failed-env")
+            self.assertEqual(delegate._read_status(rec)["state"], "failed-env")
 
     def test_runner_failure_is_failed_runner_with_exposure(self):
         with tempfile.TemporaryDirectory() as d:
@@ -3353,10 +3353,10 @@ class DelegateRunTests(unittest.TestCase):
             import contextlib
             import io
             with contextlib.redirect_stdout(io.StringIO()):
-                with self.assertRaises(jw_delegate.WorkflowError):
+                with self.assertRaises(delegate.WorkflowError):
                     self._run(root, home, fake)
             rec = self._record_dir(root, home)
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "failed-runner")
+            self.assertEqual(delegate._read_status(rec)["state"], "failed-runner")
             self.assertTrue((rec / "exposure.json").exists())  # exposure recorded before runner
 
     def test_run_refuses_preexisting_jw_report(self):
@@ -3365,10 +3365,10 @@ class DelegateRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(d)
             (root / "JW_REPORT.yaml").write_text("stale: report\n")  # untracked user file
-            with self.assertRaises(jw_delegate.WorkflowError) as cm:
+            with self.assertRaises(delegate.WorkflowError) as cm:
                 self._run(root, home, self._fake_runner({"impl.py": "x\n"}))
             self.assertIn("JW_REPORT.yaml", str(cm.exception))
-            self.assertFalse(_run_with_home(home, lambda: jw_delegate._delegations_dir(root)).exists())
+            self.assertFalse(_run_with_home(home, lambda: delegate._delegations_dir(root)).exists())
 
     def test_non_utf8_text_change_roundtrip(self):
         # H1 repro: latin-1 content (0xE9, no NUL -> git classifies it as text) must not crash the
@@ -3386,7 +3386,7 @@ class DelegateRunTests(unittest.TestCase):
                 rc = self._run(root, home, fake)
             self.assertEqual(rc, 0)
             rec = self._record_dir(root, home)
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "needs-review")
+            self.assertEqual(delegate._read_status(rec)["state"], "needs-review")
             self.assertTrue((rec / "artifact" / "contract.yaml").exists())
             patch = (rec / "artifact" / "changes.patch").read_bytes()
             self.assertIn(b"caf\xe9 au lait", patch)  # original bytes preserved, not mangled
@@ -3424,17 +3424,17 @@ class DelegateRunTests(unittest.TestCase):
             import contextlib
             import io
             with contextlib.redirect_stdout(io.StringIO()):
-                with self.assertRaises(jw_delegate.WorkflowError):
+                with self.assertRaises(delegate.WorkflowError):
                     self._run(root, home, fake)
             rec = self._record_dir(root, home)
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "failed-artifact")
-            wt = _run_with_home(home, lambda: jw_delegate._worktree_path(root, rec.name))
+            self.assertEqual(delegate._read_status(rec)["state"], "failed-artifact")
+            wt = _run_with_home(home, lambda: delegate._worktree_path(root, rec.name))
             self.assertTrue(wt.exists())  # evidence preserved
             with contextlib.redirect_stdout(io.StringIO()):
-                with self.assertRaises(jw_delegate.WorkflowError) as cm:
+                with self.assertRaises(delegate.WorkflowError) as cm:
                     self._run(root, home, self._fake_runner({"impl.py": "y\n"}))
                 self.assertIn("already has active delegation", str(cm.exception))
-                rc = _run_with_home(home, lambda: jw_delegate.discard_delegation(root, rec.name))
+                rc = _run_with_home(home, lambda: delegate.discard_delegation(root, rec.name))
             self.assertEqual(rc, 0)
 
     def test_same_second_did_gets_suffix(self):
@@ -3448,8 +3448,8 @@ class DelegateRunTests(unittest.TestCase):
                 '    accept:\n      - "criterion alpha here"\n'
                 '  - id: feat/two\n    title: "the second task here"\n    status: active\n'
                 '    accept:\n      - "criterion beta here"\n')
-            orig = jw_delegate._make_did
-            jw_delegate._make_did = lambda tid: "20260713T120000Z-fixed"
+            orig = delegate._make_did
+            delegate._make_did = lambda tid: "20260713T120000Z-fixed"
             import contextlib
             import io
             try:
@@ -3457,12 +3457,12 @@ class DelegateRunTests(unittest.TestCase):
                     rc1 = self._run(root, home, self._fake_runner({"a.py": "x\n"}), task="feat/xyz")
                     rc2 = self._run(root, home, self._fake_runner({"b.py": "y\n"}), task="feat/two")
             finally:
-                jw_delegate._make_did = orig
+                delegate._make_did = orig
             self.assertEqual((rc1, rc2), (0, 0))
-            ddir = _run_with_home(home, lambda: jw_delegate._delegations_dir(root))
+            ddir = _run_with_home(home, lambda: delegate._delegations_dir(root))
             names = sorted(p.name for p in ddir.iterdir())
             self.assertEqual(names, ["20260713T120000Z-fixed", "20260713T120000Z-fixed-2"])
-            st1 = jw_delegate._read_status(ddir / names[0])
+            st1 = delegate._read_status(ddir / names[0])
             self.assertEqual(st1["state"], "needs-review")
             self.assertEqual(len(st1["at_transitions"]), 2)  # running -> needs-review only, untouched
             import json as _json
@@ -3476,9 +3476,9 @@ class DelegateRunTests(unittest.TestCase):
             import contextlib
             import io
             with contextlib.redirect_stdout(io.StringIO()):
-                with self.assertRaises(jw_delegate.WorkflowError):
+                with self.assertRaises(delegate.WorkflowError):
                     self._run(root, home, fake_fail)  # -> failed-runner (non-terminal, holds lock)
-                with self.assertRaises(jw_delegate.WorkflowError) as cm:
+                with self.assertRaises(delegate.WorkflowError) as cm:
                     self._run(root, home, self._fake_runner({"impl.py": "y\n"}))
             self.assertIn("already has active delegation", str(cm.exception))
 
@@ -3513,18 +3513,18 @@ def _deleg_fake(changes, report=None, rc=0):
 def _deleg_run(root, home, fake, task="feat/xyz", accept=None):
     import contextlib
     import io
-    orig = jw_delegate._run_codex
-    jw_delegate._run_codex = fake
+    orig = delegate._run_codex
+    delegate._run_codex = fake
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             return _run_with_home(
-                home, lambda: jw_delegate.run_delegation(root, task, "implementer", accept or []))
+                home, lambda: delegate.run_delegation(root, task, "implementer", accept or []))
     finally:
-        jw_delegate._run_codex = orig
+        delegate._run_codex = orig
 
 
 def _latest_rec(root, home):
-    return _run_with_home(home, lambda: sorted(jw_delegate._delegations_dir(root).iterdir())[-1])
+    return _run_with_home(home, lambda: sorted(delegate._delegations_dir(root).iterdir())[-1])
 
 
 class DelegateEffortTests(unittest.TestCase):
@@ -3569,7 +3569,7 @@ class DelegateApplyTests(unittest.TestCase):
             import contextlib
             import io
             with contextlib.redirect_stdout(io.StringIO()):
-                rc = _run_with_home(home, lambda: jw_delegate.apply_delegation(root, rec.name))
+                rc = _run_with_home(home, lambda: delegate.apply_delegation(root, rec.name))
             self.assertEqual(rc, 0)
             self.assertEqual((root / "cafe.txt").read_bytes(), b"caf\xe9 au lait\n")
 
@@ -3578,11 +3578,11 @@ class DelegateApplyTests(unittest.TestCase):
             root, home = _deleg_project(d)
             _deleg_run(root, home, _deleg_fake({"impl.py": "print('x')\n"}))
             rec = _latest_rec(root, home)
-            wt = _run_with_home(home, lambda: jw_delegate._worktree_path(root, rec.name))
-            rc = _run_with_home(home, lambda: jw_delegate.apply_delegation(root, rec.name))
+            wt = _run_with_home(home, lambda: delegate._worktree_path(root, rec.name))
+            rc = _run_with_home(home, lambda: delegate.apply_delegation(root, rec.name))
             self.assertEqual(rc, 0)
             self.assertTrue((root / "impl.py").exists())                     # patch landed on live tree
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "applied")
+            self.assertEqual(delegate._read_status(rec)["state"], "applied")
             self.assertFalse(wt.exists())                                    # worktree removed
             self.assertTrue((rec / "artifact" / "contract.yaml").exists())   # record preserved
             self.assertNotEqual(git(root, "rev-parse", "--verify",
@@ -3598,11 +3598,11 @@ class DelegateApplyTests(unittest.TestCase):
             import io
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
-                rc = _run_with_home(home, lambda: jw_delegate.main(["apply", rec.name, "--root", str(root)]))
+                rc = _run_with_home(home, lambda: delegate.main(["apply", rec.name, "--root", str(root)]))
             self.assertEqual(rc, 1)                                   # not a raw git rc
             self.assertIn("drifted", err.getvalue())
             self.assertFalse((root / "b.py").exists())               # atomic: other target untouched
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "needs-review")  # unchanged
+            self.assertEqual(delegate._read_status(rec)["state"], "needs-review")  # unchanged
 
     def test_apply_unrelated_dirty_ok(self):
         with tempfile.TemporaryDirectory() as d:
@@ -3610,7 +3610,7 @@ class DelegateApplyTests(unittest.TestCase):
             _deleg_run(root, home, _deleg_fake({"impl.py": "x\n"}))
             rec = _latest_rec(root, home)
             (root / "f.txt").write_text("locally dirtied but unrelated")
-            rc = _run_with_home(home, lambda: jw_delegate.apply_delegation(root, rec.name))
+            rc = _run_with_home(home, lambda: delegate.apply_delegation(root, rec.name))
             self.assertEqual(rc, 0)
             self.assertTrue((root / "impl.py").exists())
 
@@ -3619,29 +3619,29 @@ class DelegateApplyTests(unittest.TestCase):
             root, home = _deleg_project(d)
             _deleg_run(root, home, _deleg_fake({}))  # no changes
             rec = _latest_rec(root, home)
-            rc = _run_with_home(home, lambda: jw_delegate.apply_delegation(root, rec.name))
+            rc = _run_with_home(home, lambda: delegate.apply_delegation(root, rec.name))
             self.assertEqual(rc, 0)
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "applied")
+            self.assertEqual(delegate._read_status(rec)["state"], "applied")
 
     def test_reapply_refused(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _deleg_project(d)
             _deleg_run(root, home, _deleg_fake({"impl.py": "x\n"}))
             rec = _latest_rec(root, home)
-            _run_with_home(home, lambda: jw_delegate.apply_delegation(root, rec.name))
-            with self.assertRaises(jw_delegate.WorkflowError):
-                _run_with_home(home, lambda: jw_delegate.apply_delegation(root, rec.name))
+            _run_with_home(home, lambda: delegate.apply_delegation(root, rec.name))
+            with self.assertRaises(delegate.WorkflowError):
+                _run_with_home(home, lambda: delegate.apply_delegation(root, rec.name))
 
     def test_discard_cleanup_and_accepts_running(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _deleg_project(d)
             _deleg_run(root, home, _deleg_fake({"impl.py": "x\n"}))
             rec = _latest_rec(root, home)
-            wt = _run_with_home(home, lambda: jw_delegate._worktree_path(root, rec.name))
-            jw_delegate._set_state(rec, "running")  # simulate a crash remnant (R1)
-            rc = _run_with_home(home, lambda: jw_delegate.discard_delegation(root, rec.name))
+            wt = _run_with_home(home, lambda: delegate._worktree_path(root, rec.name))
+            delegate._set_state(rec, "running")  # simulate a crash remnant (R1)
+            rc = _run_with_home(home, lambda: delegate.discard_delegation(root, rec.name))
             self.assertEqual(rc, 0)
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "discarded")
+            self.assertEqual(delegate._read_status(rec)["state"], "discarded")
             self.assertFalse(wt.exists())
             self.assertTrue((rec / "exposure.json").exists())  # record preserved
 
@@ -3655,7 +3655,7 @@ class DelegateCorruptRecordTests(unittest.TestCase):
             _deleg_run(root, home, _deleg_fake({"impl.py": "x\n"}))
             rec = _latest_rec(root, home)
             (rec / "status.json").write_text("{ corrupt", encoding="utf-8")
-            with self.assertRaises(jw_delegate.WorkflowError) as cm:
+            with self.assertRaises(delegate.WorkflowError) as cm:
                 _deleg_run(root, home, _deleg_fake({"impl.py": "y\n"}))
             msg = str(cm.exception)
             self.assertIn("corrupt", msg)
@@ -3670,21 +3670,21 @@ class DelegateCorruptRecordTests(unittest.TestCase):
                 '    accept:\n      - "criterion alpha here"\n'
                 '  - id: feat/two\n    title: "the second task here"\n    status: active\n'
                 '    accept:\n      - "criterion beta here"\n')
-            orig = jw_delegate._make_did
+            orig = delegate._make_did
             try:
-                jw_delegate._make_did = lambda tid: "20260713T000001Z-" + tid.replace("/", "-")
+                delegate._make_did = lambda tid: "20260713T000001Z-" + tid.replace("/", "-")
                 _deleg_run(root, home, _deleg_fake({"a.py": "x\n"}), task="feat/xyz")
-                jw_delegate._make_did = lambda tid: "20260713T000002Z-" + tid.replace("/", "-")
+                delegate._make_did = lambda tid: "20260713T000002Z-" + tid.replace("/", "-")
                 _deleg_run(root, home, _deleg_fake({"b.py": "y\n"}), task="feat/two")
             finally:
-                jw_delegate._make_did = orig
-            recs = _run_with_home(home, lambda: sorted(jw_delegate._delegations_dir(root).iterdir()))
+                delegate._make_did = orig
+            recs = _run_with_home(home, lambda: sorted(delegate._delegations_dir(root).iterdir()))
             (recs[0] / "status.json").write_text("{ corrupt", encoding="utf-8")
             import contextlib
             import io
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                rc = _run_with_home(home, lambda: jw_delegate.main(["status", "--root", str(root)]))
+                rc = _run_with_home(home, lambda: delegate.main(["status", "--root", str(root)]))
             self.assertEqual(rc, 0)
             out = buf.getvalue()
             self.assertIn("[corrupt]", out)          # the broken row is surfaced, not fatal
@@ -3701,7 +3701,7 @@ class DelegateCorruptRecordTests(unittest.TestCase):
             import io
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
-                rc = _run_with_home(home, lambda: jw_delegate.main(["show", rec.name, "--root", str(root)]))
+                rc = _run_with_home(home, lambda: delegate.main(["show", rec.name, "--root", str(root)]))
             self.assertEqual(rc, 1)                  # WorkflowError, never a traceback
             self.assertIn("status.json", err.getvalue())
 
@@ -3715,10 +3715,10 @@ class DelegateCorruptRecordTests(unittest.TestCase):
             import io
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
-                rc = _run_with_home(home, lambda: jw_delegate.main(["apply", rec.name, "--root", str(root)]))
+                rc = _run_with_home(home, lambda: delegate.main(["apply", rec.name, "--root", str(root)]))
             self.assertEqual(rc, 1)
             self.assertIn("contract.yaml", err.getvalue())
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "needs-review")  # unchanged
+            self.assertEqual(delegate._read_status(rec)["state"], "needs-review")  # unchanged
 
     def test_discard_accepts_corrupt_record(self):
         # the cleanup path must not block itself on the very corruption it is meant to clear
@@ -3726,15 +3726,15 @@ class DelegateCorruptRecordTests(unittest.TestCase):
             root, home = _deleg_project(d)
             _deleg_run(root, home, _deleg_fake({"impl.py": "x\n"}))
             rec = _latest_rec(root, home)
-            wt = _run_with_home(home, lambda: jw_delegate._worktree_path(root, rec.name))
+            wt = _run_with_home(home, lambda: delegate._worktree_path(root, rec.name))
             (rec / "status.json").write_text("{ corrupt", encoding="utf-8")
             (rec / "exposure.json").write_text("{ corrupt", encoding="utf-8")
             import contextlib
             import io
             with contextlib.redirect_stdout(io.StringIO()):
-                rc = _run_with_home(home, lambda: jw_delegate.discard_delegation(root, rec.name))
+                rc = _run_with_home(home, lambda: delegate.discard_delegation(root, rec.name))
             self.assertEqual(rc, 0)
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "discarded")
+            self.assertEqual(delegate._read_status(rec)["state"], "discarded")
             self.assertFalse(wt.exists())
 
 
@@ -3746,18 +3746,18 @@ class DelegateCliTests(unittest.TestCase):
             root, home = _deleg_project(d)
             import contextlib
             import io
-            orig = jw_delegate._run_codex
-            jw_delegate._run_codex = _deleg_fake({"impl.py": "x\n"})
+            orig = delegate._run_codex
+            delegate._run_codex = _deleg_fake({"impl.py": "x\n"})
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
-                    rc = _run_with_home(home, lambda: jw_delegate.main(
+                    rc = _run_with_home(home, lambda: delegate.main(
                         ["run", "feat/xyz", "--root", str(root), "--accept", "extra criterion"]))
                 self.assertEqual(rc, 0)
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
-                    _run_with_home(home, lambda: jw_delegate.main(["status", "--root", str(root)]))
+                    _run_with_home(home, lambda: delegate.main(["status", "--root", str(root)]))
             finally:
-                jw_delegate._run_codex = orig
+                delegate._run_codex = orig
             self.assertIn("feat/xyz", out.getvalue())
             self.assertIn("needs-review", out.getvalue())
 
@@ -3765,16 +3765,16 @@ class DelegateCliTests(unittest.TestCase):
         import contextlib
         import io
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(jw_delegate.main(["frobnicate"]), 1)
+            self.assertEqual(delegate.main(["frobnicate"]), 1)
 
-    def test_jw_dispatcher_routes_delegate(self):
-        import jw
+    def test_waystone_dispatcher_routes_delegate(self):
+        import waystone
         with tempfile.TemporaryDirectory() as d:
             root, home = _deleg_project(d)
             import contextlib
             import io
             with contextlib.redirect_stdout(io.StringIO()):
-                rc = _run_with_home(home, lambda: jw.main(["delegate", "status", "--root", str(root)]))
+                rc = _run_with_home(home, lambda: waystone.main(["delegate", "status", "--root", str(root)]))
             self.assertEqual(rc, 0)
 
     def test_unknown_delegation_id(self):
@@ -3783,7 +3783,7 @@ class DelegateCliTests(unittest.TestCase):
             import contextlib
             import io
             with contextlib.redirect_stderr(io.StringIO()):
-                rc = _run_with_home(home, lambda: jw_delegate.main(
+                rc = _run_with_home(home, lambda: delegate.main(
                     ["show", "nope-not-real", "--root", str(root)]))
             self.assertEqual(rc, 1)
 
@@ -3799,7 +3799,7 @@ class DelegateCliTests(unittest.TestCase):
                                 ("--exposure", "jw-exposure-1")):
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
-                    rc = _run_with_home(home, lambda o=opt: jw_delegate.main(
+                    rc = _run_with_home(home, lambda o=opt: delegate.main(
                         ["show", rec.name, o, "--root", str(root)]))
                 self.assertEqual(rc, 0)
                 self.assertIn(needle, buf.getvalue())
@@ -3812,24 +3812,24 @@ class DelegateCliTests(unittest.TestCase):
             import contextlib
             import io
             with contextlib.redirect_stdout(io.StringIO()):
-                with self.assertRaises(jw_delegate.WorkflowError):
+                with self.assertRaises(delegate.WorkflowError):
                     _deleg_run(root, home, _deleg_fake({"impl.py": "x\n"}))  # -> failed-env
             rec = _latest_rec(root, home)
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "failed-env")
+            self.assertEqual(delegate._read_status(rec)["state"], "failed-env")
             with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(_run_with_home(home, lambda: jw_delegate.main(
+                self.assertEqual(_run_with_home(home, lambda: delegate.main(
                     ["show", rec.name, "--patch", "--root", str(root)])), 1)
-                self.assertEqual(_run_with_home(home, lambda: jw_delegate.main(
+                self.assertEqual(_run_with_home(home, lambda: delegate.main(
                     ["show", rec.name, "--report", "--root", str(root)])), 1)
             # exposure + summary always available (recorded at start)
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(_run_with_home(home, lambda: jw_delegate.main(
+                self.assertEqual(_run_with_home(home, lambda: delegate.main(
                     ["show", rec.name, "--exposure", "--root", str(root)])), 0)
-                self.assertEqual(_run_with_home(home, lambda: jw_delegate.main(
+                self.assertEqual(_run_with_home(home, lambda: delegate.main(
                     ["show", rec.name, "--root", str(root)])), 0)
 
 
-# ============================================================ v0.8.0 M2: jw_overlay (C1 store+rules)
+# ============================================================ v0.8.0 M2: overlay (C1 store+rules)
 def _overlay_project(d):
     root = Path(d) / "proj"
     root.mkdir()
@@ -3841,7 +3841,7 @@ def _overlay_project(d):
 def _add_delta(root, home, delta_id="verification_debt/skip", rule="delegation-verification-evidence-v1",
                **kw):
     kw.setdefault("summary", "observed 3/5 delegations without verification")
-    return _run_with_home(home, lambda: jw_overlay.add_delta(root, delta_id, rule=rule, **kw))
+    return _run_with_home(home, lambda: overlay.add_delta(root, delta_id, rule=rule, **kw))
 
 
 class OverlayStoreTests(unittest.TestCase):
@@ -3859,9 +3859,9 @@ class OverlayStoreTests(unittest.TestCase):
             self.assertEqual(delta["evidence"]["summary"], "observed 3/5 delegations without verification")
             # proposed -> observing recorded as a transition (add IS the acceptance)
             self.assertEqual([t["to"] for t in delta["transitions"]], ["observing"])
-            self.assertEqual(delta["observed_in"], [jw_common._project_slug(root)])
+            self.assertEqual(delta["observed_in"], [common._project_slug(root)])
             # persisted, slash -> double-dash filename
-            p = _run_with_home(home, lambda: jw_overlay._delta_path(root, "verification_debt/skip"))
+            p = _run_with_home(home, lambda: overlay._delta_path(root, "verification_debt/skip"))
             self.assertTrue(p.exists())
             self.assertEqual(p.name, "verification_debt--skip.json")
 
@@ -3880,13 +3880,13 @@ class OverlayStoreTests(unittest.TestCase):
     def test_add_invalid_delta_id_rejected(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _overlay_project(d)
-            with self.assertRaises(jw_delegate.WorkflowError):
+            with self.assertRaises(delegate.WorkflowError):
                 _add_delta(root, home, delta_id="Bad Id/Nope")
 
     def test_add_unknown_rule_rejected(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _overlay_project(d)
-            with self.assertRaises(jw_delegate.WorkflowError):
+            with self.assertRaises(delegate.WorkflowError):
                 _add_delta(root, home, rule="nonexistent-rule-v9")
 
     def test_add_missing_flags_exit1(self):
@@ -3896,11 +3896,11 @@ class OverlayStoreTests(unittest.TestCase):
             import io
             with contextlib.redirect_stderr(io.StringIO()):
                 # missing --summary
-                self.assertEqual(_run_with_home(home, lambda: jw_overlay.main(
+                self.assertEqual(_run_with_home(home, lambda: overlay.main(
                     ["add", "verification_debt/x", "--rule", "delegation-verification-evidence-v1",
                      "--root", str(root)])), 1)
                 # missing --rule
-                self.assertEqual(_run_with_home(home, lambda: jw_overlay.main(
+                self.assertEqual(_run_with_home(home, lambda: overlay.main(
                     ["add", "verification_debt/x", "--summary", "s", "--root", str(root)])), 1)
 
     def test_add_bad_candidate_scope_exit1(self):
@@ -3909,7 +3909,7 @@ class OverlayStoreTests(unittest.TestCase):
             import contextlib
             import io
             with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(_run_with_home(home, lambda: jw_overlay.main(
+                self.assertEqual(_run_with_home(home, lambda: overlay.main(
                     ["add", "verification_debt/x", "--rule", "delegation-verification-evidence-v1",
                      "--summary", "s", "--candidate-scope", "bogus", "--root", str(root)])), 1)
 
@@ -3917,49 +3917,49 @@ class OverlayStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root, home = _overlay_project(d)
             _add_delta(root, home)
-            with self.assertRaises(jw_delegate.WorkflowError) as cm:
-                _run_with_home(home, lambda: jw_overlay.promote(root, "verification_debt/skip"))
+            with self.assertRaises(delegate.WorkflowError) as cm:
+                _run_with_home(home, lambda: overlay.promote(root, "verification_debt/skip"))
             self.assertIn("replay", str(cm.exception))
             # inject a replay result then promote succeeds observing -> warning
-            p = _run_with_home(home, lambda: jw_overlay._delta_path(root, "verification_debt/skip"))
+            p = _run_with_home(home, lambda: overlay._delta_path(root, "verification_debt/skip"))
             import json as _j
             delta = _j.loads(p.read_text())
             delta["replay"] = {"fires": 2, "opportunities": 5, "replayed_at": "2026-07-14T00:00:00+00:00"}
             p.write_text(_j.dumps(delta))
-            out = _run_with_home(home, lambda: jw_overlay.promote(root, "verification_debt/skip"))
+            out = _run_with_home(home, lambda: overlay.promote(root, "verification_debt/skip"))
             self.assertEqual(out["status"], "warning")
 
     def test_demote_warning_to_observing(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _overlay_project(d)
             _add_delta(root, home)
-            p = _run_with_home(home, lambda: jw_overlay._delta_path(root, "verification_debt/skip"))
+            p = _run_with_home(home, lambda: overlay._delta_path(root, "verification_debt/skip"))
             import json as _j
             delta = _j.loads(p.read_text())
             delta["status"] = "warning"
             p.write_text(_j.dumps(delta))
-            out = _run_with_home(home, lambda: jw_overlay.demote(root, "verification_debt/skip"))
+            out = _run_with_home(home, lambda: overlay.demote(root, "verification_debt/skip"))
             self.assertEqual(out["status"], "observing")
 
     def test_suspend_and_retire_unconditional_and_terminal(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _overlay_project(d)
             _add_delta(root, home)
-            out = _run_with_home(home, lambda: jw_overlay.suspend(root, "verification_debt/skip", note="pause"))
+            out = _run_with_home(home, lambda: overlay.suspend(root, "verification_debt/skip", note="pause"))
             self.assertEqual(out["status"], "suspended")
             # retire from suspended is fine (#9 — teardown always open)
-            out = _run_with_home(home, lambda: jw_overlay.retire(root, "verification_debt/skip"))
+            out = _run_with_home(home, lambda: overlay.retire(root, "verification_debt/skip"))
             self.assertEqual(out["status"], "retired")
             # retired is terminal — any further transition refused
-            for verb in (jw_overlay.promote, jw_overlay.demote, jw_overlay.suspend, jw_overlay.retire):
-                with self.assertRaises(jw_delegate.WorkflowError):
+            for verb in (overlay.promote, overlay.demote, overlay.suspend, overlay.retire):
+                with self.assertRaises(delegate.WorkflowError):
                     _run_with_home(home, lambda v=verb: v(root, "verification_debt/skip"))
 
     def test_add_leaves_no_tmp_file(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _overlay_project(d)
             _add_delta(root, home)
-            ddir = _run_with_home(home, lambda: jw_overlay._deltas_dir(root))
+            ddir = _run_with_home(home, lambda: overlay._deltas_dir(root))
             self.assertEqual(sorted(p.name for p in ddir.iterdir()), ["verification_debt--skip.json"])
 
     def test_corrupt_delta_marked_in_list_strict_in_show(self):
@@ -3967,32 +3967,32 @@ class OverlayStoreTests(unittest.TestCase):
             root, home = _overlay_project(d)
             _add_delta(root, home)
             _add_delta(root, home, delta_id="verification_debt/other")
-            ddir = _run_with_home(home, lambda: jw_overlay._deltas_dir(root))
+            ddir = _run_with_home(home, lambda: overlay._deltas_dir(root))
             (ddir / "verification_debt--skip.json").write_text("{ corrupt")
-            listed = _run_with_home(home, lambda: jw_overlay.list_deltas(root))
+            listed = _run_with_home(home, lambda: overlay.list_deltas(root))
             corrupt = [x for x in listed if x.get("corrupt")]
             healthy = [x for x in listed if not x.get("corrupt")]
             self.assertEqual(len(corrupt), 1)
             self.assertTrue(any(h["id"] == "verification_debt/other" for h in healthy))
             # single-record path fails loud, naming the file
-            with self.assertRaises(jw_delegate.WorkflowError) as cm:
-                _run_with_home(home, lambda: jw_overlay.load_delta(root, "verification_debt/skip"))
+            with self.assertRaises(delegate.WorkflowError) as cm:
+                _run_with_home(home, lambda: overlay.load_delta(root, "verification_debt/skip"))
             self.assertIn("verification_debt--skip.json", str(cm.exception))
 
     def test_unknown_delta_id_exit1(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _overlay_project(d)
-            with self.assertRaises(jw_delegate.WorkflowError):
-                _run_with_home(home, lambda: jw_overlay.load_delta(root, "verification_debt/nope"))
+            with self.assertRaises(delegate.WorkflowError):
+                _run_with_home(home, lambda: overlay.load_delta(root, "verification_debt/nope"))
 
-    def test_jw_dispatcher_routes_overlay(self):
-        import jw
+    def test_waystone_dispatcher_routes_overlay(self):
+        import waystone
         with tempfile.TemporaryDirectory() as d:
             root, home = _overlay_project(d)
             import contextlib
             import io
             with contextlib.redirect_stdout(io.StringIO()):
-                rc = _run_with_home(home, lambda: jw.main(["overlay", "list", "--root", str(root)]))
+                rc = _run_with_home(home, lambda: waystone.main(["overlay", "list", "--root", str(root)]))
             self.assertEqual(rc, 0)
 
 
@@ -4031,21 +4031,21 @@ class OverlayRuleTests(unittest.TestCase):
 
     def test_rule1_fire_predicate(self):
         # present True + non-empty verification -> no fire
-        self.assertFalse(jw_overlay.rule1_fires(
+        self.assertFalse(overlay.rule1_fires(
             {"delegate_report": {"present": True, "verification": [{"cmd": "pytest", "rc": 0}]}}))
         # present True but empty verification -> fire
-        self.assertTrue(jw_overlay.rule1_fires(
+        self.assertTrue(overlay.rule1_fires(
             {"delegate_report": {"present": True, "verification": []}}))
         # report absent -> fire
-        self.assertTrue(jw_overlay.rule1_fires({"delegate_report": {"present": False}}))
+        self.assertTrue(overlay.rule1_fires({"delegate_report": {"present": False}}))
         # invalid report -> fire
-        self.assertTrue(jw_overlay.rule1_fires({"delegate_report": {"present": "invalid"}}))
+        self.assertTrue(overlay.rule1_fires({"delegate_report": {"present": "invalid"}}))
 
     def test_rule2_open_severe_fires_excludes_done_rejected_minor(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _rule2_project(d)
-            cfg = jw_common.load_config(root)
-            out = jw_overlay.evaluate_rule2(root, cfg, ["blocker", "major"])
+            cfg = common.load_config(root)
+            out = overlay.evaluate_rule2(root, cfg, ["blocker", "major"])
             fired_ids = sorted(f["task_id"] for f in out["fires"])
             # fix/finding-a fires (open blocker, REAL); b is done; c is REJECTED; d is minor
             self.assertEqual(fired_ids, ["fix/finding-a"])
@@ -4055,22 +4055,22 @@ class OverlayRuleTests(unittest.TestCase):
     def test_rule2_closing_done_override_suppresses_fire(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _rule2_project(d)
-            cfg = jw_common.load_config(root)
-            out = jw_overlay.evaluate_rule2(root, cfg, ["blocker", "major"],
+            cfg = common.load_config(root)
+            out = overlay.evaluate_rule2(root, cfg, ["blocker", "major"],
                                             closing_done={"fix/finding-a"})
             self.assertEqual(out["fires"], [])  # a is being closed in this round
 
 
 # ==================================================== v0.8.0 M2: boundary warn engine + exposure (C2)
 def _force_status(root, home, delta_id, status):
-    p = _run_with_home(home, lambda: jw_overlay._delta_path(root, delta_id))
+    p = _run_with_home(home, lambda: overlay._delta_path(root, delta_id))
     delta = _json.loads(p.read_text())
     delta["status"] = status
     p.write_text(_json.dumps(delta))
 
 
 def _read_warnings(root, home):
-    wp = _run_with_home(home, lambda: jw_overlay._warnings_path(root))
+    wp = _run_with_home(home, lambda: overlay._warnings_path(root))
     if not wp.exists():
         return []
     return [_json.loads(ln) for ln in wp.read_text().splitlines() if ln.strip()]
@@ -4138,13 +4138,13 @@ class BoundaryWarnTests(unittest.TestCase):
     def test_delegate_run_observing_logs_no_stderr(self):
         with tempfile.TemporaryDirectory() as d:
             root, home, did = self._deleg_needs_review(d, report=None)  # no verification -> fires
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "verification_debt/skip", rule="delegation-verification-evidence-v1", summary="s"))
             import contextlib
             import io
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
-                events = _run_with_home(home, lambda: jw_overlay.evaluate_boundary(
+                events = _run_with_home(home, lambda: overlay.evaluate_boundary(
                     root, "delegate-run", {"delegation_id": did}))
             fires = [e for e in events if e["event"] == "fire"]
             self.assertEqual(len(fires), 1)
@@ -4161,14 +4161,14 @@ class BoundaryWarnTests(unittest.TestCase):
     def test_delegate_run_warning_emits_stderr(self):
         with tempfile.TemporaryDirectory() as d:
             root, home, did = self._deleg_needs_review(d, report=None)
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "verification_debt/skip", rule="delegation-verification-evidence-v1", summary="s"))
             _force_status(root, home, "verification_debt/skip", "warning")
             import contextlib
             import io
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
-                events = _run_with_home(home, lambda: jw_overlay.evaluate_boundary(
+                events = _run_with_home(home, lambda: overlay.evaluate_boundary(
                     root, "delegate-run", {"delegation_id": did}))
             self.assertIn("jw warn", err.getvalue())
             self.assertEqual([e for e in events if e["event"] == "fire"][0]["delta_status"], "warning")
@@ -4178,37 +4178,37 @@ class BoundaryWarnTests(unittest.TestCase):
             report = ("verification:\n  - {cmd: \"pytest\", rc: 0, summary: \"ok\"}\n"
                       "limitations: []\nrisks: []\nescalations: []\n")
             root, home, did = self._deleg_needs_review(d, report=report)
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "verification_debt/skip", rule="delegation-verification-evidence-v1", summary="s"))
-            events = _run_with_home(home, lambda: jw_overlay.evaluate_boundary(
+            events = _run_with_home(home, lambda: overlay.evaluate_boundary(
                 root, "delegate-run", {"delegation_id": did}))
             self.assertEqual([e for e in events if e["event"] == "fire"], [])
 
     def test_apply_exit_unchanged_despite_warning(self):
         with tempfile.TemporaryDirectory() as d:
             root, home, did = self._deleg_needs_review(d, report=None)
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "verification_debt/skip", rule="delegation-verification-evidence-v1", summary="s"))
             _force_status(root, home, "verification_debt/skip", "warning")
             import contextlib
             import io
             with contextlib.redirect_stderr(io.StringIO()):
-                rc = _run_with_home(home, lambda: jw_delegate.apply_delegation(root, did))
+                rc = _run_with_home(home, lambda: delegate.apply_delegation(root, did))
             self.assertEqual(rc, 0)  # warn never changes host exit (S5)
             self.assertTrue((root / "impl.py").exists())
 
     def test_engine_exception_does_not_propagate(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _deleg_project(d)
-            orig = jw_overlay.active_deltas
-            jw_overlay.active_deltas = lambda r: (_ for _ in ()).throw(RuntimeError("boom"))
+            orig = overlay.active_deltas
+            overlay.active_deltas = lambda r: (_ for _ in ()).throw(RuntimeError("boom"))
             import contextlib
             import io
             try:
                 with contextlib.redirect_stderr(io.StringIO()):
-                    events = _run_with_home(home, lambda: jw_overlay.evaluate_boundary(root, "check", {}))
+                    events = _run_with_home(home, lambda: overlay.evaluate_boundary(root, "check", {}))
             finally:
-                jw_overlay.active_deltas = orig
+                overlay.active_deltas = orig
             self.assertEqual(events, [])  # swallowed, host flow protected
 
     def test_unknown_active_rule_logs_evaluation_error_and_notice(self):
@@ -4216,17 +4216,17 @@ class BoundaryWarnTests(unittest.TestCase):
         import io
         with tempfile.TemporaryDirectory() as d:
             root, home = _deleg_project(d)
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "verification_debt/future", rule="delegation-verification-evidence-v1",
                 summary="s"))
             delta = _run_with_home(
-                home, lambda: jw_overlay.load_delta(root, "verification_debt/future"))
+                home, lambda: overlay.load_delta(root, "verification_debt/future"))
             delta["rule"] = "future-rule-v9"
-            _run_with_home(home, lambda: jw_overlay._write_delta(root, delta))
+            _run_with_home(home, lambda: overlay._write_delta(root, delta))
             err = io.StringIO()
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
                 rc = _run_with_home(
-                    home, lambda: jw_overlay.main(["check", "--root", str(root)]))
+                    home, lambda: overlay.main(["check", "--root", str(root)]))
             self.assertEqual(rc, 0)
             rows = _read_warnings(root, home)
             self.assertEqual(len(rows), 1)
@@ -4237,12 +4237,12 @@ class BoundaryWarnTests(unittest.TestCase):
     def test_conflict_least_restrictive(self):
         with tempfile.TemporaryDirectory() as d:
             root, home, did = self._deleg_needs_review(d, report=None)
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "verification_debt/one", rule="delegation-verification-evidence-v1", summary="s"))
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "verification_debt/two", rule="delegation-verification-evidence-v1", summary="s"))
             _force_status(root, home, "verification_debt/one", "warning")  # two stays observing
-            events = _run_with_home(home, lambda: jw_overlay.evaluate_boundary(
+            events = _run_with_home(home, lambda: overlay.evaluate_boundary(
                 root, "delegate-run", {"delegation_id": did}))
             # effective status is least-restrictive (observing wins) + a conflict event recorded
             self.assertTrue(any(e["event"] == "conflict" for e in events))
@@ -4255,16 +4255,16 @@ class BoundaryWarnTests(unittest.TestCase):
                       "limitations: []\nrisks: []\nescalations: []\n")
             _deleg_run(root, home, _deleg_fake({"a.py": "x\n"}, report=None), task="feat/xyz")     # fires
             _deleg_run(root, home, _deleg_fake({"b.py": "y\n"}, report=report), task="feat/two")   # verified
-            with self.assertRaises(jw_delegate.WorkflowError):  # failed-runner -> no contract, excluded
+            with self.assertRaises(delegate.WorkflowError):  # failed-runner -> no contract, excluded
                 _deleg_run(root, home, _deleg_fake({"c.py": "z\n"}, rc=3), task="feat/three")
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "verification_debt/skip", rule="delegation-verification-evidence-v1", summary="s"))
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "review_association/open", rule="round-close-open-findings-v1", summary="s"))
             import contextlib
             import io
             with contextlib.redirect_stderr(io.StringIO()):
-                events = _run_with_home(home, lambda: jw_overlay.evaluate_boundary(root, "check", {}))
+                events = _run_with_home(home, lambda: overlay.evaluate_boundary(root, "check", {}))
             r1 = [e for e in events if e["rule"] == "delegation-verification-evidence-v1" and e["event"] == "fire"]
             self.assertEqual(len(r1), 1)                        # only the unverified needs-review one
             self.assertIn("feat-xyz", r1[0]["context"]["delegation_id"])
@@ -4275,25 +4275,25 @@ class BoundaryWarnTests(unittest.TestCase):
     def test_check_cli_exit0_even_with_fires(self):
         with tempfile.TemporaryDirectory() as d:
             root, home, did = self._deleg_needs_review(d, report=None)
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "verification_debt/skip", rule="delegation-verification-evidence-v1", summary="s"))
             import contextlib
             import io
             with contextlib.redirect_stdout(io.StringIO()):
-                rc = _run_with_home(home, lambda: jw_overlay.main(["check", "--root", str(root)]))
+                rc = _run_with_home(home, lambda: overlay.main(["check", "--root", str(root)]))
             self.assertEqual(rc, 0)
 
     def test_round_close_boundary_fires_and_records_exposure(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _round_review_project(d)
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "review_association/open", rule="round-close-open-findings-v1", summary="s"))
             _force_status(root, home, "review_association/open", "warning")
             import contextlib
             import io
             err = io.StringIO()
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-                rc = _run_with_home(home, lambda: jw_round.close(
+                rc = _run_with_home(home, lambda: round.close(
                     root, "2026-01-02-close", done=["chore/close-me"], touched=[], commit="HEAD"))
             self.assertEqual(rc, 0)  # warn does not block close
             self.assertIn("jw warn", err.getvalue())
@@ -4305,18 +4305,18 @@ class BoundaryWarnTests(unittest.TestCase):
         import io
         with tempfile.TemporaryDirectory() as d:
             root, home = _round_review_project(d)
-            orig = jw_overlay.evaluate_boundary
-            jw_overlay.evaluate_boundary = lambda *a, **k: (_ for _ in ()).throw(
+            orig = overlay.evaluate_boundary
+            overlay.evaluate_boundary = lambda *a, **k: (_ for _ in ()).throw(
                 RuntimeError("synthetic warn crash"))
             err = io.StringIO()
             try:
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-                    rc = _run_with_home(home, lambda: jw_round.close(
+                    rc = _run_with_home(home, lambda: round.close(
                         root, "2026-01-02-close", done=["chore/close-me"], touched=[], commit="HEAD"))
             finally:
-                jw_overlay.evaluate_boundary = orig
+                overlay.evaluate_boundary = orig
             self.assertEqual(rc, 0)
-            self.assertEqual(jw_common.load_tasks(root)["tasks"][0]["status"], "done")
+            self.assertEqual(common.load_tasks(root)["tasks"][0]["status"], "done")
             self.assertIn("overlay warning", err.getvalue())
             self.assertIn("synthetic warn crash", err.getvalue())
 
@@ -4329,7 +4329,7 @@ class BoundaryWarnTests(unittest.TestCase):
             orig_import = builtins.__import__
 
             def fake_import(name, *args, **kwargs):
-                if name == "jw_overlay":
+                if name == "overlay":
                     raise ImportError("synthetic overlay import failure")
                 return orig_import(name, *args, **kwargs)
 
@@ -4337,12 +4337,12 @@ class BoundaryWarnTests(unittest.TestCase):
             builtins.__import__ = fake_import
             try:
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-                    rc = _run_with_home(home, lambda: jw_round.close(
+                    rc = _run_with_home(home, lambda: round.close(
                         root, "2026-01-02-close", done=["chore/close-me"], touched=[], commit="HEAD"))
             finally:
                 builtins.__import__ = orig_import
             self.assertEqual(rc, 0)
-            self.assertEqual(jw_common.load_tasks(root)["tasks"][0]["status"], "done")
+            self.assertEqual(common.load_tasks(root)["tasks"][0]["status"], "done")
             self.assertIn("overlay warning", err.getvalue())
             self.assertIn("synthetic overlay import failure", err.getvalue())
 
@@ -4351,8 +4351,8 @@ class BoundaryWarnTests(unittest.TestCase):
         import io
         with tempfile.TemporaryDirectory() as d:
             root, home = _deleg_project(d)
-            orig = jw_overlay.evaluate_boundary
-            jw_overlay.evaluate_boundary = lambda *a, **k: (_ for _ in ()).throw(
+            orig = overlay.evaluate_boundary
+            overlay.evaluate_boundary = lambda *a, **k: (_ for _ in ()).throw(
                 RuntimeError("synthetic warn crash"))
             err = io.StringIO()
             try:
@@ -4362,9 +4362,9 @@ class BoundaryWarnTests(unittest.TestCase):
                     rec = _latest_rec(root, home)
                     self.assertEqual(
                         _run_with_home(
-                            home, lambda: jw_delegate.apply_delegation(root, rec.name)), 0)
+                            home, lambda: delegate.apply_delegation(root, rec.name)), 0)
             finally:
-                jw_overlay.evaluate_boundary = orig
+                overlay.evaluate_boundary = orig
             self.assertIn("delegate-run", err.getvalue())
             self.assertIn("delegate-apply", err.getvalue())
             self.assertEqual(err.getvalue().count("synthetic warn crash"), 2)
@@ -4372,9 +4372,9 @@ class BoundaryWarnTests(unittest.TestCase):
     def test_review_ingest_boundary(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _round_review_project(d)
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "review_association/open", rule="round-close-open-findings-v1", summary="s"))
-            events = _run_with_home(home, lambda: jw_overlay.evaluate_boundary(
+            events = _run_with_home(home, lambda: overlay.evaluate_boundary(
                 root, "review-ingest", {"round_id": "2026-01-01-r1"}))
             fires = [e for e in events if e["event"] == "fire"]
             self.assertEqual(len(fires), 1)
@@ -4387,7 +4387,7 @@ class DelegateExposureOverlayTests(unittest.TestCase):
     def test_exposure_overlays_populated(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _deleg_project(d)
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "verification_debt/skip", rule="delegation-verification-evidence-v1", summary="s"))
             _deleg_run(root, home, _deleg_fake({"impl.py": "x\n"}))
             rec = _latest_rec(root, home)
@@ -4397,10 +4397,10 @@ class DelegateExposureOverlayTests(unittest.TestCase):
     def test_corrupt_delta_refuses_exposure_capture_and_names_file(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _deleg_project(d)
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "verification_debt/healthy", rule="delegation-verification-evidence-v1",
                 summary="s"))
-            corrupt = _run_with_home(home, lambda: jw_overlay._deltas_dir(root) / "corrupt.json")
+            corrupt = _run_with_home(home, lambda: overlay._deltas_dir(root) / "corrupt.json")
             corrupt.write_text("{not-json")
             called = {"n": 0}
 
@@ -4408,7 +4408,7 @@ class DelegateExposureOverlayTests(unittest.TestCase):
                 called["n"] += 1
                 return (0, 0.1)
 
-            with self.assertRaises(jw_delegate.WorkflowError) as cm:
+            with self.assertRaises(delegate.WorkflowError) as cm:
                 _deleg_run(root, home, fake)
             self.assertIn(str(corrupt), str(cm.exception))
             self.assertEqual(called["n"], 0)
@@ -4419,7 +4419,7 @@ class RoundExposureTests(unittest.TestCase):
     record-failure keeps close succeeding)."""
 
     def _exposure_dir(self, root, home):
-        return _run_with_home(home, lambda: jw_overlay._exposure_dir(root))
+        return _run_with_home(home, lambda: overlay._exposure_dir(root))
 
     def test_close_records_round_exposure(self):
         with tempfile.TemporaryDirectory() as d:
@@ -4428,7 +4428,7 @@ class RoundExposureTests(unittest.TestCase):
             import contextlib
             import io
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                rc = _run_with_home(home, lambda: jw_round.close(
+                rc = _run_with_home(home, lambda: round.close(
                     root, "2026-01-02-close", done=["chore/close-me"], touched=[], commit="HEAD"))
             self.assertEqual(rc, 0)
             p = self._exposure_dir(root, home) / "round-2026-01-02-close.json"
@@ -4447,7 +4447,7 @@ class RoundExposureTests(unittest.TestCase):
             import contextlib
             import io
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                _run_with_home(home, lambda: jw_round.close(
+                _run_with_home(home, lambda: round.close(
                     root, "2026-01-02-close", done=["chore/close-me"], touched=[], commit="HEAD"))
             p = self._exposure_dir(root, home) / "round-2026-01-02-close.json"
             exp = _json.loads(p.read_text())
@@ -4461,7 +4461,7 @@ class RoundExposureTests(unittest.TestCase):
             import io
             for _ in range(2):
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                    _run_with_home(home, lambda: jw_round.close(
+                    _run_with_home(home, lambda: round.close(
                         root, "2026-01-02-close", done=["chore/close-me"], touched=[], commit="HEAD"))
             edir = self._exposure_dir(root, home)
             self.assertTrue((edir / "round-2026-01-02-close.json").exists())
@@ -4470,17 +4470,17 @@ class RoundExposureTests(unittest.TestCase):
     def test_exposure_failure_keeps_close_success(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _round_review_project(d)
-            orig = jw_overlay.write_round_exposure
-            jw_overlay.write_round_exposure = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk full"))
+            orig = overlay.write_round_exposure
+            overlay.write_round_exposure = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk full"))
             import contextlib
             import io
             err = io.StringIO()
             try:
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-                    rc = _run_with_home(home, lambda: jw_round.close(
+                    rc = _run_with_home(home, lambda: round.close(
                         root, "2026-01-02-close", done=["chore/close-me"], touched=[], commit="HEAD"))
             finally:
-                jw_overlay.write_round_exposure = orig
+                overlay.write_round_exposure = orig
             self.assertEqual(rc, 0)  # close still succeeds (S11)
             self.assertIn("exposure", err.getvalue().lower())
 
@@ -4489,7 +4489,7 @@ class ReplayTests(unittest.TestCase):
     """0.8.0 M2 §5 — deterministic shadow replay and the replay-backed promote gate."""
 
     def _delegation_corpus(self, root, home):
-        ddir = _run_with_home(home, lambda: jw_delegate._delegations_dir(root))
+        ddir = _run_with_home(home, lambda: delegate._delegations_dir(root))
         verified = ddir / "d-verified" / "artifact"
         missing = ddir / "d-missing" / "artifact"
         corrupt = ddir / "d-corrupt" / "artifact"
@@ -4509,7 +4509,7 @@ class ReplayTests(unittest.TestCase):
             _add_delta(root, home)
             self._delegation_corpus(root, home)
             report = _run_with_home(
-                home, lambda: jw_overlay.replay(root, "verification_debt/skip"))
+                home, lambda: overlay.replay(root, "verification_debt/skip"))
             self.assertEqual(report["corpus"], "delegations")
             self.assertEqual(report["corpus_size"], 3)  # contract-bearing records, corrupt included
             self.assertEqual(report["opportunities"], 2)  # corrupt excluded from the denominator
@@ -4519,7 +4519,7 @@ class ReplayTests(unittest.TestCase):
             self.assertEqual(report["examples"], ["d-missing/artifact/contract.yaml"])
             self.assertIsNone(report["estimated_nuisance_rate"])
             self.assertEqual(report["nuisance_provenance"], "unlabeled")
-            delta = _run_with_home(home, lambda: jw_overlay.load_delta(root, "verification_debt/skip"))
+            delta = _run_with_home(home, lambda: overlay.load_delta(root, "verification_debt/skip"))
             self.assertIn("replayed_at", delta["replay"])
             self.assertNotIn("replayed_at", report)
 
@@ -4534,7 +4534,7 @@ class ReplayTests(unittest.TestCase):
             def run_once():
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
-                    rc = _run_with_home(home, lambda: jw_overlay.main(
+                    rc = _run_with_home(home, lambda: overlay.main(
                         ["replay", "verification_debt/skip", "--root", str(root)]))
                 self.assertEqual(rc, 0)
                 return out.getvalue().encode()
@@ -4552,7 +4552,7 @@ class ReplayTests(unittest.TestCase):
             root, home = _overlay_project(d)
             _add_delta(root, home)
             report = _run_with_home(
-                home, lambda: jw_overlay.replay(root, "verification_debt/skip"))
+                home, lambda: overlay.replay(root, "verification_debt/skip"))
             self.assertEqual(report["corpus_size"], 0)
             self.assertEqual(report["opportunities"], 0)
             self.assertIsNone(report["fire_rate"])
@@ -4564,7 +4564,7 @@ class ReplayTests(unittest.TestCase):
             _add_delta(root, home, delta_id="review_association/open",
                        rule="round-close-open-findings-v1")
             report = _run_with_home(
-                home, lambda: jw_overlay.replay(root, "review_association/open"))
+                home, lambda: overlay.replay(root, "review_association/open"))
             self.assertEqual(report["corpus"], "reviews")
             self.assertEqual(report["corpus_size"], 1)
             self.assertEqual(report["opportunities"], 1)
@@ -4572,7 +4572,7 @@ class ReplayTests(unittest.TestCase):
             self.assertEqual(report["unlinked_findings"], 1)
             self.assertEqual(report["resolution_provenance"], "current-task-state-approximation")
             promoted = _run_with_home(
-                home, lambda: jw_overlay.promote(root, "review_association/open"))
+                home, lambda: overlay.promote(root, "review_association/open"))
             self.assertEqual(promoted["status"], "warning")
 
 
@@ -4603,7 +4603,7 @@ class EvidenceTests(unittest.TestCase):
             "| JW-GPT-002 — unknown link | `major` | NEEDS-RULING | ev | |\n")
         home = d / "home"
         home.mkdir()
-        ddir = _run_with_home(home, lambda: jw_delegate._delegations_dir(root))
+        ddir = _run_with_home(home, lambda: delegate._delegations_dir(root))
         self._delegation(ddir / "did-unverified", "fix/open", "needs-review", verified=False)
         self._delegation(ddir / "did-verified", "feat/deleg-only", "applied", verified=True)
         registry = d / "projects.json"
@@ -4633,7 +4633,7 @@ class EvidenceTests(unittest.TestCase):
             root, home, registry = self._fixture(d)
             out = Path(d) / "out"
             coverage = _run_with_home(
-                home, lambda: jw_improve.run_evidence(registry, out, set()))
+                home, lambda: improve.run_evidence(registry, out, set()))
             rows = self._rows(out)
             task_rows = {r["task_id"]: r for r in rows if "task_id" in r}
             self.assertEqual(sorted(task_rows), ["feat/deleg-only", "fix/open", "fix/task-only"])
@@ -4658,8 +4658,8 @@ class EvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root, home, registry = self._fixture(d)
             out = Path(d) / "out"
-            _run_with_home(home, lambda: jw_improve.run_evidence(registry, out, set()))
-            facts = jw_improve.run_audit(out)
+            _run_with_home(home, lambda: improve.run_evidence(registry, out, set()))
+            facts = improve.run_audit(out)
             lens = next(x for x in facts["lenses"] if x["lens"] == "evidence_link")
             self.assertEqual(lens["rule"], "evidence-link-v1")
             self.assertEqual(lens["provenance"], "explicit")
@@ -4679,9 +4679,9 @@ class EvidenceTests(unittest.TestCase):
             next(t for t in tasks["tasks"] if t["id"] == "fix/open")["status"] = "done"
             (root / "tasks.yaml").write_text(yaml.safe_dump(tasks, sort_keys=False))
             out = Path(d) / "out"
-            _run_with_home(home, lambda: jw_improve.run_evidence(registry, out, set()))
+            _run_with_home(home, lambda: improve.run_evidence(registry, out, set()))
             rows = {r["task_id"]: r for r in self._rows(out) if "task_id" in r}
-            facts = jw_improve.run_audit(out)
+            facts = improve.run_audit(out)
             lens = next(x for x in facts["lenses"] if x["lens"] == "evidence_link")
             self.assertEqual(rows["fix/open"]["findings"][0]["status"], "REAL")
             self.assertEqual(rows["fix/open"]["task_status"], "done")
@@ -4697,15 +4697,15 @@ class EvidenceTests(unittest.TestCase):
             feedback.write_text(feedback.read_text().replace(
                 "| JW-GPT-002 — unknown link | `major` | NEEDS-RULING | ev | |",
                 "| JW-GPT-002 — external task | `major` | NEEDS-RULING | ev | `feat/deleg-only` |"))
-            ddir = _run_with_home(home, lambda: jw_delegate._delegations_dir(root))
+            ddir = _run_with_home(home, lambda: delegate._delegations_dir(root))
             self._delegation(
                 ddir / "did-unverified-external", "feat/deleg-only", "needs-review", verified=False)
             out = Path(d) / "out"
-            _run_with_home(home, lambda: jw_improve.run_evidence(registry, out, set()))
+            _run_with_home(home, lambda: improve.run_evidence(registry, out, set()))
             rows = {r["task_id"]: r for r in self._rows(out) if "task_id" in r}
             self.assertEqual(rows["feat/deleg-only"]["findings"], [{
                 "round": "2026-01-01-r1", "severity": "major", "status": "NEEDS-RULING"}])
-            facts = jw_improve.run_audit(out)
+            facts = improve.run_audit(out)
             lens = next(x for x in facts["lenses"] if x["lens"] == "evidence_link")
             self.assertEqual(lens["per_project"]["proj-a"]["tasks_joined"], 2)
             self.assertEqual(
@@ -4717,15 +4717,15 @@ class EvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root, home, registry = self._fixture(d)
             o1, o2 = Path(d) / "o1", Path(d) / "o2"
-            _run_with_home(home, lambda: jw_improve.run_evidence(registry, o1, {"proj-a"}))
-            _run_with_home(home, lambda: jw_improve.run_evidence(registry, o2, {"proj-a"}))
+            _run_with_home(home, lambda: improve.run_evidence(registry, o1, {"proj-a"}))
+            _run_with_home(home, lambda: improve.run_evidence(registry, o2, {"proj-a"}))
             self.assertEqual((o1 / "evidence.jsonl").read_bytes(),
                              (o2 / "evidence.jsonl").read_bytes())
             import contextlib
             import io
             out = Path(d) / "cli"
             with contextlib.redirect_stdout(io.StringIO()):
-                rc = _run_with_home(home, lambda: jw_improve.main(
+                rc = _run_with_home(home, lambda: improve.main(
                     ["evidence", "--out", str(out), "--project", "proj-a"]))
             self.assertEqual(rc, 0)
             self.assertEqual([r for r in self._rows(o1) if "task_id" in r],
@@ -4767,19 +4767,19 @@ class DelegateVerifyTests(unittest.TestCase):
 
         _deleg_run(root, home, runner)
         rec = _latest_rec(root, home)
-        worktree = _run_with_home(home, lambda: jw_delegate._worktree_path(root, rec.name))
+        worktree = _run_with_home(home, lambda: delegate._worktree_path(root, rec.name))
         ignored = worktree / ".ignored-cache" / "keep.txt"
         ignored.parent.mkdir()
         ignored.write_text("keep")
         return root, home, rec, worktree, plugin
 
     def _with_companion(self, fake, fn):
-        orig = jw_delegate._run_companion
-        jw_delegate._run_companion = fake
+        orig = delegate._run_companion
+        delegate._run_companion = fake
         try:
             return fn()
         finally:
-            jw_delegate._run_companion = orig
+            delegate._run_companion = orig
 
     def test_success_normalizes_committed_delegate_and_preserves_labels(self):
         with tempfile.TemporaryDirectory() as d:
@@ -4794,14 +4794,14 @@ class DelegateVerifyTests(unittest.TestCase):
             import io
             with contextlib.redirect_stdout(io.StringIO()):
                 rc = _run_with_home(home, lambda: self._with_companion(
-                    fake, lambda: jw_delegate.verify_delegation(root, rec.name)))
+                    fake, lambda: delegate.verify_delegation(root, rec.name)))
             self.assertEqual(rc, 0)
             contract = yaml.safe_load((rec / "artifact" / "contract.yaml").read_text())
             self.assertEqual(git(worktree, "rev-parse", "HEAD").stdout.strip(), contract["base_sha"])
             self.assertEqual((worktree / "f.txt").read_text(), "delegate result\n")
             self.assertEqual((worktree / "blob.bin").read_bytes(), bytes(range(256)))
             self.assertTrue((worktree / ".ignored-cache" / "keep.txt").exists())
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "needs-review")
+            self.assertEqual(delegate._read_status(rec)["state"], "needs-review")
             self.assertEqual(len(calls), 1)
             args = calls[0][1]
             self.assertEqual(args[:-1], [
@@ -4828,9 +4828,9 @@ class DelegateVerifyTests(unittest.TestCase):
                 called["n"] += 1
                 return (0, "{}")
 
-            with self.assertRaises(jw_delegate.WorkflowError) as cm:
+            with self.assertRaises(delegate.WorkflowError) as cm:
                 _run_with_home(home, lambda: self._with_companion(
-                    fake, lambda: jw_delegate.verify_delegation(root, rec.name)))
+                    fake, lambda: delegate.verify_delegation(root, rec.name)))
             self.assertIn("empty", str(cm.exception))
             self.assertEqual(called["n"], 0)
 
@@ -4853,9 +4853,9 @@ class DelegateVerifyTests(unittest.TestCase):
                     called["n"] += 1
                     return (0, "{}")
 
-                with self.assertRaises(jw_delegate.WorkflowError) as cm:
+                with self.assertRaises(delegate.WorkflowError) as cm:
                     _run_with_home(home, lambda: self._with_companion(
-                        fake, lambda: jw_delegate.verify_delegation(root, rec.name)))
+                        fake, lambda: delegate.verify_delegation(root, rec.name)))
                 self.assertIn(needle, str(cm.exception))
                 self.assertEqual(called["n"], 0)
 
@@ -4869,9 +4869,9 @@ class DelegateVerifyTests(unittest.TestCase):
                 called["n"] += 1
                 return (0, "{}")
 
-            with self.assertRaises(jw_delegate.WorkflowError) as cm:
+            with self.assertRaises(delegate.WorkflowError) as cm:
                 _run_with_home(home, lambda: self._with_companion(
-                    fake, lambda: jw_delegate.verify_delegation(root, rec.name)))
+                    fake, lambda: delegate.verify_delegation(root, rec.name)))
             self.assertIn("patch_file", str(cm.exception))
             self.assertEqual(called["n"], 0)
 
@@ -4897,23 +4897,23 @@ class DelegateVerifyTests(unittest.TestCase):
             def exercise():
                 def first():
                     try:
-                        jw_delegate.verify_delegation(root, rec.name)
+                        delegate.verify_delegation(root, rec.name)
                     except Exception as e:  # captured for assertion in the main test thread
                         first_errors.append(e)
 
-                orig = jw_delegate._run_companion
-                jw_delegate._run_companion = fake
+                orig = delegate._run_companion
+                delegate._run_companion = fake
                 thread = threading.Thread(target=first)
                 try:
                     thread.start()
                     self.assertTrue(entered.wait(5))
-                    with self.assertRaises(jw_delegate.WorkflowError) as cm:
-                        jw_delegate.verify_delegation(root, rec.name)
+                    with self.assertRaises(delegate.WorkflowError) as cm:
+                        delegate.verify_delegation(root, rec.name)
                     self.assertIn("verify already in progress", str(cm.exception))
                 finally:
                     release.set()
                     thread.join(5)
-                    jw_delegate._run_companion = orig
+                    delegate._run_companion = orig
                 self.assertFalse(thread.is_alive())
 
             _run_with_home(home, exercise)
@@ -4932,7 +4932,7 @@ class DelegateVerifyTests(unittest.TestCase):
                 return (0, "{}")
 
             _run_with_home(home, lambda: self._with_companion(
-                fake, lambda: jw_delegate.verify_delegation(root, rec.name)))
+                fake, lambda: delegate.verify_delegation(root, rec.name)))
             self.assertFalse(lock.exists())
 
     def test_verify_artifact_name_collision_never_overwrites(self):
@@ -4940,7 +4940,7 @@ class DelegateVerifyTests(unittest.TestCase):
             root, home, rec, worktree, plugin = self._setup(d, committed=False)
             sentinel = {"sentinel": True}
             injected = {"done": False}
-            orig_paths = jw_delegate._verify_paths
+            orig_paths = delegate._verify_paths
 
             def raced_paths(record_dir):
                 paths = orig_paths(record_dir)
@@ -4953,12 +4953,12 @@ class DelegateVerifyTests(unittest.TestCase):
             def fake(*args):
                 return (0, _json.dumps({"run": "new"}))
 
-            jw_delegate._verify_paths = raced_paths
+            delegate._verify_paths = raced_paths
             try:
                 _run_with_home(home, lambda: self._with_companion(
-                    fake, lambda: jw_delegate.verify_delegation(root, rec.name)))
+                    fake, lambda: delegate.verify_delegation(root, rec.name)))
             finally:
-                jw_delegate._verify_paths = orig_paths
+                delegate._verify_paths = orig_paths
             self.assertEqual(_json.loads((rec / "artifact" / "verify-1.json").read_text()), sentinel)
             self.assertEqual(
                 _json.loads((rec / "artifact" / "verify-2.json").read_text())["payload"]["run"],
@@ -4978,15 +4978,15 @@ class DelegateVerifyTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 for _ in range(2):
                     _run_with_home(home, lambda: self._with_companion(
-                        fake, lambda: jw_delegate.verify_delegation(root, rec.name)))
+                        fake, lambda: delegate.verify_delegation(root, rec.name)))
             self.assertTrue((rec / "artifact" / "verify-1.json").exists())
             self.assertTrue((rec / "artifact" / "verify-2.json").exists())
             summary = io.StringIO()
             latest = io.StringIO()
             with contextlib.redirect_stdout(summary):
-                _run_with_home(home, lambda: jw_delegate.show(root, rec.name, None))
+                _run_with_home(home, lambda: delegate.show(root, rec.name, None))
             with contextlib.redirect_stdout(latest):
-                _run_with_home(home, lambda: jw_delegate.show(root, rec.name, "verify"))
+                _run_with_home(home, lambda: delegate.show(root, rec.name, "verify"))
             self.assertIn("verify_artifacts: 2", summary.getvalue())
             self.assertEqual(_json.loads(latest.getvalue())["payload"]["run"], 2)
 
@@ -5000,15 +5000,15 @@ class DelegateVerifyTests(unittest.TestCase):
                 called["n"] += 1
                 return (0, "{}")
 
-            with self.assertRaises(jw_delegate.WorkflowError) as cm:
+            with self.assertRaises(delegate.WorkflowError) as cm:
                 _run_with_home(home, lambda: self._with_companion(
-                    fake, lambda: jw_delegate.verify_delegation(root, rec.name)))
+                    fake, lambda: delegate.verify_delegation(root, rec.name)))
             self.assertIn("codex plugin not installed", str(cm.exception))
             self.assertEqual(called["n"], 0)
-            _run_with_home(home, lambda: jw_delegate._set_state(rec, "applied"))
-            with self.assertRaises(jw_delegate.WorkflowError):
+            _run_with_home(home, lambda: delegate._set_state(rec, "applied"))
+            with self.assertRaises(delegate.WorkflowError):
                 _run_with_home(home, lambda: self._with_companion(
-                    fake, lambda: jw_delegate.verify_delegation(root, rec.name)))
+                    fake, lambda: delegate.verify_delegation(root, rec.name)))
             self.assertEqual(called["n"], 0)
 
     def test_unimplemented_execution_and_entry_fail_loud(self):
@@ -5024,8 +5024,8 @@ class DelegateVerifyTests(unittest.TestCase):
                         "  implementer: {execution: external-runner, backend: \"codex:x\"}\n"
                         f"  verifier: {verifier}\n")
                 _write_profile(home, body)
-                with self.assertRaises(jw_delegate.WorkflowError) as cm:
-                    _run_with_home(home, lambda: jw_delegate.verify_delegation(root, rec.name))
+                with self.assertRaises(delegate.WorkflowError) as cm:
+                    _run_with_home(home, lambda: delegate.verify_delegation(root, rec.name))
                 self.assertIn(needle, str(cm.exception))
 
     def test_normalization_failure_and_companion_failure_leave_state_unchanged(self):
@@ -5041,20 +5041,20 @@ class DelegateVerifyTests(unittest.TestCase):
                 called["n"] += 1
                 return (3, "failed")
 
-            with self.assertRaises(jw_delegate.WorkflowError):
+            with self.assertRaises(delegate.WorkflowError):
                 _run_with_home(home, lambda: self._with_companion(
-                    fake, lambda: jw_delegate.verify_delegation(root, rec.name)))
+                    fake, lambda: delegate.verify_delegation(root, rec.name)))
             self.assertEqual(called["n"], 0)
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "needs-review")
+            self.assertEqual(delegate._read_status(rec)["state"], "needs-review")
             self.assertEqual(list((rec / "artifact").glob("verify-*.json")), [])
 
             contract["base_sha"] = _json.loads((rec / "exposure.json").read_text())["base"]["snapshot_sha"]
             contract_path.write_text(yaml.safe_dump(contract, sort_keys=False))
-            with self.assertRaises(jw_delegate.WorkflowError):
+            with self.assertRaises(delegate.WorkflowError):
                 _run_with_home(home, lambda: self._with_companion(
-                    fake, lambda: jw_delegate.verify_delegation(root, rec.name)))
+                    fake, lambda: delegate.verify_delegation(root, rec.name)))
             self.assertEqual(called["n"], 1)
-            self.assertEqual(jw_delegate._read_status(rec)["state"], "needs-review")
+            self.assertEqual(delegate._read_status(rec)["state"], "needs-review")
             self.assertEqual(list((rec / "artifact").glob("verify-*.json")), [])
 
     def test_broker_shutdown_rpc_targets_only_exact_worktree_key(self):
@@ -5063,7 +5063,7 @@ class DelegateVerifyTests(unittest.TestCase):
             root.mkdir()
             init_repo(root)
             state_root = Path(d) / "state"
-            state_dir = jw_delegate._companion_state_dir(root, state_root=state_root)
+            state_dir = delegate._companion_state_dir(root, state_root=state_root)
             state_dir.mkdir(parents=True)
             other = state_root / "other-deadbeef"
             other.mkdir(parents=True)
@@ -5089,12 +5089,12 @@ class DelegateVerifyTests(unittest.TestCase):
 
             (state_dir / "broker.json").write_text(_json.dumps({
                 "endpoint": f"unix:{sock_path}", "pid": 999999, "cwd": str(root.resolve())}))
-            orig = jw_delegate.socket.socket
-            jw_delegate.socket.socket = lambda *args: FakeSocket()
+            orig = delegate.socket.socket
+            delegate.socket.socket = lambda *args: FakeSocket()
             try:
-                result = jw_delegate._cleanup_companion_broker(root, state_root=state_root)
+                result = delegate._cleanup_companion_broker(root, state_root=state_root)
             finally:
-                jw_delegate.socket.socket = orig
+                delegate.socket.socket = orig
             self.assertEqual(calls["connect"], [str(sock_path)])
             self.assertIn('"method":"broker/shutdown"', calls["sent"][0].replace(" ", ""))
             self.assertIn("shutdown", result)
@@ -5115,20 +5115,20 @@ class UvCacheTests(unittest.TestCase):
             prompt = Path(d) / "prompt.txt"
             prompt.write_text("prompt")
             seen = []
-            orig = jw_delegate.subprocess.run
+            orig = delegate.subprocess.run
 
             def fake(*args, **kwargs):
                 seen.append(kwargs.get("env"))
                 return types.SimpleNamespace(returncode=0, stderr="")
 
             before = os.environ.get("UV_CACHE_DIR")
-            jw_delegate.subprocess.run = fake
+            delegate.subprocess.run = fake
             try:
-                self.assertEqual(jw_delegate._run_env_prep(worktree, ["true"])[0], 0)
-                self.assertEqual(jw_delegate._run_codex(
+                self.assertEqual(delegate._run_env_prep(worktree, ["true"])[0], 0)
+                self.assertEqual(delegate._run_codex(
                     worktree, "gpt-5.6-sol", prompt, record)[0], 0)
             finally:
-                jw_delegate.subprocess.run = orig
+                delegate.subprocess.run = orig
             expected = str(worktree / ".jw-uv-cache")
             self.assertEqual([env["UV_CACHE_DIR"] for env in seen], [expected, expected])
             self.assertEqual(os.environ.get("UV_CACHE_DIR"), before)
@@ -5169,19 +5169,19 @@ class UvCacheTests(unittest.TestCase):
             prompt = Path(d) / "prompt.txt"
             prompt.write_text("prompt")
             commands = []
-            orig = jw_delegate.subprocess.run
+            orig = delegate.subprocess.run
 
             def fake(cmd, **kwargs):
                 commands.append(cmd)
                 return types.SimpleNamespace(returncode=0)
 
-            jw_delegate.subprocess.run = fake
+            delegate.subprocess.run = fake
             try:
-                jw_delegate._run_codex(
+                delegate._run_codex(
                     worktree, "gpt-test", prompt, record, effort="high")
-                jw_delegate._run_codex(worktree, "gpt-test", prompt, record)
+                delegate._run_codex(worktree, "gpt-test", prompt, record)
             finally:
-                jw_delegate.subprocess.run = orig
+                delegate.subprocess.run = orig
             self.assertIn("-c", commands[0])
             self.assertIn('model_reasoning_effort="high"', commands[0])
             self.assertNotIn("-c", commands[1])
@@ -5223,7 +5223,7 @@ class ContractInjectTests(unittest.TestCase):
             sys.argv = old_argv
 
     def _delegation(self, root, home, did, state):
-        rec = _run_with_home(home, lambda: jw_delegate._record_dir(root, did))
+        rec = _run_with_home(home, lambda: delegate._record_dir(root, did))
         rec.mkdir(parents=True)
         (rec / "exposure.json").write_text(_json.dumps({"task_id": "feat/active"}))
         (rec / "status.json").write_text(_json.dumps({"state": state}))
@@ -5234,10 +5234,10 @@ class ContractInjectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(d)
             _write_profile(home, DelegateVerifyTests._PROFILE)
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "verification_debt/warn", rule="delegation-verification-evidence-v1",
                 summary="s"))
-            _run_with_home(home, lambda: jw_overlay.add_delta(
+            _run_with_home(home, lambda: overlay.add_delta(
                 root, "review_association/observe", rule="round-close-open-findings-v1",
                 summary="s"))
             _force_status(root, home, "verification_debt/warn", "warning")
@@ -5251,7 +5251,7 @@ class ContractInjectTests(unittest.TestCase):
                  "delegations": [{"verification_present": False}]},
                 {"coverage": {"projects_scanned": ["demo"]}},
             ])
-            sh = _run_with_home(home, lambda: jw_common.start_here_path(root))
+            sh = _run_with_home(home, lambda: common.start_here_path(root))
             sh.parent.mkdir(parents=True, exist_ok=True)
             sh.write_text("FRONTIER")
 
@@ -5288,7 +5288,7 @@ class ContractInjectTests(unittest.TestCase):
             profile = home / ".claude" / "jahns-workflow" / "profile.yml"
             profile.parent.mkdir(parents=True)
             profile.write_text("bindings: [\n")
-            delta = _run_with_home(home, lambda: jw_overlay._deltas_dir(root)) / "bad.json"
+            delta = _run_with_home(home, lambda: overlay._deltas_dir(root)) / "bad.json"
             delta.parent.mkdir(parents=True)
             delta.write_text("{bad")
             rec = self._delegation(root, home, "did-corrupt", "needs-review")
@@ -5342,7 +5342,7 @@ class M2DocsTests(unittest.TestCase):
         self.assertIn("rounds_with_feedback >= 5", text)
         self.assertIn("findings_total >= 20", text)
         self.assertIn("Tune", text)
-        self.assertIn("jw.py overlay add", text)
+        self.assertIn("waystone.py overlay add", text)
         self.assertIn("Never write delta JSON", text)
         self.assertIn("prevented", text)
         self.assertIn("improved", text)
@@ -5352,9 +5352,9 @@ class M2DocsTests(unittest.TestCase):
         readme = (SCRIPTS.parent / "README.md").read_text()
         for surface in ("jw overlay", "jw check", "jw improve evidence", "jw delegate verify"):
             self.assertIn(f"`{surface}`", readme)
-        import jw
+        import waystone
         for surface in ("improve", "evidence", "delegate", "verify", "overlay", "check"):
-            self.assertIn(surface, jw.__doc__)
+            self.assertIn(surface, waystone.__doc__)
 
     def test_conventions_state_overlay_evidence_invariants_and_residence(self):
         text = (SCRIPTS.parent / "references" / "conventions.md").read_text()

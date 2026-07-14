@@ -30,7 +30,7 @@ REASON = (
 
 
 def _find_project_root(start: Path) -> Path | None:
-    """Walk upward from `start` to the directory holding .jahns-workflow.yml (mirrors jw_common)."""
+    """Walk upward from `start` to the directory holding .jahns-workflow.yml (mirrors common)."""
     cur = start.resolve()
     for p in (cur, *cur.parents):
         if (p / CONFIG_NAME).is_file():
