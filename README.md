@@ -17,6 +17,7 @@ Full convention: [references/conventions.md](references/conventions.md).
 
 | | |
 |---|---|
+| `/waystone:ideate` | Forge a north-star `SSOT.md` from a half-formed idea through Socratic questioning — the ideation front door, before any structure exists. |
 | `/waystone:init` | Set up or retrofit a project — non-destructive; existing history and docs are never rewritten. |
 | `/waystone:round` | Close a round: sync the registry, append PROGRESS, regenerate views, write the review request. |
 | `/waystone:review` | Ingest a reviewer's reply verbatim, verify each finding, register the real ones as tasks. |
