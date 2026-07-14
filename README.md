@@ -245,8 +245,8 @@ conventions.
 - Main session owns task routing, hard decisions, and final acceptance.
 - Verification evidence must be recorded before final reporting or round close.
 - Don't use internal jargons and explain intuitively when reporting or asking for decision to user.
-- Task state lives in `jw task`, generated roadmap/progress, and workflow artifacts.
-- Nontrivial implementation should go through `jw delegate` unless explicitly justified.
+- Task state lives in `waystone task`, generated roadmap/progress, and workflow artifacts.
+- Nontrivial implementation should go through `waystone delegate` unless explicitly justified.
 ```
 
 ## Development
