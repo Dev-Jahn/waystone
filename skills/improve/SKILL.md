@@ -1,7 +1,7 @@
 ---
 name: improve
 description: This skill should be used when the user runs "/waystone:improve" in Claude Code or "$waystone:improve" in Codex, asks for workflow-improvement suggestions, wants to analyze their Claude Code or Codex 작업 이력 (work history), requests 개선 제안 grounded in past sessions, or asks "how can I work better / where am I wasting effort across my projects". It mines the user's existing host session logs plus round/review evidence into deterministic facts, then presents evidence-grounded, provenance-labeled recommendations for the user to accept or reject — recording each decision without applying anything automatically.
-argument-hint: "[--source DIR] [--project SLUG] (optional — defaults to all your host session logs)"
+argument-hint: "[--source DIR] [--user-wide] (optional — defaults to the current project)"
 ---
 
 # waystone: improve
@@ -16,19 +16,20 @@ argument-hint: "[--source DIR] [--project SLUG] (optional — defaults to all yo
 - Resolve plugin resources from `$WAYSTONE_PLUGIN_ROOT`. Ask required choices through the host's native
   user-interaction mechanism; never require a specifically named question tool.
 
-Produce an **advisory** workflow-improvement report grounded in the user's actual host session
-history and review evidence. Record each accept/reject. For the small finite set of mapped
-recommendations, separately offer an observation-only overlay; never materialize one without a
-second explicit consent.
+Produce an **advisory** workflow-improvement report for the current project, grounded in the
+user's actual host session history and review evidence. Record each accept/reject. For the small
+finite set of mapped recommendations, separately offer an observation-only overlay; never
+materialize one without a second explicit consent.
 
-`improve` reads global logs and the project registry, so it does **not** require the current
-directory to be an initialized project.
+By default, run inside an initialized project and keep the analysis in that project. Use
+`--user-wide` only when the user explicitly asks for cross-project user-habit analysis; that mode
+does not require the current directory to be an initialized project.
 
 ## Step 1 — Collect the evidence (deterministic)
 
 Run exactly one host-specific trace, then the other three deterministic projections in order with
-the current host's launcher. They write into the host data root by default:
-`~/.claude/waystone/improve/` for Claude Code or `~/.codex/waystone/improve/` for Codex.
+the current host's launcher. Project mode is the default: it filters the host logs to the current
+project and writes every artifact to `{project_root}/.waystone/improve/`.
 
 ```bash
 waystone improve trace                 # Claude Code
@@ -40,14 +41,19 @@ waystone improve evidence
 waystone improve audit
 ```
 
+For explicit cross-project user-habit analysis, pass `--user-wide` to **every** command above.
+That mode scans its user-wide scope and writes to `~/.waystone/improve/` (or the equivalent under
+`$WAYSTONE_HOME`). Do not mix project-mode and user-wide artifacts in one run.
+
 - The default source is host-specific: Claude Code uses `$CLAUDE_CONFIG_DIR/projects`, else
   `~/.claude/projects`; Codex uses `$CODEX_HOME/sessions`, else `~/.codex/sessions`.
-  When the user names targets, pass them through unchanged:
-  `improve trace --source <DIR> --project <SLUG>` (both repeatable), and pass each selected project
-  to `improve evidence --project <SLUG>`. `reviews` scans the registry; `audit` reads the shared out dir.
+  When the user names log directories, pass each through as repeatable `--source <DIR>` values.
+  `--project <SLUG>` is available only with `--user-wide`. In project mode, `reviews` and
+  `evidence` use only the current project; in user-wide mode they scan the registered projects.
+  `audit` reads the output residence for the selected mode.
 - These are free, deterministic, and re-runnable — do **not** re-implement any of their parsing in
   the model; run the scripts and read their outputs.
-- `reviews` scans the registered projects; any it cannot reach are listed in
+- In user-wide mode, registered projects that `reviews` cannot reach are listed in
   `reviews_coverage.json` (not silently dropped) — carry that into the report's coverage note.
 - If a prior `decisions.jsonl` already exists in the out dir, read it now — Step 4 needs it.
 
@@ -134,11 +140,13 @@ re-ran the audit.
 
 ## Step 5 — Report
 
-Report in the user's configured language. Lead with the per-project maturity framing, then list recommendations
-ordered by evidence strength and impact — each with its lens, numbers, evidence pointer, and
-strength label — and note any coverage caveats. Close by summarizing what was accepted vs rejected,
-which observation-only deltas (if any) were separately created, and where the decision log lives
-(`<host-data-root>/improve/decisions.jsonl`).
+Report in the user's configured language. In project mode, lead with that project's maturity
+framing; in user-wide mode, identify the report as a cross-project user-habit analysis. Then list
+recommendations ordered by evidence strength and impact — each with its lens, numbers, evidence
+pointer, and strength label — and note any coverage caveats. Close by summarizing what was accepted
+vs rejected, which observation-only deltas (if any) were separately created, and where the decision
+log lives (`{project_root}/.waystone/improve/decisions.jsonl` by default or
+`~/.waystone/improve/decisions.jsonl` with `--user-wide`).
 
 End with the **next-step reminder**:
 

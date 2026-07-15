@@ -30,9 +30,7 @@ dependencies are all done (stale `blocked` status), projects with `✗ path miss
 pending `decision/...` tasks awaiting the user. Otherwise add nothing.
 
 Projects appear here after `/waystone:init` in Claude Code or `$waystone:init` in Codex registers
-them. Projects without a local
-clone on this machine can be tracked remotely: add `{ "name": "...", "repo": "owner/name" }`
-to the host registry (`~/.claude/waystone/projects.json` or `~/.codex/waystone/projects.json`)
-and the dashboard fetches their `tasks.yaml` via
-`gh api` (default branch). Each project's visual dependency graph is its `ROADMAP.md`
-(rendered by GitHub as Mermaid).
+them with `waystone project register <project-root>`. Use `waystone project list` to inspect the
+machine registry and `waystone paths` to see its resolved location; do not edit `projects.json`
+directly. Each project's visual dependency graph is its `ROADMAP.md` (rendered by GitHub as
+Mermaid).

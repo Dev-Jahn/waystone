@@ -57,10 +57,10 @@ HARD rules:
 
 ## Step 4 — Offer independent verification
 
-Use the current host's data root (`~/.claude/waystone` for Claude Code,
-`~/.codex/waystone` for Codex). If its `profile.yml` has a verifier binding, ask once through
-the host-native interaction mechanism whether to run it. The binding's `execution` must be
-`codex-companion` for Claude Code and `codex-cli` for Codex. If accepted:
+Use the single project profile at `{project_root}/.waystone/profile.yml`; run
+`waystone paths --root <project-root>` to see the resolved path. If it has a verifier binding, ask once through
+the host-native interaction mechanism whether to run it. The verifier binding's `execution` key
+should normally be absent so Waystone derives the transport from the current host. If accepted:
 
 ```bash
 waystone delegate verify <delegation-id> --root <project-root>

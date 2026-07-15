@@ -6,7 +6,7 @@
 """Cross-project terminal dashboard for all waystone projects.
 
 Usage: dashboard.py [--project NAME]
-Reads the global registry (~/.waystone/projects.json). Entry forms:
+Reads the machine registry ($WAYSTONE_HOME/projects.json, default ~/.waystone/projects.json). Entry forms:
   { "name": "...", "path": "/abs/local/clone" }   — local: git state + tasks.yaml from disk
   { "name": "...", "repo": "owner/name" }          — remote: tasks.yaml fetched via `gh api`
   both                                             — local preferred while the path exists

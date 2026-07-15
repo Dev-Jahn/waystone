@@ -6920,7 +6920,10 @@ class M2DocsTests(unittest.TestCase):
 
     def test_readme_and_front_door_name_all_new_surfaces(self):
         readme = (SCRIPTS.parent / "README.md").read_text()
-        for surface in ("waystone overlay", "waystone check", "waystone improve evidence", "waystone delegate verify"):
+        for surface in (
+            "waystone paths", "waystone project", "waystone overlay", "waystone check",
+            "waystone improve evidence", "waystone delegate verify",
+        ):
             self.assertIn(f"`{surface}`", readme)
         import waystone
         for surface in ("improve", "evidence", "delegate", "verify", "overlay", "check"):
@@ -6944,7 +6947,8 @@ class M2DocsTests(unittest.TestCase):
             "non-blocking", "least-restrictive", "task-id", "estimated nuisance rate",
             "workspace-write", "read-only", "independent-verifier",
             "{project_root}/.waystone/overlay/", "{project_root}/.waystone/exposure/",
-            "~/.waystone/improve/evidence.jsonl",
+            "{project_root}/.waystone/improve/evidence.jsonl", "~/.waystone/",
+            "~/.waystone/cache/", ".pre-0.9", "git clean -fdx", "waystone paths",
         ):
             self.assertIn(phrase, text)
 

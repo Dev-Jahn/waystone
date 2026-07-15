@@ -155,7 +155,7 @@ brought back through an explicit artifact contract. The invariants:
   verification it ran, limitations, risks, escalations (written to `JW_REPORT.yaml`) — is carried
   through the contract labeled *delegate-claimed* and is never promoted to fact.
 - **Role sandboxes are fixed, not user knobs.** The implementer runs `workspace-write`; the verifier
-  runs `read-only` through codex-companion. `waystone delegate verify` records its payload as
+  runs `read-only` through the host-derived transport. `waystone delegate verify` records its payload as
   *independent-verifier* evidence and leaves the delegation `needs-review` — only the user chooses
   apply or discard. A per-record `verify.lock` admits only one verifier at a time. The OS releases
   the lock if its process dies; an unlocked leftover marker is stale and reclaimed on the next try.
@@ -172,11 +172,13 @@ brought back through an explicit artifact contract. The invariants:
   the bar. `accept` is deliberately not settable through `waystone task add/set` (comma-splitting free
   text would distort it).
 
-Artifacts live plugin-local (`{project_root}/.waystone/delegations/…`, worktrees under
-`~/.waystone/cache/worktrees/…`), never committed to the repo. The runner backend (model)
-is bound per role in `{project_root}/.waystone/profile.yml`; a missing binding fails loud rather
-than guessing a default. A binding may set `effort` to `none`, `minimal`, `low`, `medium`, `high`,
-or `xhigh`; when omitted, the Codex configuration default is left untouched.
+Delegation records live project-local (`{project_root}/.waystone/delegations/…`) and worktrees live
+under `~/.waystone/cache/worktrees/…`; neither is committed. The runner backend (model) is bound
+per role in `{project_root}/.waystone/profile.yml`; a missing binding fails loud rather than
+guessing a default. A verifier binding should normally omit `execution` so Waystone derives the
+transport from the current host. A binding may set `effort` to `none`, `minimal`, `low`, `medium`,
+`high`, or `xhigh`; when omitted, the Codex configuration default is left untouched. Use
+`waystone paths` to inspect every resolved residence.
 
 ## 9. Adaptive overlays, warnings, and evidence
 
@@ -197,7 +199,25 @@ Adaptive policy is project-local and evidence-bearing:
   gate. If active deltas conflict on the same rule, the effective stage is **least-restrictive** and
   the conflict is recorded as evidence for the next improve cycle.
 
-All artifacts remain plugin-local and are never committed: deltas and warning events under
+Project-mode artifacts remain project-local and are never committed: deltas and warning events under
 `{project_root}/.waystone/overlay/`, per-event policy exposure under
 `{project_root}/.waystone/exposure/`, and the deterministic join projection at
-`~/.waystone/improve/evidence.jsonl`.
+`{project_root}/.waystone/improve/evidence.jsonl`. Only explicit `--user-wide` analysis writes its
+cross-project user-habit projection under `~/.waystone/improve/`.
+
+## 10. Storage tiers, backup, and cleanup
+
+Run `waystone paths` before backup or cleanup so `$WAYSTONE_HOME` and the active project root are
+resolved rather than guessed.
+
+- **Project state — `{project_root}/.waystone/`.** This directory is self-ignored and uncommitted.
+  `git clean -fdx` deletes it. Back up non-reproducible decisions (`improve/decisions.jsonl`) and
+  delegation audit records before destructive cleanup; regenerable projections and resume state
+  do not need backup.
+- **Machine state — `~/.waystone/`.** This holds the project registry and opt-in user-wide improve
+  state. Back it up; `$WAYSTONE_HOME` may resolve this tier elsewhere.
+- **Cache — `~/.waystone/cache/`.** It is safe to delete when no delegation is running; Waystone
+  recreates it as needed.
+- **Migration seeds — `.pre-0.9`.** Preserve legacy `.pre-0.9` roots. They remain the source for
+  lazy project-state migration and profile seeding; cleanup is intentionally outside the 0.9
+  migration.

@@ -17,8 +17,8 @@ into --out (default `<project>/.waystone/improve/`; `--user-wide` uses `~/.wayst
   delegations.jsonl     one row per agent_spawn tool_use
   parse_coverage.json   files-by-kind, event-type counts, unknown/skip/error tallies
 
-`reviews` reads the registered projects (`~/.waystone/projects.json`), resolves each
-`reviews_dir` via `.waystone.yml`, and projects the review evidence already on disk (it never
+`reviews` reads the current project by default (or `~/.waystone/projects.json` with `--user-wide`),
+resolves each `reviews_dir` via `.waystone.yml`, and projects the review evidence already on disk (it never
 re-implements review ingest) into --out:
   reviews.jsonl         one row per review round (findings from the feedback triage table + the
                         finding-derived tasks joined by their `origin: review-<round-id>`)
