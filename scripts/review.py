@@ -26,8 +26,8 @@ Markers (HTML comments embedded in PR comment bodies):
 Subcommands (also `waystone review <sub>`):
   freeze --pr N [--round ID] [root]   stamp the current PR head as a new review cycle + post request
   status [--pr N] [root]              show per-cycle review status (PR mode) or packet pairs (packet mode)
-  ingest [--round ID] [--reviewer M]  byte-exact copy /tmp/review.md → <id>-feedback.md,
-                                      then append a finding triage skeleton
+  ingest [--round ID] [--reviewer M] [--force]  byte-exact copy /tmp/review.md →
+                                                <id>-feedback.md, then append triage
 """
 from __future__ import annotations
 
@@ -42,7 +42,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
 from common import (  # noqa: E402
-    CONFIG_NAME, find_project_root, git_full_sha, load_config, normalize_config,
+    CONFIG_NAME, WorkflowError, find_project_root, git_full_sha, hold_lock, load_config,
+    migrate_project_state, normalize_config, project_lock_path, write_bytes_atomic,
 )
 
 CODEX_BOT = "chatgpt-codex-connector[bot]"  # REST `user.login` form
@@ -581,7 +582,8 @@ def _parse_findings(text: str) -> list[dict]:
     return out
 
 
-def ingest(root: Path, round_id: str | None, src: Path = INBOX, reviewer: str | None = None) -> int:
+def ingest(root: Path, round_id: str | None, src: Path = INBOX, reviewer: str | None = None,
+           force: bool = False) -> int:
     """Byte-exact ingest of an external review reply.
 
     The user saves the reviewer's reply to `src` (default /tmp/review.md) in a separate shell
@@ -632,10 +634,17 @@ def ingest(root: Path, round_id: str | None, src: Path = INBOX, reviewer: str | 
         f"ingested: {datetime.date.today().isoformat()}\n"
         f"source: {src}\n\n---\n\n"
     )
-    with open(dest, "wb") as f:
-        f.write(header.encode("utf-8"))
-        f.write(body)
-        f.write(appended)
+    content = header.encode("utf-8") + body + appended
+    if force:
+        write_bytes_atomic(dest, content)
+    else:
+        try:
+            with open(dest, "xb") as f:
+                f.write(content)
+        except FileExistsError:
+            print(f"review ingest: feedback already exists for round {round_id}: {dest}; "
+                  "pass --force to replace it", file=sys.stderr)
+            return 1
     src.unlink()
     print(f"ingested {len(body)} bytes verbatim → {dest} (consumed {src})")
     print(f"  {len(findings)} finding(s) parsed — verify each before registering")
@@ -658,8 +667,15 @@ def main(argv: list[str]) -> int:
     if root is None:
         print("review: no initialized project (missing .waystone.yml)", file=sys.stderr)
         return 1
+    try:
+        with hold_lock(project_lock_path(root)):
+            migrate_project_state(root)
+    except (WorkflowError, OSError) as e:
+        print(f"waystone review: migration failed: {e}", file=sys.stderr)
+        return 1
     if sub == "ingest":
-        return ingest(root, _opt(rest, "--round"), reviewer=_opt(rest, "--reviewer"))
+        return ingest(root, _opt(rest, "--round"), reviewer=_opt(rest, "--reviewer"),
+                      force="--force" in rest)
     pr_s = _opt(rest, "--pr")
     if sub == "freeze":
         if not pr_s:

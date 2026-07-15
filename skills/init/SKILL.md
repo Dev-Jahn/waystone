@@ -131,10 +131,13 @@ environment/user-preference memories.
 
 ## Step 8 — Register the project
 
-Add `{ "name": <project>, "path": <abs path> }` to the host registry:
-`~/.claude/waystone/projects.json` for Claude Code or `~/.codex/waystone/projects.json` for Codex
-(create `{"projects": []}` if missing; skip if already registered). This feeds
-`/waystone:status` in Claude Code or `$waystone:status` in Codex.
+Register the project through the CLI (idempotent; do not edit `projects.json` directly):
+
+```bash
+waystone project register <project-root>
+```
+
+This feeds `/waystone:status` in Claude Code or `$waystone:status` in Codex.
 
 ## Step 9 — Report
 

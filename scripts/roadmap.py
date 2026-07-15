@@ -18,7 +18,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import find_project_root, git, load_tasks  # noqa: E402
+from common import (  # noqa: E402
+    WorkflowError, find_project_root, git, hold_lock, load_tasks, migrate_project_state,
+    project_lock_path, write_text_atomic,
+)
 
 STATUS_CLASS = {"pending": "pending", "active": "active", "blocked": "blocked",
                 "done": "done", "dropped": "dropped"}
@@ -125,10 +128,17 @@ def main() -> int:
     if root is None or not (root / "tasks.yaml").is_file():
         print("roadmap: no initialized project (missing .waystone.yml / tasks.yaml)", file=sys.stderr)
         return 1
-    out = root / "ROADMAP.md"
-    out.write_text(render(root), encoding="utf-8")
-    print(f"wrote {out}")
-    return 0
+    try:
+        with hold_lock(project_lock_path(root)):
+            migrate_project_state(root)
+        with hold_lock(project_lock_path(root)):
+            out = root / "ROADMAP.md"
+            write_text_atomic(out, render(root))
+            print(f"wrote {out}")
+            return 0
+    except WorkflowError as e:
+        print(e, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

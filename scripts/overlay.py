@@ -27,7 +27,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import (  # noqa: E402
-    WorkflowError, _project_slug, data_dir, find_project_root, load_config,
+    WorkflowError, _project_slug, ensure_project_state_dir, find_project_root, hold_lock,
+    load_config, migrate_project_state, project_lock_path, project_state_path,
 )
 
 # delta-id grammar mirrors the improve rec_id (`<lens>/<kebab-gist>`, S2) so a rec materialises to a
@@ -120,13 +121,9 @@ def evaluate_rule2(root: Path, cfg: dict, severities, *, closing_done=frozenset(
     return {"fires": fires, "unlinked": unlinked, "evaluation_errors": errors}
 
 
-# ---- residence (§2 — plugin-local, keyed by project slug; never committed) -----
-def _plugin_base() -> Path:
-    return data_dir()
-
-
+# ---- residence (§2 — project-local, never committed) --------------------------
 def _overlay_dir(root: Path) -> Path:
-    return _plugin_base() / "overlay" / _project_slug(root)
+    return project_state_path(root) / "overlay"
 
 
 def _deltas_dir(root: Path) -> Path:
@@ -152,12 +149,20 @@ def _mkdir_or_refuse(path: Path) -> None:
         raise _RefusedWrite(f"cannot create plugin-local directory {path}: {e}")
 
 
+def _ensure_project_state_or_refuse(root: Path) -> None:
+    try:
+        ensure_project_state_dir(root)
+    except OSError as e:
+        raise _RefusedWrite(f"cannot create project state directory {project_state_path(root)}: {e}")
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 # ---- delta store (§3 — atomic per-delta JSON; strict single-record reads) ------
 def _write_delta(root: Path, delta: dict) -> None:
+    _ensure_project_state_or_refuse(root)
     ddir = _deltas_dir(root)
     _mkdir_or_refuse(ddir)
     p = _delta_path(root, delta["id"])
@@ -401,6 +406,7 @@ def replay(root: Path, delta_id: str) -> dict:
 
 # ---- boundary warn engine (§6 — S5/S6/S9; never blocks the host, never changes exit) ----
 def _append_warning(root: Path, row: dict) -> None:
+    _ensure_project_state_or_refuse(root)
     p = _warnings_path(root)
     _mkdir_or_refuse(p.parent)
     with p.open("a", encoding="utf-8") as fh:
@@ -409,13 +415,14 @@ def _append_warning(root: Path, row: dict) -> None:
 
 def _emit(root: Path, boundary: str, delta_id: str, rule: str, delta_status: str, event: str,
           message: str, context: dict) -> dict:
-    """Append a warnings.jsonl row and (only for a fire on a warning-stage delta) print to stderr.
-    Observing fires and conflict/evaluation-error events are logged silently (S6)."""
+    """Append a warnings row; warning-stage fires and every policy conflict are visible on stderr."""
     row = {"at": _now_iso(), "boundary": boundary, "delta_id": delta_id, "rule": rule,
            "delta_status": delta_status, "event": event, "message": message, "context": context}
     _append_warning(root, row)
     if event == "fire" and delta_status == "warning":
         print(f"waystone warn [{delta_id}]: {message}", file=sys.stderr)
+    elif event == "conflict":
+        print(f"waystone warn conflict [{delta_id}]: {message}", file=sys.stderr)
     return row
 
 
@@ -468,7 +475,7 @@ _RULE1_MSG = ("delegation {did} carries no delegate-side verification evidence �
 
 def evaluate_boundary(root: Path, boundary: str, context: dict) -> list[dict]:
     """Evaluate active (observing/warning) deltas whose rule declares `boundary`, append fire/
-    evaluation-error/conflict rows to warnings.jsonl, and (warning stage only) print fires to stderr.
+    evaluation-error/conflict rows to warnings.jsonl, print warning-stage fires and all conflicts.
     Wrapped so ANY exception is swallowed with one stderr notice — a warn-engine bug must never change
     the host command's exit or abort its flow (S5, host-exit invariant)."""
     try:
@@ -503,10 +510,13 @@ def _evaluate_boundary(root: Path, boundary: str, context: dict) -> list[dict]:
         rep = observing[0] if observing else sorted(group, key=lambda d: d["id"])[0]
         eff = "observing" if observing else "warning"
         if len(group) > 1:
+            conflict_context = {"delta_ids": sorted(d["id"] for d in group)}
+            if context.get("delegation_id"):
+                conflict_context["delegation_id"] = context["delegation_id"]
             events.append(_emit(
                 root, boundary, rep["id"], rule_id, eff, "conflict",
                 f"{len(group)} active deltas reference {rule_id} — effective stage {eff} "
-                f"(least-restrictive)", {"delta_ids": sorted(d["id"] for d in group)}))
+                f"(least-restrictive)", conflict_context))
         params = rep.get("params") or {}
 
         if rule_id == "delegation-verification-evidence-v1":
@@ -541,15 +551,15 @@ def _evaluate_boundary(root: Path, boundary: str, context: dict) -> list[dict]:
 
 # ---- exposure (§9 — round exposure record; delegation exposure lives in delegate) ----
 def _exposure_dir(root: Path) -> Path:
-    return _plugin_base() / "exposure" / _project_slug(root)
+    return project_state_path(root) / "exposure"
 
 
-def _profile_summary() -> tuple[str | None, dict | None]:
+def _profile_summary(root: Path) -> tuple[str | None, dict | None]:
     """(profile_fingerprint, {role: backend}) from the delegation profile, or (None, None) when it is
     absent — a round closes without any delegation, so the harness never guesses bindings."""
     import delegate
     try:
-        profile, fp = delegate._load_profile()
+        profile, fp = delegate._load_profile(root)
     except WorkflowError:
         return None, None
     bindings: dict[str, str] = {}
@@ -562,7 +572,8 @@ def _profile_summary() -> tuple[str | None, dict | None]:
 def write_round_exposure(root: Path, round_id: str, head_sha: str | None, watermark: str | None):
     """Immutable per-round exposure record written at close (§9/#4). A re-close of the same round-id
     gets a `-2`/`-3` suffix (H4 precedent — existing records are never overwritten)."""
-    fp, bindings = _profile_summary()
+    _ensure_project_state_or_refuse(root)
+    fp, bindings = _profile_summary(root)
     exposure = {
         "schema": "waystone-round-exposure-1", "round_id": round_id, "at": _now_iso(),
         "project": {"pslug": _project_slug(root), "root": str(Path(root).resolve())},
@@ -573,13 +584,18 @@ def write_round_exposure(root: Path, round_id: str, head_sha: str | None, waterm
     }
     edir = _exposure_dir(root)
     _mkdir_or_refuse(edir)
-    p = edir / f"round-{round_id}.json"
+    base = edir / f"round-{round_id}.json"
+    p = base
     n = 2
-    while p.exists():
-        p = edir / f"round-{round_id}-{n}.json"
-        n += 1
-    p.write_text(json.dumps(exposure, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return p, exposure
+    content = json.dumps(exposure, ensure_ascii=False, indent=2) + "\n"
+    while True:
+        try:
+            with p.open("x", encoding="utf-8") as stream:
+                stream.write(content)
+            return p, exposure
+        except FileExistsError:
+            p = base.with_name(f"{base.stem}-{n}{base.suffix}")
+            n += 1
 
 
 # ---- CLI (hand-rolled parsing; {0,1,2} exit contract) --------------------------
@@ -616,6 +632,8 @@ def _resolve_root(explicit: str | None) -> Path:
     root = Path(explicit).resolve() if explicit else find_project_root(Path.cwd())
     if root is None:
         raise WorkflowError("no initialized project (run inside one, or pass --root DIR)")
+    with hold_lock(project_lock_path(root)):
+        migrate_project_state(root)
     return root
 
 
@@ -630,12 +648,14 @@ def _cli_add(rest: list[str]) -> int:
         raise WorkflowError("add requires --rule <rule-id>")
     if opts.get("summary") is None:
         raise WorkflowError("add requires --summary <text>")
-    delta = add_delta(
-        _resolve_root(opts.get("root")), pos[0], rule=opts["rule"], summary=opts["summary"],
-        pointers=opts.get("pointers"), expected_effect=opts.get("expected-effect", ""),
-        risk=opts.get("risk", ""), candidate_scope=opts.get("candidate-scope", "unresolved"),
-        observed_in=opts.get("observed-in") or None, from_rec=opts.get("from-rec"),
-        title=opts.get("title", ""))
+    root = _resolve_root(opts.get("root"))
+    with hold_lock(project_lock_path(root)):
+        delta = add_delta(
+            root, pos[0], rule=opts["rule"], summary=opts["summary"],
+            pointers=opts.get("pointers"), expected_effect=opts.get("expected-effect", ""),
+            risk=opts.get("risk", ""), candidate_scope=opts.get("candidate-scope", "unresolved"),
+            observed_in=opts.get("observed-in") or None, from_rec=opts.get("from-rec"),
+            title=opts.get("title", ""))
     print(f"added delta {delta['id']} ({delta['status']})")
     return 0
 
@@ -663,7 +683,9 @@ def _cli_promote(rest: list[str]) -> int:
     pos, opts = _parse_opts(rest, value=("root",))
     if not pos:
         raise WorkflowError("promote requires a <delta-id>")
-    delta = promote(_resolve_root(opts.get("root")), pos[0])
+    root = _resolve_root(opts.get("root"))
+    with hold_lock(project_lock_path(root)):
+        delta = promote(root, pos[0])
     print(f"promoted {delta['id']} -> {delta['status']}")
     return 0
 
@@ -672,7 +694,9 @@ def _cli_demote(rest: list[str]) -> int:
     pos, opts = _parse_opts(rest, value=("root",))
     if not pos:
         raise WorkflowError("demote requires a <delta-id>")
-    delta = demote(_resolve_root(opts.get("root")), pos[0])
+    root = _resolve_root(opts.get("root"))
+    with hold_lock(project_lock_path(root)):
+        delta = demote(root, pos[0])
     print(f"demoted {delta['id']} -> {delta['status']}")
     return 0
 
@@ -681,7 +705,9 @@ def _cli_suspend(rest: list[str]) -> int:
     pos, opts = _parse_opts(rest, value=("root", "note"))
     if not pos:
         raise WorkflowError("suspend requires a <delta-id>")
-    delta = suspend(_resolve_root(opts.get("root")), pos[0], note=opts.get("note"))
+    root = _resolve_root(opts.get("root"))
+    with hold_lock(project_lock_path(root)):
+        delta = suspend(root, pos[0], note=opts.get("note"))
     print(f"suspended {delta['id']}")
     return 0
 
@@ -690,7 +716,9 @@ def _cli_retire(rest: list[str]) -> int:
     pos, opts = _parse_opts(rest, value=("root", "note"))
     if not pos:
         raise WorkflowError("retire requires a <delta-id>")
-    delta = retire(_resolve_root(opts.get("root")), pos[0], note=opts.get("note"))
+    root = _resolve_root(opts.get("root"))
+    with hold_lock(project_lock_path(root)):
+        delta = retire(root, pos[0], note=opts.get("note"))
     print(f"retired {delta['id']}")
     return 0
 
@@ -699,7 +727,9 @@ def _cli_replay(rest: list[str]) -> int:
     pos, opts = _parse_opts(rest, value=("root",))
     if not pos:
         raise WorkflowError("replay requires a <delta-id>")
-    report = replay(_resolve_root(opts.get("root")), pos[0])
+    root = _resolve_root(opts.get("root"))
+    with hold_lock(project_lock_path(root)):
+        report = replay(root, pos[0])
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     rate = "null" if report["fire_rate"] is None else f"{report['fire_rate']:.4f}"
     print(f"would have fired {report['fires']}/{report['opportunities']} times (fire rate {rate}). "

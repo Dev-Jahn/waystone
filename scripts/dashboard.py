@@ -6,7 +6,7 @@
 """Cross-project terminal dashboard for all waystone projects.
 
 Usage: dashboard.py [--project NAME]
-Reads the global registry (~/.claude/waystone/projects.json). Entry forms:
+Reads the machine registry ($WAYSTONE_HOME/projects.json, default ~/.waystone/projects.json). Entry forms:
   { "name": "...", "path": "/abs/local/clone" }   — local: git state + tasks.yaml from disk
   { "name": "...", "repo": "owner/name" }          — remote: tasks.yaml fetched via `gh api`
   both                                             — local preferred while the path exists
@@ -23,7 +23,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
-from common import REGISTRY_PATH, git_branch_info, load_tasks  # noqa: E402
+from common import (  # noqa: E402
+    WorkflowError, git_branch_info, hold_lock, load_tasks, migrate_project_state,
+    project_lock_path, registry_path,
+)
 
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
 BLUE, RED, GREEN, YELLOW = "\033[34m", "\033[31m", "\033[32m", "\033[33m"
@@ -60,6 +63,8 @@ def render_tasks(data: dict) -> None:
 
 
 def show_local(name: str, path: Path) -> None:
+    with hold_lock(project_lock_path(path)):
+        migrate_project_state(path)
     g = git_branch_info(path)
     dirty = c(YELLOW, f"±{g['dirty']}") if g["dirty"] else c(GREEN, "clean")
     sync = f"↑{g['ahead']}↓{g['behind']}" if g["ahead"] != "?" else c(DIM, "no upstream")
@@ -113,21 +118,27 @@ def show_entry(entry: dict) -> None:
 def main() -> int:
     idx = sys.argv.index("--project") if "--project" in sys.argv else -1
     only = sys.argv[idx + 1] if 0 <= idx < len(sys.argv) - 1 else None
-    if not REGISTRY_PATH.is_file():
+    registry = registry_path()
+    if not registry.is_file():
         print("no projects registered yet — run /waystone:init in a project first")
         return 0
-    reg = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    reg = json.loads(registry.read_text(encoding="utf-8"))
     projects = reg.get("projects", [])
     if only:
         projects = [p for p in projects if p.get("name") == only]
     if not projects:
         print(f"no registered project matches {only!r}" if only else "registry is empty")
         return 0
+    failed = False
     for i, p in enumerate(projects):
         if i:
             print()
-        show_entry(p)
-    return 0
+        try:
+            show_entry(p)
+        except (WorkflowError, OSError) as e:
+            print(f"waystone status: migration failed for {p.get('path', '?')}: {e}", file=sys.stderr)
+            failed = True
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@
 <img alt="version" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FDev-Jahn%2Fwaystone%2Fmain%2F.claude-plugin%2Fplugin.json&query=%24.version&prefix=v&label=version&style=flat-square">
 <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-8A5CF6?style=flat-square">
 <img alt="Codex plugin" src="https://img.shields.io/badge/Codex-plugin-111111?style=flat-square">
-<img alt="tests" src="https://img.shields.io/badge/tests-317-success?style=flat-square">
+<img alt="tests" src="https://img.shields.io/badge/tests-429-success?style=flat-square">
 <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square">
 </p>
 
@@ -21,7 +21,7 @@
 
 Waystone is a Claude Code and Codex plugin that gives a project a durable source of direction, a validated task list, bounded work cycles, independent review, and a way to learn from past agent sessions. It is built for research and software projects that span many sessions or agents — where context, decisions, and verification evidence would otherwise scatter across chats and memory files.
 
-> **Status:** v0.8.3 is implemented. v0.9 is the planned step toward user- and project-specific enforcement and larger-scale multi-agent orchestration.
+> **Status:** v0.9.0 is implemented — one shared project state across Claude Code and Codex, cross-process locking, and fully autonomous delegation behind harness-enforced acceptance gates. Upgrading from v0.8 migrates local state automatically and losslessly on first run. Next: user- and project-specific enforcement and larger-scale orchestration.
 
 <br>
 
@@ -29,7 +29,7 @@ Waystone is a Claude Code and Codex plugin that gives a project a durable source
 
 - **Direction that survives sessions.** One durable project-direction document, plus a re-entry note written before compaction or exit, so a later session continues without reconstructing context.
 - **Evidence, not "done".** Reviewer comments are treated as claims and verified against the code before they become tracked work.
-- **Control you keep.** Delegated work runs in an isolated worktree; the worker never owns final approval — you apply or discard.
+- **Acceptance with evidence.** Delegated work runs in an isolated worktree, and nothing lands without a recorded criterion-by-criterion verdict backed by verification evidence — every decision stays auditable and reversible.
 - **Cheap by default.** Most validation, rendering, bookkeeping, and log parsing are plain scripts that spend no model tokens.
 
 <br>
@@ -118,7 +118,7 @@ periodically to analyze past sessions and review results.
 | `/waystone:init` | `$waystone:init` | Sets up a new project or adds Waystone to an existing one without rewriting its history. |
 | `/waystone:round` | `$waystone:round` | Closes a bounded work cycle, updates progress, refreshes generated views, and creates a review request. |
 | `/waystone:review` | `$waystone:review` | Preserves a reviewer reply exactly, verifies each issue, and turns confirmed issues into tasks. |
-| `/waystone:delegate` | `$waystone:delegate` | Runs one task in an isolated worktree, optionally verifies it independently, then asks you to apply or discard. |
+| `/waystone:delegate` | `$waystone:delegate` | Autonomously runs one task in an isolated worktree, verifies it, and resolves it with a recorded evidence-backed verdict. |
 | `/waystone:status` | `$waystone:status` | Shows active, blocked, and pending work across registered local or remote projects. |
 | `/waystone:improve` | `$waystone:improve` | Analyzes host session history and review evidence, then proposes evidence-backed workflow improvements. |
 
@@ -145,7 +145,10 @@ Most validation, rendering, bookkeeping, log parsing, and policy checks are plai
 | Command | Purpose |
 |---|---|
 | `waystone task ...` | Validated task-registry CLI — adds, updates, lists, and archives tasks without slurping the file. |
+| `waystone paths` | Shows the resolved project-state, machine-state, and worktree-cache locations. |
+| `waystone project` | Registers, unregisters, and lists projects through the machine-wide registry. |
 | `waystone delegate verify` | Re-runs independent read-only verification of a delegation result in its preserved worktree. |
+| `waystone delegate verdict` | Records the main session's evidence-backed apply or discard decision before resolution. |
 | `waystone overlay` | Stores project-local adaptive checks and manages their observing/warning lifecycle; promotion to warning requires deterministic shadow replay. |
 | `waystone check` | Evaluates active overlay rules against the current project state; warnings are visible but never block the host command. |
 | `waystone improve evidence` | Deterministically joins review findings and delegation records by task ID into a local evidence log. |
@@ -169,25 +172,42 @@ Reviewer comments are treated as claims, not facts. The `review` skill checks th
 
 ## Delegate a task without losing control
 
-The `delegate` skill is for a task with explicit success criteria. Waystone then:
+The `delegate` skill autonomously closes one task whose success criteria are already recorded or can
+be derived exactly from owner-authored project material. Waystone then:
 
-1. fixes the current repository state as an immutable snapshot, including uncommitted work;
-2. creates a separate Git worktree and prepares the environment from the project's lockfiles or configured setup command;
-3. sends the bounded task to the configured external implementer;
-4. computes the resulting patch and changed-file list directly from Git;
-5. keeps the worker's own verification and risk report clearly labeled as a claim;
-6. optionally runs a separate read-only verifier (`waystone delegate verify`);
-7. asks you to apply or discard the patch.
+1. selects an actionable task and, when necessary, records owner-derived criteria through `waystone task set <id> --accept-add` before the run;
+2. fixes the current repository state as an immutable snapshot, including uncommitted work, then runs the configured implementer in a separate Git worktree;
+3. computes the patch and changed-file list directly from Git while keeping the worker's own verification and risk report labeled as a claim;
+4. always produces verification evidence — through `waystone delegate verify` when a verifier is bound, or focused commands in the normalized worktree otherwise;
+5. records a criterion-by-criterion decision with `waystone delegate verdict`, then applies it or discards it with a recorded `--reason`;
+6. reports the result, evidence, warnings, retries, and one pointer to the preserved record and undo information.
 
-The worker and verifier never own final approval — the main session and the user retain that decision.
+The main session owns the routine decision and records every acceptance with cited evidence. The user
+audits that record. Worker claims never become facts merely because their report exists, and a missing
+worker report never means verification was absent.
 
-The current v0.8 runner is Codex-backed, but Waystone stores bindings by responsibility (`implementer`, `verifier`) rather than baking model names into the workflow. Bindings live in the host data root: `~/.claude/waystone/profile.yml` for Claude Code or `~/.codex/waystone/profile.yml` for Codex. Claude Code can use the `codex-companion` verifier transport; Codex uses a native, ephemeral `codex exec` verifier in a read-only sandbox. Waystone refuses to guess a model when the profile is missing.
+The autonomous loop keeps the existing safety rails: one nonterminal delegation per task, required
+criteria and valid profile bindings, read-only independent verification, a bounded
+`waystone delegate show --failure` diagnostic, at most two run attempts with retry context recorded by
+`--note`, an atomic plain patch apply, and permanent records. It does not read the full runner log or
+silently substitute a model, verification path, 3-way apply, or stash operation. Recorded override
+flags require `--reason`; a main-session blocker override also has to cite direct checks that refute
+each blocker.
+
+Human input is reserved for nine cases: criteria cannot be derived without invention; the profile or
+binding is unusable; an apply judgment still has an unrefuted blocker; two attempts are exhausted; a
+verifier transport fails again after one retry; apply drift is not wholly caused by the current
+session; the runner failure is deterministic; warning rules conflict; or you explicitly request a
+review. When drift touches your uncommitted work, Waystone never commits or stashes it — it reports the
+state and waits. In every other case the main session continues through verdict and apply or discard.
+
+The current runner is Codex-backed, but Waystone stores bindings by responsibility (`implementer`, `verifier`) rather than baking model names into the workflow. Bindings live in the project's uncommitted `{project_root}/.waystone/profile.yml`. A verifier binding normally omits `execution`, allowing Waystone to derive the transport from the current host. Waystone refuses to guess a model when the profile is missing.
 
 <br>
 
 ## Improve the workflow from real usage
 
-The `improve` skill reads Claude Code logs from `$CLAUDE_CONFIG_DIR/projects` (or `~/.claude/projects`) and Codex rollouts from `$CODEX_HOME/sessions` (or `~/.codex/sessions`). Extra log directories and project filters are supported. It combines session history with review and delegation records (joined deterministically by task ID via `waystone improve evidence`), then looks for patterns such as:
+The `improve` skill reads Claude Code logs from `$CLAUDE_CONFIG_DIR/projects` (or `~/.claude/projects`) and Codex rollouts from `$CODEX_HOME/sessions` (or `~/.codex/sessions`). By default it filters that history to the current project and combines it with the project's review and delegation records (joined deterministically by task ID via `waystone improve evidence`). `--user-wide` is an explicit cross-project mode for user-habit analysis. The skill looks for patterns such as:
 
 - the main session doing large amounts of implementation directly;
 - changes with little or no visible verification;
@@ -196,9 +216,9 @@ The `improve` skill reads Claude Code logs from `$CLAUDE_CONFIG_DIR/projects` (o
 - how work is delegated;
 - recurring review issues and gaps in the available evidence.
 
-Scripts produce repeatable facts first; the model only interprets them. Each recommendation states where it came from and whether it is directly observed or inferred. Analysis stays under the host data root (`~/.claude/waystone/` or `~/.codex/waystone/`) — raw prompts and source files are not copied into the report — and accept/reject decisions are remembered so later runs focus on new evidence.
+Scripts produce repeatable facts first; the model only interprets them. Each recommendation states where it came from and whether it is directly observed or inferred. Project analysis and its accept/reject decisions stay under `{project_root}/.waystone/improve/`; opt-in `--user-wide` analysis stays under `~/.waystone/improve/`. Raw prompts and source files are not copied into the report, and decisions are remembered so later runs focus on new evidence.
 
-For a small, predefined set of recommendations, v0.8 can separately store a project-specific check in **observation mode** (`waystone overlay`): it records when the check would have fired but does not warn or block. Promoting it to a warning requires a deterministic replay over past evidence and another explicit command. `waystone check` evaluates the active rules against the current project state; v0.8 warnings remain visible but never block.
+For a small, predefined set of recommendations, Waystone can separately store a project-specific check in **observation mode** (`waystone overlay`): it records when the check would have fired but does not warn or block. Promoting it to a warning requires a deterministic replay over past evidence and another explicit command. `waystone check` evaluates the active rules against the current project state; warnings remain visible but never block until the enforcement arc lands.
 
 <br>
 
@@ -207,11 +227,12 @@ For a small, predefined set of recommendations, v0.8 can separately store a proj
 | Version | Main capability | Status |
 |---|---|---|
 | **v0.7 — Observe & Advise** | Organize projects, run review-centered work cycles, analyze past sessions, and make evidence-backed recommendations. | Implemented |
-| **v0.8 — Delegate & Verify** | Run coding tasks through an isolated, reproducible delegation flow; verify results independently; begin project-specific observation and warning rules. | Implemented — current release |
-| **v0.9 — Adapt & Enforce** | Separate user-wide and project-specific rules, promote proven checks to enforceable guards with recorded waivers, support larger parallel task groups. | Planned |
+| **v0.8 — Delegate & Verify** | Run coding tasks through an isolated, reproducible delegation flow; verify results independently; begin project-specific observation and warning rules. | Implemented |
+| **v0.9 — Unify & Automate** | Share one project state across Claude Code and Codex with cross-process locking; let the main session run delegation end-to-end behind harness-enforced acceptance gates; scope improve analysis to the project by default. | Implemented — current release |
+| **Next — Adapt & Enforce** | Promote proven checks to enforceable guards with recorded waivers, and support larger parallel task groups. | Planned |
 
 <details>
-<summary>The intended v0.9 loop</summary>
+<summary>The intended Adapt & Enforce loop</summary>
 
 <br>
 
@@ -261,7 +282,7 @@ docs/reviews/           review requests and feedback
 CLAUDE.md or AGENTS.md  a host-specific managed Waystone section
 ```
 
-Personal analysis, delegation records, worktrees, model bindings, and adaptive-rule state live under the host data root (`~/.claude/waystone/` or `~/.codex/waystone/`) rather than in the project repository. See [references/conventions.md](references/conventions.md) for the full task, decision, and review conventions.
+Uncommitted project state — default improve analysis, delegation records, model bindings, and adaptive-rule state — lives under `{project_root}/.waystone/`. The machine-wide registry, opt-in `--user-wide` analysis, and worktree cache live under `~/.waystone/` (or `$WAYSTONE_HOME`). Use `waystone paths` to show the resolved locations. See [references/conventions.md](references/conventions.md) for the full task, decision, storage, and review conventions.
 
 </details>
 

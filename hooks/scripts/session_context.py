@@ -13,26 +13,32 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from common import data_dir, git_branch_info, git_full_sha, load_config, load_tasks, next_actionable, resume_path, start_here_path  # noqa: E402
+from common import (  # noqa: E402
+    git_branch_info, git_full_sha, hold_lock, load_config, load_tasks, migrate_project_state,
+    next_actionable, project_lock_path, project_state_path, registry_lock_path, resume_path,
+    start_here_path,
+)
 
 MAX_CHARS = 8000
 MAX_TASK_LINES = 8
 MAX_START_HERE = 2560  # ~2.5KB cap on the injected re-entry narrative (read-time, never truncates the file)
 MAX_CONTRACT = 1200
 CONTRACT_PATH = Path(__file__).resolve().parents[2] / "references" / "main-contract.md"
+MIGRATION_LOCK_TIMEOUT = 3.0
 
 
-def _routing_line() -> str:
+def _routing_line(root: Path) -> str:
     import delegate
 
-    path = delegate._profile_path()
+    path = delegate._profile_path(root)
     if not path.is_file():
         return "routing: no profile — waystone delegate will guide setup"
     try:
-        profile, _fingerprint = delegate._load_profile()
+        profile, _fingerprint = delegate._load_profile(root)
         bindings = profile.get("bindings")
         if not isinstance(bindings, dict):
             raise ValueError("bindings is not a mapping")
@@ -89,7 +95,7 @@ def _delegation_summary(root: Path) -> str:
 
 
 def _evidence_summary(root: Path) -> str | None:
-    path = data_dir() / "improve" / "evidence.jsonl"
+    path = project_state_path(root) / "improve" / "evidence.jsonl"
     if not path.is_file():
         return None
     try:
@@ -97,14 +103,6 @@ def _evidence_summary(root: Path) -> str | None:
         data = load_tasks(root)
         if isinstance(data.get("project"), str):
             aliases.add(data["project"])
-        registry = data_dir() / "projects.json"
-        if registry.is_file():
-            reg = json.loads(registry.read_text(encoding="utf-8"))
-            for entry in reg.get("projects", []):
-                if (isinstance(entry, dict) and entry.get("path")
-                        and Path(entry["path"]).expanduser().resolve() == root.resolve()
-                        and isinstance(entry.get("name"), str)):
-                    aliases.add(entry["name"])
         count = 0
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
@@ -131,7 +129,7 @@ def _operating_contract(root: Path) -> list[str]:
         if not constitution:
             return []
         lines = ["◆ OPERATING CONTRACT (waystone)", *constitution.splitlines(),
-                 _routing_line(), _overlay_line(root)]
+                 _routing_line(root), _overlay_line(root)]
         live = "live: " + _delegation_summary(root)
         evidence = _evidence_summary(root)
         if evidence:
@@ -145,9 +143,32 @@ def _operating_contract(root: Path) -> list[str]:
         return []
 
 
+def _consume_resume(path: Path) -> str | None:
+    """Atomically claim the current snapshot so a concurrent replacement remains for next start."""
+    claim = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.claim")
+    try:
+        os.rename(path, claim)
+    except FileNotFoundError:
+        return None
+    try:
+        return claim.read_text(encoding="utf-8")
+    finally:
+        try:
+            claim.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def main() -> int:
     root = Path(sys.argv[1]).resolve()
     codex_host = os.environ.get("WAYSTONE_HOST") == "codex"
+    try:
+        deadline = time.monotonic() + MIGRATION_LOCK_TIMEOUT
+        with hold_lock(registry_lock_path(), timeout=max(0.0, deadline - time.monotonic())):
+            with hold_lock(project_lock_path(root), timeout=max(0.0, deadline - time.monotonic())):
+                migrate_project_state(root)
+    except Exception as e:  # noqa: BLE001 — migration must never suppress SessionStart JSON
+        print(f"waystone session migration warning: {e}", file=sys.stderr)
     try:
         cfg = load_config(root)
         data = load_tasks(root)
@@ -202,9 +223,9 @@ def main() -> int:
 
     # consume a PreCompact/SessionEnd resume pointer if one was left, flagging staleness
     rp = resume_path(root)
-    if rp.is_file():
-        try:
-            snap = rp.read_text(encoding="utf-8")
+    try:
+        snap = _consume_resume(rp)
+        if snap is not None:
             captured = next((ln.split(":", 1)[1].strip() for ln in snap.splitlines()
                              if ln.startswith("captured_head:")), "")
             at = next((ln.split(":", 1)[1].strip() for ln in snap.splitlines()
@@ -212,9 +233,8 @@ def main() -> int:
             cur = git_full_sha(root, "HEAD") or ""
             stale = " [STALE: HEAD has moved since]" if captured and cur and captured != cur else ""
             lines.append(f"last checkpoint: {at} @ {captured[:12]}{stale}")
-            rp.unlink()  # consume — a fresh one is written at the next PreCompact/SessionEnd
-        except OSError:
-            pass
+    except OSError:
+        pass
 
     digest = root / cfg["generated_dir"] / "DIGEST.md"
     if digest.is_file():

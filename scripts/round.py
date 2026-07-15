@@ -26,7 +26,8 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
-    ROUND_RE, WorkflowError, find_project_root, git_full_sha, load_config,
+    ROUND_RE, WorkflowError, find_project_root, git_full_sha, hold_lock, load_config,
+    migrate_project_state, project_lock_path, write_text_atomic,
 )
 
 
@@ -232,19 +233,19 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
         shutil.copytree(gen_dir, gen_backup)
 
     try:
-        tasks_path.write_text(text, encoding="utf-8")
-        cfg_path.write_text(ctext_new, encoding="utf-8")
-        roadmap_path.write_text(roadmap.render(root), encoding="utf-8")
+        write_text_atomic(tasks_path, text)
+        write_text_atomic(cfg_path, ctext_new)
+        write_text_atomic(roadmap_path, roadmap.render(root))
         if cfg.get("ssot"):
             import ssot
             ssot.regenerate(root)  # one full regen; raises WorkflowError (caught below) not sys.exit
     except Exception as e:  # noqa: BLE001 — any failure must roll every written artifact back
-        tasks_path.write_text(orig_tasks_text, encoding="utf-8")
-        cfg_path.write_text(ctext, encoding="utf-8")
+        write_text_atomic(tasks_path, orig_tasks_text)
+        write_text_atomic(cfg_path, ctext)
         if orig_roadmap is None:
             roadmap_path.unlink(missing_ok=True)
         else:
-            roadmap_path.write_text(orig_roadmap, encoding="utf-8")
+            write_text_atomic(roadmap_path, orig_roadmap)
         if gen_dir is not None:
             shutil.rmtree(gen_dir, ignore_errors=True)
             if gen_existed:
@@ -301,7 +302,17 @@ def main() -> int:
     if not round_id:
         print("round close: --round <id> is required", file=sys.stderr)
         return 1
-    return close(root, round_id, _parse_ids(opt("--done")), _parse_ids(opt("--touched")), opt("--commit") or "HEAD")
+    try:
+        # Phase-2 migration is a separate pre-verb span; close then owns one project-lock span from
+        # preflight through exposure/warn recording. Nested libraries must not acquire it again.
+        with hold_lock(project_lock_path(root)):
+            migrate_project_state(root)
+        with hold_lock(project_lock_path(root)):
+            return close(root, round_id, _parse_ids(opt("--done")),
+                         _parse_ids(opt("--touched")), opt("--commit") or "HEAD")
+    except WorkflowError as e:
+        print(e, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

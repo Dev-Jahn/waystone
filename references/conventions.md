@@ -150,33 +150,39 @@ brought back through an explicit artifact contract. The invariants:
   commit object under `refs/waystone/delegations/<id>` (never pushed), not a commit on your branch. A
   clean tree uses HEAD directly. Submodules, an unborn HEAD, or an in-progress merge/rebase/
   cherry-pick are refused (they would bake a partial or conflicted state into the base).
-- **Harness computes; the runner claims.** The patch, changed-files list, and base/result SHAs are
-  computed by the harness from git directly (explicit provenance). The runner's own report —
-  verification it ran, limitations, risks, escalations (written to `JW_REPORT.yaml`) — is carried
-  through the contract labeled *delegate-claimed* and is never promoted to fact.
+- **Provenance stays explicit.** There are four kinds: *harness-computed* patch, changed-file, and
+  base/result facts; *delegate-claimed* verification, limitations, risks, and escalations from the
+  runner report; *independent-verifier* findings from `waystone delegate verify`; and the
+  *main-session* decision in `verdict-N.json`. Delegate-claimed content is never promoted to fact,
+  and an absent runner report is a reporting absence rather than proof that no verification happened.
 - **Role sandboxes are fixed, not user knobs.** The implementer runs `workspace-write`; the verifier
-  runs `read-only` through codex-companion. `waystone delegate verify` records its payload as
-  *independent-verifier* evidence and leaves the delegation `needs-review` — only the user chooses
-  apply or discard. A per-record `verify.lock` admits only one verifier at a time. The OS releases
-  the lock if its process dies; an unlocked leftover marker is stale and reclaimed on the next try.
-- **You accept or discard.** A finished delegation is `needs-review`, its worktree preserved so a
-  verifier can run the acceptance criteria against the same base. `waystone delegate apply` lands the
-  patch on the live tree with plain `git apply` (it fails atomically if the tree has drifted from
-  the base — nothing is partially applied); `waystone delegate discard` throws it away. Both keep the
-  record directory as history. Until one of them runs, that task is locked against a second
-  delegation (single mutation owner) — a failed env/runner leaves the worktree as evidence and
-  holds the lock too, so `discard` is how you clear it.
-- **Acceptance criteria are required, never invented.** A delegated task must carry an `accept:`
-  field (a YAML list of free-text criteria, edited in `tasks.yaml` directly) or be given
-  `--accept` at delegation time. With neither, delegation is refused — the harness does not make up
-  the bar. `accept` is deliberately not settable through `waystone task add/set` (comma-splitting free
-  text would distort it).
+  runs `read-only` through the host-derived transport. Verification leaves the delegation
+  `needs-review`. The per-record `record.lock` serializes verify, verdict, apply, and discard; the OS
+  releases the lock if its process dies.
+- **The main session judges; the user audits.** `waystone delegate verdict` compares the packet's
+  recorded criteria with harness-computed, independent-verifier, and bounded direct-check evidence.
+  Every acceptance cites concrete evidence and is recorded with *main-session* provenance before
+  apply. A user decision after escalation passes through the same verdict gate with `decided_by:
+  user`; it does not bypass the audit record.
+- **A recorded decision resolves the worktree.** A finished delegation is `needs-review`, with its
+  worktree preserved against the same base until resolution. `waystone delegate apply` accepts only
+  an apply verdict and lands the patch with plain `git apply`; drift fails atomically, with nothing
+  partially applied. `waystone delegate discard --reason` records rejection or cleanup rationale.
+  Both preserve the record directory as history. Until one runs, the task remains locked against a
+  second delegation.
+- **Acceptance criteria are required, never invented.** A delegated task must carry an `accept:` YAML
+  list or receive an explicit ad-hoc `--accept` at delegation time. Criteria synthesized by the main
+  session are allowed only when owner-authored task, ROADMAP, SSOT, or review material determines the
+  bar, and must be persisted before the run with repeated `waystone task set <id> --accept-add` calls.
+  With no real criterion, delegation is refused.
 
-Artifacts live plugin-local (`~/.claude/waystone/delegations/…`, worktrees under
-`~/.claude/waystone/worktrees/…`), never committed to the repo. The runner backend (model)
-is bound per role in `~/.claude/waystone/profile.yml`; a missing binding fails loud rather
-than guessing a default. A binding may set `effort` to `none`, `minimal`, `low`, `medium`, `high`,
-or `xhigh`; when omitted, the Codex configuration default is left untouched.
+Delegation records live project-local (`{project_root}/.waystone/delegations/…`) and worktrees live
+under `~/.waystone/cache/worktrees/…`; neither is committed. The runner backend (model) is bound
+per role in `{project_root}/.waystone/profile.yml`; a missing binding fails loud rather than
+guessing a default. A verifier binding should normally omit `execution` so Waystone derives the
+transport from the current host. A binding may set `effort` to `none`, `minimal`, `low`, `medium`,
+`high`, or `xhigh`; when omitted, the Codex configuration default is left untouched. Use
+`waystone paths` to inspect every resolved residence.
 
 ## 9. Adaptive overlays, warnings, and evidence
 
@@ -197,7 +203,25 @@ Adaptive policy is project-local and evidence-bearing:
   gate. If active deltas conflict on the same rule, the effective stage is **least-restrictive** and
   the conflict is recorded as evidence for the next improve cycle.
 
-All artifacts remain plugin-local and are never committed: deltas and warning events under
-`~/.claude/waystone/overlay/`, per-event policy exposure under
-`~/.claude/waystone/exposure/`, and the deterministic join projection at
-`~/.claude/waystone/improve/evidence.jsonl`.
+Project-mode artifacts remain project-local and are never committed: deltas and warning events under
+`{project_root}/.waystone/overlay/`, per-event policy exposure under
+`{project_root}/.waystone/exposure/`, and the deterministic join projection at
+`{project_root}/.waystone/improve/evidence.jsonl`. Only explicit `--user-wide` analysis writes its
+cross-project user-habit projection under `~/.waystone/improve/`.
+
+## 10. Storage tiers, backup, and cleanup
+
+Run `waystone paths` before backup or cleanup so `$WAYSTONE_HOME` and the active project root are
+resolved rather than guessed.
+
+- **Project state — `{project_root}/.waystone/`.** This directory is self-ignored and uncommitted.
+  `git clean -fdx` deletes it. Back up non-reproducible decisions (`improve/decisions.jsonl`) and
+  delegation audit records before destructive cleanup; regenerable projections and resume state
+  do not need backup.
+- **Machine state — `~/.waystone/`.** This holds the project registry and opt-in user-wide improve
+  state. Back it up; `$WAYSTONE_HOME` may resolve this tier elsewhere.
+- **Cache — `~/.waystone/cache/`.** It is safe to delete when no delegation is running; Waystone
+  recreates it as needed.
+- **Migration seeds — `.pre-0.9`.** Preserve legacy `.pre-0.9` roots. They remain the source for
+  lazy project-state migration and profile seeding; cleanup is intentionally outside the 0.9
+  migration.

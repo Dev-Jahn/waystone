@@ -19,7 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import yaml  # noqa: E402
 
 import roadmap  # noqa: E402
-from common import find_project_root  # noqa: E402
+from common import (  # noqa: E402
+    WorkflowError, find_project_root, hold_lock, project_lock_path, write_text_atomic,
+)
 from validate import validate  # noqa: E402
 
 
@@ -55,16 +57,7 @@ def _canonical_tasks_path(payload: dict) -> tuple[Path, Path] | None:
     return None
 
 
-def main() -> int:
-    try:
-        payload = json.load(sys.stdin)
-    except json.JSONDecodeError:
-        return 0
-    matched = _canonical_tasks_path(payload)
-    if matched is None:
-        return 0
-    p, root = matched
-
+def _validate_and_regenerate(p: Path, root: Path) -> int:
     try:
         with open(p, encoding="utf-8") as f:
             data = yaml.safe_load(f)
@@ -80,8 +73,26 @@ def main() -> int:
             print(f"  - {e}", file=sys.stderr)
         return 2
 
-    (root / "ROADMAP.md").write_text(roadmap.render(root), encoding="utf-8")
+    write_text_atomic(root / "ROADMAP.md", roadmap.render(root))
     return 0
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError:
+        return 0
+    matched = _canonical_tasks_path(payload)
+    if matched is None:
+        return 0
+    p, root = matched
+    try:
+        with hold_lock(project_lock_path(root), timeout=3):
+            return _validate_and_regenerate(p, root)
+    except (WorkflowError, OSError) as e:
+        print(f"[waystone] project lock unavailable ({e}); skipping ROADMAP regeneration",
+              file=sys.stderr)
+        return 0
 
 
 if __name__ == "__main__":

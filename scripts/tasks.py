@@ -12,6 +12,7 @@ error-prone. These verbs give the agent a small surface so it never touches the 
   waystone task show   <id> [root]                                                  one task's full record
   waystone task add    <id> [root] --title "..." [--status/--severity/--deps/...]   insert a validated block
   waystone task set    <id> <field> <value> [root]                                  set one field (deps: comma-separated ids)
+  waystone task set    <id> [root] --accept-add "criterion" [--accept-add ...]       append exact criteria
   waystone task drop   <id> [root]                                                  status -> dropped
   waystone task archive [root] [--threshold N] [--keep K]                           relocate old done/dropped
 
@@ -31,7 +32,10 @@ import yaml  # noqa: E402
 
 import round  # noqa: E402  — reuse the AST-bounded text-surgery helpers
 import validate  # noqa: E402
-from common import find_project_root, load_tasks  # noqa: E402
+from common import (  # noqa: E402
+    WorkflowError, find_project_root, hold_lock, load_tasks, migrate_project_state,
+    project_lock_path, write_text_atomic,
+)
 
 ARCHIVE_NAME = "tasks.archive.yaml"
 ARCHIVE_THRESHOLD = 100   # only archive once the registry has at least this many tasks
@@ -45,11 +49,10 @@ _FIELD_ORDER = ("title", "status", "severity", "milestone", "deps",
 # task fields whose value is a YAML list, set from a comma-separated CLI value (like `add --deps`)
 _LIST_FIELDS = ("deps",)
 
-# `accept` is a YAML list of free-text acceptance criteria (0.8.0 delegation). It is NOT settable
-# through add/set: comma-splitting a free-text criterion would silently distort it, so the registry's
-# `accept` is edited in tasks.yaml directly (writes are validated) or supplied via `waystone delegate --accept`.
-ACCEPT_REJECT_MSG = ("accept is a YAML list of free-text criteria — edit tasks.yaml directly "
-                     "(writes are validated) or pass --accept at delegation time")
+# `accept` remains unavailable through generic add/set because comma-splitting would distort it.
+# Exact repeated additions use the dedicated --accept-add path; one-off human criteria use run --accept.
+ACCEPT_REJECT_MSG = ("accept is a YAML list of free-text criteria — use repeated "
+                     "`waystone task set <id> --accept-add <criterion>` or pass --accept at delegation time")
 
 
 # ---- pure helpers ------------------------------------------------------------
@@ -188,7 +191,7 @@ def _write_validated(tasks_path: Path, new_text: str, what: str) -> int:
         for e in errs[:10]:
             print(f"  - {e}", file=sys.stderr)
         return 2
-    tasks_path.write_text(new_text, encoding="utf-8")
+    write_text_atomic(tasks_path, new_text)
     return 0
 
 
@@ -223,6 +226,38 @@ def cmd_set(root: Path, task_id: str, field: str, value: str) -> int:
     rc = _write_validated(tasks_path, new_text, "set")
     if rc == 0:
         print(f"task set: {task_id}.{field} = {formatted if field in _LIST_FIELDS else value}")
+    return rc
+
+
+def cmd_accept_add(root: Path, task_id: str, criteria: list[str]) -> int:
+    """Append exact free-text criteria through the ordinary validated atomic task-set path."""
+    if any(not criterion.strip() for criterion in criteria):
+        print("task set: --accept-add criteria must be non-empty", file=sys.stderr)
+        return 1
+    tasks_path = root / "tasks.yaml"
+    try:
+        data = load_tasks(root)
+        task = next(t for t in _tasks(data) if t["id"] == task_id)
+    except StopIteration:
+        print(f"task set: task id not found in registry: {task_id}", file=sys.stderr)
+        return 1
+    existing = task.get("accept", [])
+    if not isinstance(existing, list) or any(not isinstance(item, str) for item in existing):
+        print(f"task set: {task_id}.accept is not a string list", file=sys.stderr)
+        return 1
+    acceptance = list(existing)
+    for criterion in criteria:
+        if criterion not in acceptance:
+            acceptance.append(criterion)
+    try:
+        new_text = round.set_task_field(
+            tasks_path.read_text(encoding="utf-8"), task_id, "accept", _fmt(acceptance))
+    except (KeyError, round.WorkflowError) as e:
+        print(f"task set: {e}", file=sys.stderr)
+        return 1
+    rc = _write_validated(tasks_path, new_text, "set")
+    if rc == 0:
+        print(f"task set: {task_id}.accept += {_fmt(criteria)}")
     return rc
 
 
@@ -263,14 +298,14 @@ def cmd_archive(root: Path, threshold: int, keep: int) -> int:
     # (archived tasks legitimately reference tasks that stayed live, so it is not dependency-closed).
     seen = {t.get("id") for t in doc["tasks"] if isinstance(t, dict)}
     doc["tasks"].extend(by_id[i] for i in ids if i not in seen)  # dedup → a re-run never double-appends
-    archive_path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    write_text_atomic(archive_path, yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
     try:
-        tasks_path.write_text(new_text, encoding="utf-8")
+        write_text_atomic(tasks_path, new_text)
     except OSError as e:  # roll the archive back so the tasks aren't stranded in both files
         if orig_archive is None:
             archive_path.unlink(missing_ok=True)
         else:
-            archive_path.write_text(orig_archive, encoding="utf-8")
+            write_text_atomic(archive_path, orig_archive)
         print(f"task archive: failed writing tasks.yaml, rolled back — {e}", file=sys.stderr)
         return 1
     print(f"task archive: moved {len(ids)} done/dropped task(s) to {ARCHIVE_NAME}; "
@@ -282,15 +317,23 @@ def cmd_archive(root: Path, threshold: int, keep: int) -> int:
 _VALUE_FLAGS = {"title", "status", "severity", "deps", "milestone", "anchor", "origin",
                 "branch", "notes", "round", "ruling", "result", "type", "threshold", "keep",
                 "accept"}  # accept is recognized only to reject it cleanly (see ACCEPT_REJECT_MSG)
+_REPEAT_FLAGS = {"accept-add"}
 
 
 def _split(rest: list[str]) -> tuple[list[str], dict]:
-    pos, opts, i = [], {}, 0
+    pos, opts, i = [], {name: [] for name in _REPEAT_FLAGS}, 0
     while i < len(rest):
         a = rest[i]
         if a.startswith("--"):
             name = a[2:]
-            if name in _VALUE_FLAGS:
+            if name in _REPEAT_FLAGS:
+                if i + 1 >= len(rest):
+                    opts[name] = None
+                    i += 1
+                else:
+                    opts[name].append(rest[i + 1])
+                    i += 2
+            elif name in _VALUE_FLAGS:
                 opts[name] = rest[i + 1] if i + 1 < len(rest) else None
                 i += 2
             else:
@@ -320,7 +363,23 @@ def main(argv: list[str]) -> int:
         root = _resolve_root(explicit)
         if root is None:
             print("waystone task: no initialized project (run inside one, or pass its path)", file=sys.stderr)
+            return None
+        try:
+            # Lazy migration has its own short lock span before the verb's body lock.
+            with hold_lock(project_lock_path(root)):
+                migrate_project_state(root)
+        except (WorkflowError, OSError) as e:
+            print(f"waystone task: migration failed: {e}", file=sys.stderr)
+            return None
         return root
+
+    def mutate(root: Path, callback) -> int:
+        try:
+            with hold_lock(project_lock_path(root)):
+                return callback()
+        except WorkflowError as e:
+            print(e, file=sys.stderr)
+            return 1
 
     if sub == "list":
         root = need_root(pos[0] if pos else None)
@@ -362,8 +421,19 @@ def main(argv: list[str]) -> int:
                 fields[k] = opts[k]
         if opts.get("deps"):
             fields["deps"] = [x.strip() for x in opts["deps"].split(",") if x.strip()]
-        return cmd_add(root, fields)
+        return mutate(root, lambda: cmd_add(root, fields))
     if sub == "set":
+        if opts.get("accept-add") is None:
+            print("waystone task set: --accept-add requires a value", file=sys.stderr)
+            return 1
+        if opts.get("accept-add"):
+            if not pos or len(pos) > 2:
+                print("waystone task set: --accept-add requires <id> and optional project root", file=sys.stderr)
+                return 1
+            root = need_root(pos[1] if len(pos) > 1 else None)
+            if root is None:
+                return 1
+            return mutate(root, lambda: cmd_accept_add(root, pos[0], opts["accept-add"]))
         if len(pos) < 3:
             print("waystone task set: <id> <field> <value> required", file=sys.stderr)
             return 1
@@ -373,7 +443,7 @@ def main(argv: list[str]) -> int:
         root = need_root(pos[3] if len(pos) > 3 else None)
         if root is None:
             return 1
-        return cmd_set(root, pos[0], pos[1], pos[2])
+        return mutate(root, lambda: cmd_set(root, pos[0], pos[1], pos[2]))
     if sub == "drop":
         if not pos:
             print("waystone task drop: <id> required", file=sys.stderr)
@@ -381,7 +451,7 @@ def main(argv: list[str]) -> int:
         root = need_root(pos[1] if len(pos) > 1 else None)
         if root is None:
             return 1
-        return cmd_set(root, pos[0], "status", "dropped")
+        return mutate(root, lambda: cmd_set(root, pos[0], "status", "dropped"))
     if sub == "archive":
         root = need_root(pos[0] if pos else None)
         if root is None:
@@ -395,7 +465,7 @@ def main(argv: list[str]) -> int:
         if threshold < 0 or keep < 0:
             print("waystone task archive: --threshold/--keep must be >= 0", file=sys.stderr)
             return 1
-        return cmd_archive(root, threshold, keep)
+        return mutate(root, lambda: cmd_archive(root, threshold, keep))
 
     print(f"waystone task: unknown subcommand {sub!r}\n{__doc__}", file=sys.stderr)
     return 1
