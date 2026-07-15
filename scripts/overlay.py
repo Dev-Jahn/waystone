@@ -1681,9 +1681,8 @@ def _emit(root: Path, boundary: str, policy: dict, rule: str, delta_status: str,
     """Append a warnings row; warning-stage fires and every policy conflict are visible on stderr."""
     identity = policy["identity"]
     start_level = load_config(root)["policy"]["start_level"]
-    stderr_eligible = ((event == "fire" and delta_status == "warning")
-                       or event == "conflict")
-    suppressed = stderr_eligible and start_level == "observe-only"
+    suppressed = (event == "fire" and delta_status == "warning"
+                  and start_level == "observe-only")
     row = {"at": _now_iso(), "boundary": boundary, "policy_identity": identity, "rule": rule,
            "delta_status": delta_status, "event": event, "message": message, "context": context,
            "start_level": start_level, "suppressed_by_start_level": suppressed,

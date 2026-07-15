@@ -3883,9 +3883,6 @@ class ImproveMetricsTests(unittest.TestCase):
     @staticmethod
     def _fixture(out: Path) -> None:
         out.mkdir(parents=True, exist_ok=True)
-        (out / "facts.json").write_text(_json.dumps({
-            "generated_from": "fixture", "inputs": {}, "skipped_lenses": [], "lenses": [],
-        }))
         _write_jsonl(out / "sessions.jsonl", [
             {"project": "demo", "kind": "main", "session_id": "s1",
              "tools": {"by_category": {"file_write": 1, "shell": 1}},
@@ -3926,7 +3923,9 @@ class ImproveMetricsTests(unittest.TestCase):
              "acceptance": {"accepted_at": None, "resolved": False,
                             "provenance": "current-task-state-approximation"}},
             {"coverage": {"warning_observations": [{
-                "project": "demo", "coverage": {"warnings_file_present": True},
+                "project": "demo", "records": 0, "fire": 0, "conflict": 0,
+                "by_rule": {}, "by_boundary": {}, "by_rule_boundary": {},
+                "recent_rounds": [], "coverage": {"warnings_file_present": True},
             }]}}
         ])
         _write_jsonl(out / "evidence_warnings.jsonl", [
@@ -3955,6 +3954,7 @@ class ImproveMetricsTests(unittest.TestCase):
             {"rec_id": "scope/accept", "decision": "accept", "at": "2026-07-15T01:00:00Z"},
             {"rec_id": "scope/reject", "decision": "reject", "at": "2026-07-15T02:00:00Z"},
         ])
+        improve.run_audit(out, improve.PROJECT_LENS_SCOPE)
 
     @staticmethod
     def _metric(snapshot: dict, group: str, name: str) -> dict:
@@ -4005,6 +4005,7 @@ class ImproveMetricsTests(unittest.TestCase):
                               "source": "triage"}],
             })
             _write_jsonl(out / "reviews.jsonl", reviews)
+            improve.run_audit(out, improve.PROJECT_LENS_SCOPE)
             second = improve.run_metrics(
                 out, improve.PROJECT_LENS_SCOPE,
                 now=datetime(2026, 7, 15, 7, tzinfo=timezone.utc))
@@ -4042,7 +4043,7 @@ class ImproveMetricsTests(unittest.TestCase):
             self.assertIsNone(self._metric(
                 snapshot, "reproducibility_environment", "acceptance_reproducibility")["value"])
 
-    def test_remaining_metrics_snapshot_existing_taxonomy_and_lens_values(self):
+    def test_raw_reviews_and_sessions_do_not_replace_uncomputed_lenses(self):
         from datetime import datetime, timezone
 
         with tempfile.TemporaryDirectory() as d:
@@ -4050,9 +4051,49 @@ class ImproveMetricsTests(unittest.TestCase):
             out.joinpath("facts.json").write_text(_json.dumps({
                 "generated_from": "fixture", "inputs": {}, "skipped_lenses": [], "lenses": [],
             }))
+            _write_jsonl(out / "sessions.jsonl", [{
+                "project": "demo", "kind": "main", "session_id": "main",
+                "tools": {"by_category": {"file_write": 8, "shell": 5}},
+                "retry_loops": {"count": 4},
+                "context_heavy": {"tool_results_over_100kb": 2,
+                                  "max_result_bytes": 200000},
+                "usage": {"input": 123456},
+            }])
+            _write_jsonl(out / "reviews.jsonl", [
+                {"project": "demo", "round_id": "r1", "findings": [
+                    {"id": "report-1", "status": "REAL", "type": "reporting"}]},
+                {"project": "demo", "round_id": "r2", "findings": [
+                    {"id": "report-2", "status": "REAL", "type": "reporting"}]},
+            ])
+            snapshot = improve.run_metrics(
+                out, improve.PROJECT_LENS_SCOPE,
+                now=datetime(2026, 7, 15, tzinfo=timezone.utc))
+            for group, name in (
+                ("quality", "report_grounding_finding_trend"),
+                ("delegation_effectiveness", "main_direct_work"),
+                ("delegation_effectiveness", "main_context_inflow"),
+                ("delegation_effectiveness", "blind_retry_count"),
+                ("delegation_effectiveness", "worker_retry_context_load"),
+            ):
+                metric = self._metric(snapshot, group, name)
+                self.assertIsNone(metric["value"])
+                self.assertEqual(metric["unavailable_reason"], "lens-not-computed")
+            duplicate = self._metric(
+                snapshot, "delegation_effectiveness", "worker_duplicate_exploration")
+            self.assertIsNone(duplicate["value"])
+            self.assertEqual(
+                duplicate["unavailable_reason"],
+                "inter-worker overlap source unavailable")
+
+    def test_remaining_metrics_snapshot_existing_taxonomy_and_lens_values(self):
+        from datetime import datetime, timezone
+
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d)
             sessions = [
                 {"project": "demo", "kind": "main", "session_id": "main",
-                 "tools": {"by_category": {}}, "retry_loops": {"count": 1},
+                 "tools": {"by_category": {"file_write": 3, "shell": 2}},
+                 "retry_loops": {"count": 1},
                  "context_heavy": {"tool_results_over_100kb": 0, "max_result_bytes": 10},
                  "usage": {"input": 0}},
                 {"project": "demo", "kind": "subagent", "session_id": "worker-1",
@@ -4075,14 +4116,21 @@ class ImproveMetricsTests(unittest.TestCase):
                     {"id": "report-3", "status": "REAL", "type": "reporting"},
                 ]},
             ])
+            improve.run_audit(out, improve.PROJECT_LENS_SCOPE)
             first = improve.run_metrics(
                 out, improve.PROJECT_LENS_SCOPE,
                 now=datetime(2026, 7, 15, tzinfo=timezone.utc))
             self.assertEqual(self._metric(
                 first, "quality", "report_grounding_finding_trend")["value"],
                 {"first": 2, "last": 1, "delta": -1})
+            duplicate = self._metric(
+                first, "delegation_effectiveness", "worker_duplicate_exploration")
+            self.assertIsNone(duplicate["value"])
+            self.assertEqual(
+                duplicate["unavailable_reason"],
+                "inter-worker overlap source unavailable")
             self.assertEqual(self._metric(
-                first, "delegation_effectiveness", "worker_duplicate_exploration")["value"], {
+                first, "delegation_effectiveness", "worker_retry_context_load")["value"], {
                     "retry_loops": {"sessions_with_retry": 1, "retry_loops_total": 2},
                     "context_heavy": {"sessions_over_100kb": 2,
                                       "results_over_100kb_total": 4,
@@ -4098,8 +4146,24 @@ class ImproveMetricsTests(unittest.TestCase):
                 now=datetime(2026, 7, 16, tzinfo=timezone.utc))
             self.assertEqual(second["comparison"]["changes"][
                 "delegation_effectiveness.blind_retry_count"], {
+                    "previous": 3, "current": 3, "delta": 0,
+                })
+
+            improve.run_audit(out, improve.PROJECT_LENS_SCOPE)
+            third = improve.run_metrics(
+                out, improve.PROJECT_LENS_SCOPE,
+                now=datetime(2026, 7, 17, tzinfo=timezone.utc))
+            self.assertEqual(third["comparison"]["changes"][
+                "delegation_effectiveness.blind_retry_count"], {
                     "previous": 3, "current": 1, "delta": -2,
                 })
+
+            improve.run_audit(out, improve.USER_HABIT_LENS_SCOPE)
+            user_wide = improve.run_metrics(
+                out, improve.USER_HABIT_LENS_SCOPE,
+                now=datetime(2026, 7, 18, tzinfo=timezone.utc))
+            self.assertEqual(self._metric(
+                user_wide, "delegation_effectiveness", "main_direct_work")["value"], 5)
 
     def test_same_inputs_and_clock_are_byte_stable(self):
         from datetime import datetime, timezone
@@ -7457,6 +7521,32 @@ class BoundaryWarnTests(unittest.TestCase):
             _path, round_exposure = _run_with_home(
                 home, lambda: overlay.write_round_exposure(root, "r1", None, None))
             self.assertEqual(round_exposure["start_level"], "observe-only")
+
+    def test_observe_only_still_emits_conflict_stderr(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home, did = self._deleg_needs_review(d, report=None)
+            (root / ".waystone.yml").write_text(
+                "version: 1\nproject: demo\npolicy:\n  start_level: observe-only\n")
+            _run_with_home(home, lambda: overlay.add_delta(
+                root, "verification_debt/one",
+                rule="delegation-verification-evidence-v1", summary="s"))
+            _run_with_home(home, lambda: overlay.add_delta(
+                root, "verification_debt/two",
+                rule="delegation-verification-evidence-v1", summary="s"))
+            _force_status(root, home, "verification_debt/one", "warning")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                events = _run_with_home(home, lambda: overlay.evaluate_boundary(
+                    root, "delegate-run", {"delegation_id": did}))
+            conflict = next(event for event in events if event["event"] == "conflict")
+            self.assertIn("waystone warn conflict", err.getvalue())
+            self.assertIs(conflict["suppressed_by_start_level"], False)
+            fire = next(event for event in events if event["event"] == "fire")
+            self.assertEqual(fire["delta_status"], "observing")
+            self.assertIs(fire["suppressed_by_start_level"], False)
 
     def test_no_fire_when_verification_present(self):
         with tempfile.TemporaryDirectory() as d:
@@ -12861,9 +12951,6 @@ class L3GapClosureAcceptanceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             out = Path(d)
-            out.joinpath("facts.json").write_text(_json.dumps({
-                "generated_from": "fixture", "inputs": {}, "skipped_lenses": [], "lenses": [],
-            }))
             _write_jsonl(out / "sessions.jsonl", [{
                 "project": "demo", "kind": "main", "session_id": "s1",
                 "tools": {"by_category": {"file_write": 2, "shell": 3}},
@@ -12886,7 +12973,10 @@ class L3GapClosureAcceptanceTests(unittest.TestCase):
                     ],
                 }],
             }, {"coverage": {"warning_observations": [{
-                "project": "demo", "coverage": {"warnings_file_present": True},
+                "project": "demo", "records": 0, "fire": 0, "conflict": 0,
+                "by_rule": {}, "by_boundary": {}, "by_rule_boundary": {},
+                "recent_rounds": [],
+                "coverage": {"warnings_file_present": True},
             }]}}])
             _write_jsonl(out / "evidence_warnings.jsonl", [
                 {"project": "demo", "event": "fire", "rule": "done-without-evidence-v1",
@@ -12900,13 +12990,16 @@ class L3GapClosureAcceptanceTests(unittest.TestCase):
                     {"identity": {"layer": "project", "id": "p2"}, "status": "retired"},
                 ], "coverage": {"accept_delta_conflicts": {}}},
             }]))
+            improve.run_audit(out, improve.PROJECT_LENS_SCOPE)
             snap = improve.run_metrics(
                 out, improve.PROJECT_LENS_SCOPE,
                 now=datetime(2026, 7, 15, tzinfo=timezone.utc))
             self.assertEqual(snap["metrics"]["quality"]["severe_finding_recurrence_rate"]["value"], .5)
             self.assertEqual(snap["metrics"]["quality"]["verification_finding_trend"]["value"],
                              {"first": 1, "last": 1, "delta": 0})
-            self.assertEqual(snap["metrics"]["delegation_effectiveness"]["main_direct_work"]["value"], 5)
+            main_direct = snap["metrics"]["delegation_effectiveness"]["main_direct_work"]
+            self.assertIsNone(main_direct["value"])
+            self.assertEqual(main_direct["unavailable_reason"], "lens-not-computed")
             self.assertEqual(snap["metrics"]["delegation_effectiveness"]["main_context_inflow"]["value"], 100)
             self.assertEqual(snap["metrics"]["governance"]["repeated_warning_exposure_count"]["value"], 1)
             self.assertEqual(snap["metrics"]["governance"]["retained_delta_count"]["value"], 1)
