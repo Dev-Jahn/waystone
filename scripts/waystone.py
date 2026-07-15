@@ -17,7 +17,9 @@ Groups:
   round    merge --pr N ...          deterministic merge guard
   improve  trace|reviews|evidence|audit|decide ...  project logs + reviews + task-id evidence / decisions
   delegate run|status|show|verify|verdict|apply|discard ...  worktree runner + evidence-gated verdict
-  overlay  add|list|show|promote|demote|suspend|retire|replay ...  project-local adaptive warn deltas
+  overlay  add|...|promote-user|override|materialize|compose ...  four-layer adaptive policy
+  consent  record <surface> <choice> ...  append a standard project-local consent event
+  install  agents|hooks [--consent-recorded] ...  consent-gated managed project files
   check    [--root DIR]               evaluate active overlay deltas at an explicit boundary (never blocks)
   paths    [--root DIR] [--json]      show resolved machine and project storage paths
   project  register|unregister|alias|list ...  manage the cross-project registry
@@ -103,6 +105,116 @@ def _paths_main(argv: list[str]) -> int:
     else:
         for name, path in paths.items():
             print(f"{name}: {path}")
+    return 0
+
+
+def _command_root(value: str | None) -> Path:
+    start = Path(value).expanduser() if value is not None else Path.cwd()
+    root = common.find_project_root(start)
+    if root is None:
+        raise common.WorkflowError(f"no waystone project found from {start.resolve()}")
+    return root
+
+
+def _consent_main(argv: list[str]) -> int:
+    if len(argv) < 3 or argv[0] != "record":
+        print("waystone consent: expected record <surface> <choice> [--context key=value] [--root DIR]",
+              file=sys.stderr)
+        return 1
+    surface, choice = argv[1:3]
+    context: dict[str, str] = {}
+    root_value = None
+    rest = argv[3:]
+    i = 0
+    try:
+        while i < len(rest):
+            if rest[i] in ("--context", "--root") and i + 1 < len(rest):
+                value = rest[i + 1]
+                if rest[i] == "--root":
+                    if root_value is not None:
+                        raise common.WorkflowError("--root may be passed only once")
+                    root_value = value
+                else:
+                    key, separator, item = value.partition("=")
+                    if not separator or not key or key in context:
+                        raise common.WorkflowError(
+                            "--context requires a unique non-empty key=value")
+                    context[key] = item
+                i += 2
+            else:
+                raise common.WorkflowError(f"unexpected argument {rest[i]!r}")
+        root = _command_root(root_value)
+        with common.hold_lock(common.project_lock_path(root)):
+            row = common.record_consent(root, surface, choice, context)
+    except common.WorkflowError as e:
+        print(f"waystone consent record: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"waystone consent record: cannot append consent — {e}", file=sys.stderr)
+        return 2
+    print(f"recorded consent {row['surface']}={row['choice']} -> {common.consent_path(root)}")
+    return 0
+
+
+_INSTALL_TARGETS = {
+    "agents": ("waystone-operator-agent.md", Path(".claude/agents/waystone-operator.md")),
+    "hooks": ("waystone-boundary-hook.json", Path(".claude/settings.json")),
+}
+
+
+def _install_main(argv: list[str]) -> int:
+    if not argv or argv[0] not in _INSTALL_TARGETS:
+        print("waystone install: expected agents|hooks [--consent-recorded] [--root DIR]",
+              file=sys.stderr)
+        return 1
+    kind = argv[0]
+    root_value = None
+    consent_recorded = False
+    rest = argv[1:]
+    i = 0
+    try:
+        while i < len(rest):
+            if rest[i] == "--root" and i + 1 < len(rest):
+                if root_value is not None:
+                    raise common.WorkflowError("--root may be passed only once")
+                root_value = rest[i + 1]
+                i += 2
+            elif rest[i] == "--consent-recorded":
+                if consent_recorded:
+                    raise common.WorkflowError("--consent-recorded may be passed only once")
+                consent_recorded = True
+                i += 1
+            else:
+                raise common.WorkflowError(f"unexpected argument {rest[i]!r}")
+        root = _command_root(root_value)
+        surface = f"install.{kind}"
+        context = {"kind": kind}
+        with common.hold_lock(common.project_lock_path(root)):
+            if consent_recorded:
+                common.record_consent(root, surface, "accept", context)
+            if not common.has_accepted_consent(root, surface, context):
+                raise common.WorkflowError(
+                    f"consent is required; record `{surface}` acceptance or pass --consent-recorded")
+            template_name, relative_target = _INSTALL_TARGETS[kind]
+            source = HERE.parent / "templates" / template_name
+            target = root / relative_target
+            if os.path.lexists(target):
+                raise common.WorkflowError(f"refusing to overwrite existing managed install target {target}")
+            payload = source.read_bytes()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with target.open("xb") as stream:
+                    stream.write(payload)
+            except BaseException:
+                target.unlink(missing_ok=True)
+                raise
+    except common.WorkflowError as e:
+        print(f"waystone install {kind}: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"waystone install {kind}: cannot install managed file — {e}", file=sys.stderr)
+        return 2
+    print(f"installed {kind}: {target} (left uncommitted)")
     return 0
 
 
@@ -335,6 +447,10 @@ def main(argv: list[str]) -> int:
     group, rest = argv[0], argv[1:]
 
     # new-style modules expose main(argv)
+    if group == "consent":
+        return _consent_main(rest)
+    if group == "install":
+        return _install_main(rest)
     if group == "task":
         import tasks
         return tasks.main(rest)

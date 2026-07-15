@@ -786,15 +786,17 @@ def _diff_patch(cwd: Path, base: str, result: str) -> bytes:
     return p.stdout
 
 
-def _active_overlays(root: Path) -> list[dict]:
-    """Active overlay deltas at run time; corrupt records fail immutable exposure capture loud."""
-    import overlay
-    return [{"id": d["id"], "status": d["status"]}
-            for d in overlay.active_deltas_for_exposure(root)]
+def _active_overlays(root: Path, composition: dict | None = None) -> list[dict]:
+    """Effective composed policies at run time; corrupt layer inputs fail exposure capture loud."""
+    if composition is None:
+        import overlay
+        composition = overlay.compose_policy(root)
+    return [{"id": policy["id"], "status": policy["stage"]}
+            for policy in composition["effective"]]
 
 
 def _write_exposure(record_dir, did, root, packet, task_id, head_sha, base_sha, dirty, binding,
-                    fingerprint, overlays, runner_override=None):
+                    fingerprint, overlays, runner_override=None, policy_composition=None):
     runner = str(binding.get("backend", "")).partition(":")[0]
     exposure = {
         "schema": "waystone-exposure-1", "delegation_id": did, "at": _now_iso(),
@@ -810,6 +812,8 @@ def _write_exposure(record_dir, did, root, packet, task_id, head_sha, base_sha, 
         # supplies enforceable guards and recorded waivers.
         "guards": None, "waivers": [],
     }
+    if policy_composition is not None:
+        exposure["policy_composition"] = policy_composition
     if runner_override is not None:
         exposure["runner_override"] = runner_override
     path = record_dir / "exposure.json"
@@ -868,6 +872,9 @@ def _claim_run(root: Path, plan: dict) -> tuple[str, Path]:
         raise WorkflowError(
             f"task {task_id} already has active delegation {active[0]} (state {active[1]}) — "
             f"apply or discard it first")
+    import overlay
+    plan["policy_composition"] = overlay.compose_policy(root)
+    # Keep the existing one-argument helper seam used by deterministic lock-span tests.
     plan["overlays"] = _active_overlays(root)
 
     did = _make_did(task_id)
@@ -920,7 +927,7 @@ def _run_claimed(root: Path, plan: dict, did: str, record_dir: Path) -> int:
     (record_dir / "packet.yaml").write_text(
         yaml.safe_dump(packet, sort_keys=False, allow_unicode=True), encoding="utf-8")
     _write_exposure(record_dir, did, root, packet, task_id, head_sha, base_sha, dirty, binding,
-                    fingerprint, overlays, plan["runner_override"])
+                    fingerprint, overlays, plan["runner_override"], plan["policy_composition"])
     _set_state(record_dir, "running")
 
     env_kind, env_commands = _resolve_env_prep(worktree_path, cfg)

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "waystone-project-policy-1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "policies"],
+  "properties": {
+    "schema": {"const": "waystone-project-policy-1"},
+    "policies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "rule", "stage", "params", "summary", "provenance"],
+        "properties": {
+          "id": {"type": "string"},
+          "rule": {"type": "string"},
+          "stage": {"enum": ["observing", "warning", "enforce"]},
+          "params": {"type": "object"},
+          "summary": {"type": "string"},
+          "provenance": {"type": "object"}
+        }
+      }
+    }
+  }
+}

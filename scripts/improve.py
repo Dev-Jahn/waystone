@@ -82,6 +82,7 @@ from common import (  # noqa: E402
     project_state_path,
     registry_path,
     resolve_project_paths,
+    write_text_atomic,
 )
 
 HEAD_LEN = 120
@@ -93,6 +94,17 @@ USER_HABIT_LENS_SCOPE = "user-habit"
 FINDING_TYPES = (
     "correctness", "scope", "architecture", "verification", "reproducibility", "reporting",
 )
+
+# Deterministic project maturity thresholds. Tune lifts the exact gate that previously lived only
+# in skills/improve/SKILL.md. Calibrate follows design §6.2's deliberately generous boundary: two
+# observed rounds plus one traced session and any explicit workflow-feedback signal. Enforce stays
+# in the vocabulary for the next arc; no count combination can return it here.
+MATURITY_STAGES = ("bootstrap", "calibrate", "tune", "enforce")
+CALIBRATE_MIN_TRACED_SESSIONS = 1
+CALIBRATE_MIN_ROUNDS = 2
+CALIBRATE_MIN_ACTIVITY_SIGNALS = 1
+TUNE_MIN_REVIEW_FEEDBACK = 5
+TUNE_MIN_FINDINGS = 20
 
 # Lens selection is mode policy, separate from the unchanged lens calculations below. Cross-scope
 # lenses run over only the projection directory selected by that mode.
@@ -1623,18 +1635,19 @@ _WARNING_CONTEXT_BOUNDARIES = {
 
 _WARNING_CONTEXT_FIELDS = {
     "delegation-verification-evidence-v1": {
-        "delegation_id", "task_id", "task_ids", "round_id", "delta_ids", "fired"},
+        "delegation_id", "task_id", "task_ids", "round_id", "delta_ids", "resolution", "fired"},
     "round-close-open-findings-v1": {
-        "task_id", "task_ids", "delegation_id", "round_id", "unlinked", "delta_ids", "fired"},
+        "task_id", "task_ids", "delegation_id", "round_id", "unlinked", "delta_ids",
+        "resolution", "fired"},
     "delegation-scope-drift-v1": {
         "delegation_id", "task_id", "task_ids", "round_id", "delta_ids", "outside_scope",
-        "coverage_reason", "fired"},
+        "coverage_reason", "resolution", "fired"},
     "env-manifest-mutation-v1": {
-        "round_id", "task_id", "task_ids", "delta_ids", "manifest_paths", "fired"},
+        "round_id", "task_id", "task_ids", "delta_ids", "manifest_paths", "resolution", "fired"},
     "review-skipped-closes-v1": {
-        "round_id", "task_id", "task_ids", "delta_ids", "consecutive", "fired"},
+        "round_id", "task_id", "task_ids", "delta_ids", "consecutive", "resolution", "fired"},
     "done-without-evidence-v1": {
-        "round_id", "task_id", "task_ids", "delta_ids", "fired"},
+        "round_id", "task_id", "task_ids", "delta_ids", "resolution", "fired"},
 }
 
 
@@ -2525,7 +2538,99 @@ def _lens_evidence_link(rows: list[dict]) -> dict:
         round_session_mapping={"provenance": "unknown"})
 
 
-def run_audit(in_dir: Path, lens_scope: str | None = None) -> dict:
+def _maturity_decision_count(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    count = 0
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return 0
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (isinstance(row, dict) and isinstance(row.get("rec_id"), str)
+                and row.get("decision") in ("accept", "reject")
+                and isinstance(row.get("at"), str)):
+            count += 1
+    return count
+
+
+def maturity_counts(data: dict[str, object], in_dir: Path) -> dict[str, int]:
+    sessions = data.get("sessions") if isinstance(data.get("sessions"), list) else []
+    delegations = data.get("delegations") if isinstance(data.get("delegations"), list) else []
+    reviews = data.get("reviews") if isinstance(data.get("reviews"), list) else []
+    round_ids = {row.get("round_id") for row in reviews
+                 if isinstance(row, dict) and isinstance(row.get("round_id"), str)}
+    return {
+        "traced_sessions": len(sessions),
+        "rounds": len(round_ids),
+        "review_feedback": sum(
+            bool(row.get("feedback_file")) for row in reviews if isinstance(row, dict)),
+        "findings": sum(
+            len(row.get("findings") or []) for row in reviews
+            if isinstance(row, dict) and isinstance(row.get("findings") or [], list)),
+        "delegations": len(delegations),
+        "decisions": _maturity_decision_count(in_dir / "decisions.jsonl"),
+    }
+
+
+def maturity_stage(counts: dict[str, int]) -> str:
+    """Compute bootstrap/calibrate/tune only. Enforce is intentionally unreachable this arc."""
+    if (counts.get("review_feedback", 0) >= TUNE_MIN_REVIEW_FEEDBACK
+            and counts.get("findings", 0) >= TUNE_MIN_FINDINGS):
+        return "tune"
+    activity = sum(counts.get(key, 0) for key in ("review_feedback", "delegations", "decisions"))
+    if (counts.get("traced_sessions", 0) >= CALIBRATE_MIN_TRACED_SESSIONS
+            and counts.get("rounds", 0) >= CALIBRATE_MIN_ROUNDS
+            and activity >= CALIBRATE_MIN_ACTIVITY_SIGNALS):
+        return "calibrate"
+    return "bootstrap"
+
+
+def _write_maturity_state(root: Path, counts: dict[str, int], stage: str) -> dict:
+    path = project_state_path(root) / "maturity.json"
+    previous = None
+    if path.is_file():
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise WorkflowError(f"corrupt maturity state {path} ({e})") from e
+        if (not isinstance(previous, dict) or previous.get("schema") != "waystone-maturity-1"
+                or previous.get("current_stage") not in MATURITY_STAGES
+                or not isinstance(previous.get("transitions"), list)):
+            raise WorkflowError(f"corrupt maturity state {path}")
+    state = previous or {
+        "schema": "waystone-maturity-1", "current_stage": None, "counts": {}, "transitions": [],
+    }
+    prior_stage = state.get("current_stage")
+    if prior_stage != stage:
+        state["transitions"].append({
+            "from": prior_stage, "to": stage, "at": datetime.now(timezone.utc).isoformat(),
+            "counts": dict(counts),
+        })
+    state["current_stage"] = stage
+    state["counts"] = dict(counts)
+    ensure_project_state_dir(root)
+    write_text_atomic(path, json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    return state
+
+
+def _maturity_fact(root: Path, data: dict[str, object], in_dir: Path) -> dict:
+    counts = maturity_counts(data, in_dir)
+    stage = maturity_stage(counts)
+    _write_maturity_state(root, counts, stage)
+    strength = {"bootstrap": "soft", "calibrate": "soft", "tune": "tuned"}[stage]
+    return {
+        "stage": stage, "counts": counts, "recommendation_tier": "always-allowed",
+        "recommendation_strength": strength,
+    }
+
+
+def run_audit(in_dir: Path, lens_scope: str | None = None,
+              *, project_root: Path | None = None) -> dict:
     if lens_scope not in (None, PROJECT_LENS_SCOPE, USER_HABIT_LENS_SCOPE):
         raise WorkflowError(f"unknown improve lens scope: {lens_scope!r}")
     present: dict[str, bool] = {}
@@ -2621,6 +2726,8 @@ def run_audit(in_dir: Path, lens_scope: str | None = None) -> dict:
         "skipped_lenses": skipped,
         "lenses": lenses,
     }
+    if project_root is not None and lens_scope == PROJECT_LENS_SCOPE:
+        facts["maturity"] = _maturity_fact(project_root, data, in_dir)
     if lens_scope is not None:
         facts["scope"] = lens_scope
     candidate_rows.sort(key=lambda row: (
@@ -2871,7 +2978,8 @@ def _cli_audit(argv: list[str], project_root: Path | None, user_wide: bool) -> i
     try:
         _prepare_project_output(project_root, user_wide)
         scope = USER_HABIT_LENS_SCOPE if user_wide else PROJECT_LENS_SCOPE
-        facts = run_audit(in_dir, scope)
+        facts = run_audit(
+            in_dir, scope, project_root=None if user_wide else project_root)
     except WorkflowError as e:
         print(f"waystone improve audit: {e}", file=sys.stderr)
         return 1

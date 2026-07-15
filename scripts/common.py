@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -131,6 +131,60 @@ def ensure_project_state_dir(root: Path) -> Path:
     _real_directory(state, "project state directory")
     _ensure_project_self_ignore(state)
     return state
+
+
+def consent_path(root: Path) -> Path:
+    """Project-local append-only consent event log."""
+    return project_state_path(root) / "consents.jsonl"
+
+
+def record_consent(root: Path, surface: str, choice: str, context: dict | None = None) -> dict:
+    """Append one standard consent event after the host has presented the choice to the user."""
+    if not isinstance(surface, str) or not surface.strip():
+        raise WorkflowError("consent surface must be a non-empty string")
+    if not isinstance(choice, str) or not choice.strip():
+        raise WorkflowError("consent choice must be a non-empty string")
+    if context is None:
+        context = {}
+    if (not isinstance(context, dict)
+            or any(not isinstance(key, str) or not isinstance(value, (str, int, float, bool, type(None)))
+                   for key, value in context.items())):
+        raise WorkflowError("consent context must be a flat object with scalar values")
+    row = {
+        "surface": surface.strip(), "choice": choice.strip(),
+        "at": datetime.now(timezone.utc).isoformat(), "context": dict(sorted(context.items())),
+    }
+    ensure_project_state_dir(root)
+    with consent_path(root).open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    return row
+
+
+def has_accepted_consent(root: Path, surface: str, context: dict) -> bool:
+    """Whether the latest valid event for an exact surface/context pair is an acceptance."""
+    path = consent_path(root)
+    if not path.is_file():
+        return False
+    latest = None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as e:
+        raise WorkflowError(f"consent log unreadable: {path} ({e})") from e
+    expected = dict(sorted(context.items()))
+    for line_number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise WorkflowError(f"corrupt consent log {path}:{line_number} ({e})") from e
+        if (not isinstance(row, dict) or not isinstance(row.get("surface"), str)
+                or not isinstance(row.get("choice"), str) or not isinstance(row.get("at"), str)
+                or not isinstance(row.get("context"), dict)):
+            raise WorkflowError(f"corrupt consent log {path}:{line_number}")
+        if row["surface"] == surface and row["context"] == expected:
+            latest = row
+    return latest is not None and latest["choice"] == "accept"
 
 
 def worktrees_cache_dir(home: Path | None = None) -> Path:

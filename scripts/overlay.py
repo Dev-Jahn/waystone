@@ -3,17 +3,12 @@
 # requires-python = ">=3.10"
 # dependencies = ["pyyaml"]
 # ///
-"""Adaptive overlay store + boundary warn engine — `waystone overlay` / `waystone check` (0.8.0 M2).
+"""Four-layer adaptive policy store + boundary warn engine — `waystone overlay` / `waystone check`.
 
-A project-local overlay is a small set of *deltas*: machine-evaluable rules (from a fixed
-vocabulary) that the harness can check at workflow boundaries (a delegation reaching needs-review,
-an apply, a round close, a review ingest) and warn about — never enforce (enforce is 0.9). A delta
-lives through {proposed → observing → warning → suspended/retired}: `observing` records fires
-silently, `warning` also prints to stderr. Warns never change a host command's exit code (invariant
-#6). Shadow replay estimates a rule's fire rate over past evidence before a delta is promoted to the
-warning stage. Everything is plugin-local and never committed (invariant #10).
-
-See dev_docs/0.8.0-m2-implementation-notes.md for the binding spec.
+Machine-evaluable rules are composed across built-in base, user, project, and current-round layers.
+The runtime supports observing and warning only; enforce remains vocabulary for the next arc and is
+unreachable here. Local deltas remain private unless an explicit, consent-gated materialization
+writes the commit-target project policy. Boundary warnings never change a host command's exit code.
 """
 from __future__ import annotations
 
@@ -24,19 +19,26 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import (  # noqa: E402
-    WorkflowError, _project_slug, ensure_project_state_dir, find_project_root, hold_lock,
-    load_config, migrate_project_state, project_lock_path, project_state_path,
+    ROUND_RE, WorkflowError, _project_slug, ensure_project_state_dir, find_project_root,
+    has_accepted_consent, hold_lock, load_config, machine_dir, migrate_project_state,
+    project_lock_path, project_state_path, record_consent, write_text_atomic,
 )
 
 # delta-id grammar mirrors the improve rec_id (`<lens>/<kebab-gist>`, S2) so a rec materialises to a
 # delta under the same id and the same recommendation keeps a stable identity across cycles.
 DELTA_ID_RE = re.compile(r"^[a-z][a-z0-9_]*/[a-z0-9]+(?:-[a-z0-9]+)*$")
+# R6: `add` is the acceptance event, so an extra `accepted` lifecycle state is intentionally absent.
 DELTA_STATUSES = ("proposed", "observing", "warning", "suspended", "retired")
 ACTIVE_STATUSES = ("observing", "warning")
 CANDIDATE_SCOPES = ("project_candidate", "user_candidate", "unresolved")
+POLICY_STAGES = ("observing", "warning", "enforce")
+RUNTIME_POLICY_STAGES = ("observing", "warning")
+PROJECT_POLICY_SCHEMA = "waystone-project-policy-1"
 DELTA_SCHEMAS = ("waystone-delta-1", "jw-delta-1")
 
 
@@ -257,6 +259,27 @@ def _deltas_dir(root: Path) -> Path:
     return _overlay_dir(root) / "deltas"
 
 
+def _user_overlay_dir() -> Path:
+    """The host-neutral user policy layer required by the four-layer model."""
+    return machine_dir() / "overlay"
+
+
+def _user_deltas_dir() -> Path:
+    return _user_overlay_dir() / "deltas"
+
+
+def _user_delta_path(delta_id: str) -> Path:
+    return _user_deltas_dir() / _delta_filename(delta_id)
+
+
+def _round_override_path(root: Path) -> Path:
+    return _overlay_dir(root) / "round-override.json"
+
+
+def _project_policy_path(root: Path) -> Path:
+    return Path(root) / "docs" / "waystone-policy.yaml"
+
+
 def _warnings_path(root: Path) -> Path:
     return _overlay_dir(root) / "warnings.jsonl"
 
@@ -437,6 +460,375 @@ def active_deltas_for_exposure(root: Path) -> list[dict]:
         if data["status"] in ACTIVE_STATUSES:
             out.append(data)
     return out
+
+
+def _write_new_user_delta(delta: dict) -> Path:
+    directory = _user_deltas_dir()
+    _mkdir_or_refuse(directory)
+    path = _user_delta_path(delta["id"])
+    try:
+        with path.open("x", encoding="utf-8") as stream:
+            stream.write(json.dumps(delta, ensure_ascii=False, indent=2) + "\n")
+    except FileExistsError as e:
+        raise WorkflowError(f"user overlay delta {delta['id']} already exists at {path}") from e
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return path
+
+
+def promote_user(root: Path, delta_id: str) -> dict:
+    """Explicitly copy a cross-project-proven project candidate into the user overlay."""
+    delta = load_delta(root, delta_id)
+    if delta.get("candidate_scope") != "user_candidate":
+        raise WorkflowError(
+            f"delta {delta_id} candidate_scope is {delta.get('candidate_scope')!r}; "
+            "promote-user requires user_candidate")
+    observed = delta.get("observed_in")
+    projects = sorted({item for item in observed or [] if isinstance(item, str) and item})
+    if len(projects) < 2:
+        raise WorkflowError(
+            f"delta {delta_id} has evidence from {len(projects)} distinct project(s); "
+            "promote-user requires observed_in evidence from at least 2 distinct projects")
+    if delta.get("status") not in ACTIVE_STATUSES:
+        raise WorkflowError(
+            f"delta {delta_id} is {delta.get('status')}; promote-user requires an active delta")
+    promoted = json.loads(json.dumps(delta))
+    promoted["scope"] = {"kind": "user"}
+    promoted["promoted_from"] = {
+        "project": _project_slug(root), "delta_id": delta_id, "observed_in": projects,
+        "at": _now_iso(),
+    }
+    _write_new_user_delta(promoted)
+    return promoted
+
+
+def _strict_delta_directory(directory: Path, *, layer: str, source_kind: str) -> list[dict]:
+    if not directory.is_dir():
+        return []
+    out = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            delta = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise WorkflowError(f"corrupt delta file {path} ({e})") from e
+        if (not isinstance(delta, dict) or delta.get("schema") not in DELTA_SCHEMAS
+                or not isinstance(delta.get("id"), str)
+                or DELTA_ID_RE.fullmatch(delta["id"]) is None
+                or delta.get("status") not in DELTA_STATUSES
+                or not isinstance(delta.get("rule"), str)
+                or not isinstance(delta.get("params") or {}, dict)):
+            raise WorkflowError(f"corrupt delta file {path}")
+        if delta["status"] not in ACTIVE_STATUSES:
+            continue
+        out.append({
+            "id": delta["id"], "rule": delta["rule"], "stage": delta["status"],
+            "status": delta["status"], "params": dict(delta.get("params") or {}),
+            "layer": layer, "source_kind": source_kind, "enabled": True,
+        })
+    return out
+
+
+def _base_policies() -> list[dict]:
+    """Machine-composable layer 0 defaults; disabled until a narrower layer activates a rule."""
+    return [{
+        "id": f"base/{rule_id}", "rule": rule_id, "stage": "observing",
+        "status": "observing", "params": dict(rule.get("default_params") or {}),
+        "layer": "base", "source_kind": "built-in", "enabled": False,
+    } for rule_id, rule in sorted(RULES.items())]
+
+
+def _load_project_policy(root: Path) -> list[dict]:
+    path = _project_policy_path(root)
+    if not path.is_file():
+        return []
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
+        raise WorkflowError(f"corrupt committed project policy {path} ({e})") from e
+    if (not isinstance(document, dict) or document.get("schema") != PROJECT_POLICY_SCHEMA
+            or not isinstance(document.get("policies"), list)):
+        raise WorkflowError(f"corrupt committed project policy {path}")
+    out = []
+    seen_ids = set()
+    for index, policy in enumerate(document["policies"]):
+        if (not isinstance(policy, dict) or not isinstance(policy.get("id"), str)
+                or DELTA_ID_RE.fullmatch(policy["id"]) is None
+                or not isinstance(policy.get("rule"), str)
+                or policy.get("stage") not in POLICY_STAGES
+                or not isinstance(policy.get("params"), dict)
+                or not isinstance(policy.get("summary"), str)
+                or not isinstance(policy.get("provenance"), dict)
+                or policy["id"] in seen_ids):
+            raise WorkflowError(f"corrupt committed project policy {path}: policies[{index}]")
+        seen_ids.add(policy["id"])
+        if policy["stage"] == "enforce":
+            raise WorkflowError(
+                f"committed project policy {policy['id']} requests enforce, which is not reachable "
+                "until the Adapt & Enforce arc")
+        out.append({
+            "id": policy["id"], "rule": policy["rule"], "stage": policy["stage"],
+            "status": policy["stage"], "params": dict(policy.get("params") or {}),
+            "layer": "project", "source_kind": "committed", "enabled": True,
+        })
+    return out
+
+
+def set_round_override(root: Path, round_id: str, rule: str, stage: str, reason: str) -> dict:
+    if not ROUND_RE.fullmatch(round_id):
+        raise WorkflowError(f"--round must match YYYY-MM-DD-<slug>, got {round_id!r}")
+    if rule not in RULES:
+        raise WorkflowError(f"unknown rule {rule!r} (known: {', '.join(sorted(RULES))})")
+    if stage not in RUNTIME_POLICY_STAGES:
+        allowed = ", ".join(RUNTIME_POLICY_STAGES)
+        raise WorkflowError(f"round override stage must be one of {allowed}; enforce is not reachable")
+    if not isinstance(reason, str) or not reason.strip():
+        raise WorkflowError("round override requires --reason")
+    path = _round_override_path(root)
+    document = None
+    if path.is_file():
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise WorkflowError(f"corrupt round override {path} ({e})") from e
+        if (not isinstance(document, dict) or document.get("schema") != "waystone-round-override-1"
+                or not isinstance(document.get("overrides"), list)):
+            raise WorkflowError(f"corrupt round override {path}")
+        if document.get("expired_at") is None and document.get("round_id") != round_id:
+            raise WorkflowError(
+                f"round override for {document.get('round_id')} is still active; close that round first")
+    if document is None or document.get("expired_at") is not None:
+        document = {
+            "schema": "waystone-round-override-1", "round_id": round_id,
+            "created_at": _now_iso(), "expired_at": None, "overrides": [],
+        }
+    if any(item.get("rule") == rule for item in document["overrides"] if isinstance(item, dict)):
+        raise WorkflowError(f"round {round_id} already has an override for {rule}")
+    entry = {
+        "id": f"round/{rule}", "rule": rule, "stage": stage,
+        "params": dict(RULES[rule].get("default_params") or {}),
+        "reason": reason.strip(), "at": _now_iso(),
+    }
+    document["overrides"].append(entry)
+    _ensure_project_state_or_refuse(root)
+    _mkdir_or_refuse(path.parent)
+    write_text_atomic(path, json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+    return entry
+
+
+def _load_round_overrides(root: Path, round_id: str | None) -> list[dict]:
+    path = _round_override_path(root)
+    if not path.is_file():
+        return []
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise WorkflowError(f"corrupt round override {path} ({e})") from e
+    if (not isinstance(document, dict) or document.get("schema") != "waystone-round-override-1"
+            or not isinstance(document.get("round_id"), str)
+            or not isinstance(document.get("overrides"), list)):
+        raise WorkflowError(f"corrupt round override {path}")
+    if document.get("expired_at") is not None:
+        return []
+    if round_id is not None and document["round_id"] != round_id:
+        raise WorkflowError(
+            f"active round override is for {document['round_id']}, not requested round {round_id}")
+    out = []
+    seen = set()
+    for index, entry in enumerate(document["overrides"]):
+        if (not isinstance(entry, dict) or not isinstance(entry.get("id"), str)
+                or not isinstance(entry.get("rule"), str) or entry["rule"] not in RULES
+                or entry.get("stage") not in RUNTIME_POLICY_STAGES
+                or not isinstance(entry.get("params") or {}, dict)
+                or not isinstance(entry.get("reason"), str) or not entry["reason"]
+                or entry["rule"] in seen):
+            raise WorkflowError(f"corrupt round override {path}: overrides[{index}]")
+        seen.add(entry["rule"])
+        out.append({
+            "id": entry["id"], "rule": entry["rule"], "stage": entry["stage"],
+            "status": entry["stage"], "params": dict(entry.get("params") or {}),
+            "layer": "round", "source_kind": "override", "enabled": True,
+            "round_id": document["round_id"], "reason": entry["reason"],
+        })
+    return out
+
+
+def expire_round_overrides(root: Path, round_id: str) -> bool:
+    path = _round_override_path(root)
+    if not path.is_file():
+        return False
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise WorkflowError(f"corrupt round override {path} ({e})") from e
+    if (not isinstance(document, dict) or document.get("schema") != "waystone-round-override-1"
+            or not isinstance(document.get("round_id"), str)
+            or not isinstance(document.get("overrides"), list)):
+        raise WorkflowError(f"corrupt round override {path}")
+    if document.get("expired_at") is not None:
+        return False
+    if document["round_id"] != round_id:
+        raise WorkflowError(f"round override {path} does not belong to closing round {round_id}")
+    document["expired_at"] = _now_iso()
+    write_text_atomic(path, json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+    return True
+
+
+_STAGE_RANK = {stage: index for index, stage in enumerate(POLICY_STAGES)}
+
+
+def _resolve_same_scope(policies: list[dict], scope: str,
+                        conflicts: list[dict], shadowed: list[dict]) -> list[dict]:
+    resolved = []
+    by_rule: dict[str, list[dict]] = {}
+    for policy in policies:
+        if policy.get("enabled") is True:
+            by_rule.setdefault(policy["rule"], []).append(policy)
+    for rule, group in sorted(by_rule.items()):
+        ordered = sorted(group, key=lambda item: (_STAGE_RANK[item["stage"]], item["id"]))
+        winner = ordered[0]
+        source_ids = sorted(item["id"] for item in group)
+        effective = {**winner, "source_ids": source_ids}
+        resolved.append(effective)
+        if len(group) > 1:
+            conflicts.append({
+                "rule": rule, "scope": scope, "ids": source_ids,
+                "effective_id": winner["id"], "effective_stage": winner["stage"],
+                "resolution": "least-restrictive",
+            })
+            shadowed.extend({
+                "id": item["id"], "rule": rule, "layer": item["layer"],
+                "source_kind": item["source_kind"], "shadowed_by": winner["id"],
+                "reason": "least-restrictive",
+            } for item in ordered[1:])
+    return resolved
+
+
+def compose_policy(root: Path, round_id: str | None = None) -> dict:
+    """Compose base < user < project < round, with D1d same-scope resolution and visibility."""
+    base = _base_policies()
+    user = _strict_delta_directory(_user_deltas_dir(), layer="user", source_kind="overlay")
+    local = _strict_delta_directory(_deltas_dir(root), layer="project", source_kind="overlay")
+    committed = _load_project_policy(root)
+    round_policies = _load_round_overrides(root, round_id)
+    conflicts: list[dict] = []
+    shadowed: list[dict] = []
+
+    # Committed and local overlay policies share project scope, but D1d gives committed policy the
+    # explicit tie-break. Local policies remain visible as shadowed instead of disappearing.
+    local_by_rule: dict[str, list[dict]] = {}
+    committed_by_rule: dict[str, list[dict]] = {}
+    for policy in local:
+        local_by_rule.setdefault(policy["rule"], []).append(policy)
+    for policy in committed:
+        committed_by_rule.setdefault(policy["rule"], []).append(policy)
+    project_candidates: list[dict] = []
+    for rule in sorted(set(local_by_rule) | set(committed_by_rule)):
+        local_group = local_by_rule.get(rule, [])
+        committed_group = committed_by_rule.get(rule, [])
+        if committed_group:
+            winners = _resolve_same_scope(
+                committed_group, "project-committed", conflicts, shadowed)
+            project_candidates.extend(winners)
+            if local_group:
+                winner = winners[0]
+                local_ids = sorted(item["id"] for item in local_group)
+                conflicts.append({
+                    "rule": rule, "scope": "project",
+                    "ids": sorted([*local_ids, *(item["id"] for item in committed_group)]),
+                    "effective_id": winner["id"], "effective_stage": winner["stage"],
+                    "resolution": "committed-wins", "shadowed": local_ids,
+                })
+                shadowed.extend({
+                    "id": item["id"], "rule": rule, "layer": "project",
+                    "source_kind": "overlay", "shadowed_by": winner["id"],
+                    "reason": "committed-wins",
+                } for item in sorted(local_group, key=lambda item: item["id"]))
+        else:
+            project_candidates.extend(_resolve_same_scope(
+                local_group, "project", conflicts, shadowed))
+
+    resolved_layers = {
+        "user": _resolve_same_scope(user, "user", conflicts, shadowed),
+        "project": project_candidates,
+        # One override per rule is enforced at write/load, but resolving here keeps the invariant
+        # explicit if the representation evolves.
+        "round": _resolve_same_scope(round_policies, "round", conflicts, shadowed),
+    }
+    effective_by_rule: dict[str, dict] = {}
+    for layer in ("user", "project", "round"):
+        for policy in resolved_layers[layer]:
+            previous = effective_by_rule.get(policy["rule"])
+            if previous is not None:
+                shadowed.append({
+                    "id": previous["id"], "rule": previous["rule"],
+                    "layer": previous["layer"], "source_kind": previous["source_kind"],
+                    "shadowed_by": policy["id"], "reason": "narrower-scope",
+                })
+            effective_by_rule[policy["rule"]] = policy
+
+    return {
+        "schema": "waystone-policy-composition-1", "round_id": round_id,
+        "layers": [
+            {"name": "base", "scope": "base", "policies": base},
+            {"name": "user", "scope": "user", "policies": user},
+            {"name": "project", "scope": "project", "policies": [*local, *committed]},
+            {"name": "round", "scope": "round", "policies": round_policies},
+        ],
+        "effective": sorted(effective_by_rule.values(), key=lambda item: (item["rule"], item["id"])),
+        "conflicts": sorted(conflicts, key=lambda item: (
+            item["rule"], item["scope"], item["resolution"], item["effective_id"])),
+        "shadowed": sorted(shadowed, key=lambda item: (
+            item["rule"], item["layer"], item["id"], item["reason"])),
+    }
+
+
+def materialize(root: Path, delta_id: str, *, consent_recorded: bool = False) -> Path:
+    """Promote one replay-validated local delta into the commit-target project policy file."""
+    context = {"rule_id": delta_id}
+    if consent_recorded:
+        record_consent(root, "materialize", "accept", context)
+    if not has_accepted_consent(root, "materialize", context):
+        raise WorkflowError(
+            f"materialize consent is required for {delta_id}; record it with `waystone consent "
+            f"record materialize accept --context rule_id={delta_id}` or pass --consent-recorded")
+    delta = load_delta(root, delta_id)
+    if delta.get("status") not in ACTIVE_STATUSES:
+        raise WorkflowError(f"delta {delta_id} must be active before materialization")
+    if not isinstance(delta.get("replay"), dict):
+        raise WorkflowError(
+            f"delta {delta_id} has no replay evidence; run `waystone overlay replay {delta_id}` first")
+    path = _project_policy_path(root)
+    document = {"schema": PROJECT_POLICY_SCHEMA, "policies": []}
+    if path.is_file():
+        # Validate the existing document through the same strict loader before preserving it.
+        _load_project_policy(root)
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
+            raise WorkflowError(f"corrupt committed project policy {path} ({e})") from e
+    if any(policy.get("id") == delta_id for policy in document["policies"]
+           if isinstance(policy, dict)):
+        raise WorkflowError(f"committed project policy {delta_id} already exists in {path}")
+    evidence = delta.get("evidence") if isinstance(delta.get("evidence"), dict) else {}
+    replay = delta["replay"]
+    document["policies"].append({
+        "id": delta_id, "rule": delta["rule"], "stage": delta["status"],
+        "params": dict(delta.get("params") or {}),
+        "summary": str(evidence.get("summary") or delta.get("title") or delta_id),
+        "provenance": {
+            "source_delta": delta_id,
+            "evidence": {
+                "source": evidence.get("source"), "rec_id": evidence.get("rec_id"),
+                "summary": evidence.get("summary"), "pointers": list(evidence.get("pointers") or []),
+            },
+            "replay": {key: replay.get(key) for key in ("opportunities", "fires", "fire_rate")},
+        },
+    })
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
+    write_text_atomic(path, text)
+    return path
 
 
 def add_delta(root: Path, delta_id: str, *, rule: str, summary: str, pointers=None,
@@ -888,7 +1280,13 @@ def evaluate_boundary(root: Path, boundary: str, context: dict) -> list[dict]:
 
 
 def _evaluate_boundary(root: Path, boundary: str, context: dict) -> list[dict]:
-    active = active_deltas(root)
+    requested_round = context.get("round_id") if boundary == "round-close" else None
+    composition = compose_policy(
+        root, requested_round if isinstance(requested_round, str) else None)
+    policies_by_id = {
+        policy["id"]: policy for layer in composition["layers"] for policy in layer["policies"]
+    }
+    active = composition["effective"]
     events: list[dict] = []
     for d in sorted((d for d in active if d.get("rule") not in RULES),
                     key=lambda d: d.get("id", "")):
@@ -902,26 +1300,30 @@ def _evaluate_boundary(root: Path, boundary: str, context: dict) -> list[dict]:
                 if boundary in RULES.get(d.get("rule"), {}).get("boundaries", set())]
     if not relevant:
         return events
-    by_rule: dict[str, list[dict]] = {}
-    for d in relevant:
-        by_rule.setdefault(d["rule"], []).append(d)
+    relevant_rules = {policy["rule"] for policy in relevant}
+    for conflict in composition["conflicts"]:
+        if conflict["rule"] not in relevant_rules:
+            continue
+        conflict_context = {"delta_ids": conflict["ids"], "resolution": conflict["resolution"]}
+        for key in ("delegation_id", "task_id", "round_id"):
+            if isinstance(context.get(key), str):
+                conflict_context[key] = context[key]
+        if isinstance(context.get("task_ids"), list):
+            conflict_context["task_ids"] = context["task_ids"]
+        events.append(_emit(
+            root, boundary, conflict["effective_id"], conflict["rule"],
+            conflict["effective_stage"], "conflict",
+            f"{len(conflict['ids'])} policies conflict at {conflict['scope']} scope — "
+            f"effective stage {conflict['effective_stage']} ({conflict['resolution']})",
+            conflict_context))
 
-    for rule_id, group in sorted(by_rule.items()):
-        # S9 least-restrictive: observing overrides warning; a representative delta carries the fire id
-        observing = sorted((d for d in group if d["status"] == "observing"), key=lambda d: d["id"])
-        rep = observing[0] if observing else sorted(group, key=lambda d: d["id"])[0]
-        eff = "observing" if observing else "warning"
-        if len(group) > 1:
-            conflict_context = {"delta_ids": sorted(d["id"] for d in group)}
-            for key in ("delegation_id", "task_id", "round_id"):
-                if isinstance(context.get(key), str):
-                    conflict_context[key] = context[key]
-            if isinstance(context.get("task_ids"), list):
-                conflict_context["task_ids"] = context["task_ids"]
-            events.append(_emit(
-                root, boundary, rep["id"], rule_id, eff, "conflict",
-                f"{len(group)} active deltas reference {rule_id} — effective stage {eff} "
-                f"(least-restrictive)", conflict_context))
+    for rep in sorted(relevant, key=lambda item: (item["rule"], item["id"])):
+        rule_id = rep["rule"]
+        group = [policies_by_id[source_id] for source_id in rep.get("source_ids", [rep["id"]])
+                 if source_id in policies_by_id]
+        if not group:
+            group = [rep]
+        eff = rep["stage"]
         params = rep.get("params") or {}
 
         if rule_id == "delegation-verification-evidence-v1":
@@ -1148,6 +1550,7 @@ def write_round_exposure(root: Path, round_id: str, head_sha: str | None, waterm
     env_prep = (cfg.get("delegation") or {}).get("env_prep")
     round_evidence = _capture_round_evidence(
         root, base_sha, watermark, task_scopes or {}, done_task_ids or [])
+    policy_composition = compose_policy(root, round_id=round_id)
     exposure = {
         "schema": "waystone-round-exposure-1", "round_id": round_id, "at": _now_iso(),
         "session_id": session_id,
@@ -1155,7 +1558,9 @@ def write_round_exposure(root: Path, round_id: str, head_sha: str | None, waterm
         "head_sha": head_sha, "config_watermark": watermark, "base_sha": base_sha,
         "profile_fingerprint": fp, "bindings": bindings,
         "env_prep": env_prep, "round_evidence": round_evidence,
-        "overlays_active": [{"id": d["id"], "status": d["status"]} for d in active_deltas(root)],
+        "overlays_active": [{"id": d["id"], "status": d["stage"]}
+                            for d in policy_composition["effective"]],
+        "policy_composition": policy_composition,
         # Adapt & Enforce has not shipped: null means no effective guard engine and [] means no
         # recorded waivers. These are truthful contract values, not missing-data fallbacks.
         "guards": None, "waivers": [],
@@ -1323,6 +1728,53 @@ def _cli_replay(rest: list[str]) -> int:
     return 0
 
 
+def _cli_promote_user(rest: list[str]) -> int:
+    pos, opts = _parse_opts(rest, value=("root",))
+    if len(pos) != 1:
+        raise WorkflowError("promote-user requires one <delta-id>")
+    root = _resolve_root(opts.get("root"))
+    with hold_lock(project_lock_path(root)):
+        promoted = promote_user(root, pos[0])
+    print(f"promoted {promoted['id']} -> user overlay")
+    return 0
+
+
+def _cli_override(rest: list[str]) -> int:
+    pos, opts = _parse_opts(rest, value=("root", "round", "stage", "reason"))
+    if len(pos) != 1:
+        raise WorkflowError("override requires one <rule-id>")
+    for name in ("round", "stage", "reason"):
+        if not opts.get(name):
+            raise WorkflowError(f"override requires --{name}")
+    root = _resolve_root(opts.get("root"))
+    with hold_lock(project_lock_path(root)):
+        entry = set_round_override(
+            root, opts["round"], pos[0], opts["stage"], opts["reason"])
+    print(f"round override {entry['rule']} -> {entry['stage']} ({opts['round']})")
+    return 0
+
+
+def _cli_materialize(rest: list[str]) -> int:
+    pos, opts = _parse_opts(rest, value=("root",), boolean=("consent-recorded",))
+    if len(pos) != 1:
+        raise WorkflowError("materialize requires one <delta-id>")
+    root = _resolve_root(opts.get("root"))
+    with hold_lock(project_lock_path(root)):
+        path = materialize(root, pos[0], consent_recorded=bool(opts.get("consent-recorded")))
+    print(f"materialized {pos[0]} -> {path} (left uncommitted)")
+    return 0
+
+
+def _cli_compose(rest: list[str]) -> int:
+    pos, opts = _parse_opts(rest, value=("root", "round"))
+    if pos:
+        raise WorkflowError("compose takes no positional arguments")
+    root = _resolve_root(opts.get("root"))
+    print(json.dumps(compose_policy(root, round_id=opts.get("round")),
+                     ensure_ascii=False, indent=2))
+    return 0
+
+
 def _cli_check(rest: list[str]) -> int:
     """The explicit `check` boundary: evaluate every active delta against current state. Firing does
     NOT change the exit code — a successful evaluation is exit 0 even with warnings (S5)."""
@@ -1340,15 +1792,19 @@ def _cli_check(rest: list[str]) -> int:
     return 0
 
 
-_HANDLERS = {"add": _cli_add, "list": _cli_list, "show": _cli_show, "promote": _cli_promote,
-             "demote": _cli_demote, "suspend": _cli_suspend, "retire": _cli_retire,
-             "replay": _cli_replay, "check": _cli_check}
+_HANDLERS = {
+    "add": _cli_add, "list": _cli_list, "show": _cli_show, "promote": _cli_promote,
+    "promote-user": _cli_promote_user, "demote": _cli_demote, "suspend": _cli_suspend,
+    "retire": _cli_retire, "replay": _cli_replay, "override": _cli_override,
+    "materialize": _cli_materialize, "compose": _cli_compose, "check": _cli_check,
+}
 
 
 def main(argv: list[str]) -> int:
     if not argv or argv[0] not in _HANDLERS:
         print("waystone overlay: expected subcommand "
-              "(add|list|show|promote|demote|suspend|retire|replay)", file=sys.stderr)
+              "(add|list|show|promote|promote-user|demote|suspend|retire|replay|override|"
+              "materialize|compose)", file=sys.stderr)
         return 1
     try:
         return _HANDLERS[argv[0]](argv[1:])

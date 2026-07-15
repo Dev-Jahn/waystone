@@ -311,11 +311,16 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     # engine failure is visible but does not invalidate a close whose policy record is durable.
     try:
         import overlay
-        overlay.evaluate_boundary(
-            root, "round-close", {"round_id": round_id, "closing_task_ids": done,
-                                  "task_ids": list(dict.fromkeys(done + touched))})
+        try:
+            overlay.evaluate_boundary(
+                root, "round-close", {"round_id": round_id, "closing_task_ids": done,
+                                      "task_ids": list(dict.fromkeys(done + touched))})
+        finally:
+            # A round override applies through its close boundary, then expires even when the
+            # advisory evaluator reports an internal failure.
+            overlay.expire_round_overrides(root, round_id)
     except Exception as e:  # noqa: BLE001
-        print(f"round close: overlay warning unavailable ({e}) — close still succeeded",
+        print(f"round close: overlay warning/override expiry unavailable ({e}) — close still succeeded",
               file=sys.stderr)
     return 0
 

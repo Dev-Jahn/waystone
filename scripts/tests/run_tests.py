@@ -10742,6 +10742,290 @@ class L2CImproveFeedbackTests(unittest.TestCase):
             self.assertLessEqual(len(lens["examples"]), 5)
 
 
+class L2DPolicyMachineTests(unittest.TestCase):
+    """L2-D G5/G6/G7: maturity, four policy layers, consent, and materialization."""
+
+    def _project(self, directory: str) -> tuple[Path, Path]:
+        root = Path(directory) / "repo"
+        home = Path(directory) / "home"
+        root.mkdir()
+        home.mkdir()
+        init_repo(root)
+        (root / ".waystone.yml").write_text(
+            "version: 1\nproject: demo\nreviews_dir: docs/reviews\n"
+            "state:\n  last_round_commit: null\n")
+        (root / "tasks.yaml").write_text("version: 1\nproject: demo\ntasks: []\n")
+        return root, home
+
+    @staticmethod
+    def _replay(root: Path, delta_id: str) -> None:
+        delta = overlay.load_delta(root, delta_id)
+        delta["replay"] = {"fires": 1, "opportunities": 2, "fire_rate": 0.5,
+                           "by_round": []}
+        overlay._write_delta(root, delta)
+
+    def test_maturity_is_deterministic_recorded_and_recommendations_stay_allowed(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            out = root / ".waystone" / "improve"
+            out.mkdir(parents=True)
+            _write_jsonl(out / "sessions.jsonl", [{"project": "demo", "session_id": "s1"}])
+            _write_jsonl(out / "delegations.jsonl", [{"project": "demo", "session_id": "s1"}])
+            _write_jsonl(out / "reviews.jsonl", [
+                {"project": "demo", "round_id": "r1", "feedback_file": "r1-feedback.md",
+                 "findings": [], "counts": {}},
+                {"project": "demo", "round_id": "r2", "feedback_file": None,
+                 "findings": [], "counts": {}},
+            ])
+            (out / "decisions.jsonl").write_text(
+                '{"rec_id":"retry_loops/x","decision":"accept","at":"2026-07-15T00:00:00Z"}\n')
+            (out / "parse_coverage.json").write_text("{}")
+
+            facts = _run_with_home(home, lambda: improve.run_audit(
+                out, improve.PROJECT_LENS_SCOPE, project_root=root))
+            self.assertEqual(facts["maturity"]["stage"], "calibrate")
+            self.assertEqual(facts["maturity"]["recommendation_tier"], "always-allowed")
+            self.assertEqual(facts["maturity"]["counts"], {
+                "traced_sessions": 1, "rounds": 2, "review_feedback": 1,
+                "findings": 0, "delegations": 1, "decisions": 1,
+            })
+            state_path = root / ".waystone" / "maturity.json"
+            state = _json.loads(state_path.read_text())
+            self.assertEqual([row["to"] for row in state["transitions"]], ["calibrate"])
+
+            reviews = []
+            for number in range(5):
+                reviews.append({
+                    "project": "demo", "round_id": f"r{number}",
+                    "feedback_file": f"r{number}-feedback.md",
+                    "findings": [{"id": f"f{number}-{finding}"} for finding in range(4)],
+                    "counts": {},
+                })
+            _write_jsonl(out / "reviews.jsonl", reviews)
+            facts = _run_with_home(home, lambda: improve.run_audit(
+                out, improve.PROJECT_LENS_SCOPE, project_root=root))
+            self.assertEqual(facts["maturity"]["stage"], "tune")
+            state = _json.loads(state_path.read_text())
+            self.assertEqual([row["to"] for row in state["transitions"]], ["calibrate", "tune"])
+            self.assertIn("enforce", improve.MATURITY_STAGES)
+            self.assertEqual(improve.maturity_stage({key: 10_000 for key in facts["maturity"]["counts"]}),
+                             "tune")
+            self.assertFalse((state_path.parent / "maturity.json.tmp").exists())
+
+    def test_user_promotion_is_explicit_and_evidence_gated(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            _run_with_home(home, lambda: overlay.add_delta(
+                root, "retry_loops/one-project", rule="done-without-evidence-v1", summary="s",
+                candidate_scope="user_candidate", observed_in=["demo"]))
+            with self.assertRaises(common.WorkflowError) as cm:
+                _run_with_home(home, lambda: overlay.promote_user(root, "retry_loops/one-project"))
+            self.assertIn("2 distinct projects", str(cm.exception))
+
+            _run_with_home(home, lambda: overlay.add_delta(
+                root, "retry_loops/shared", rule="done-without-evidence-v1", summary="s",
+                candidate_scope="user_candidate", observed_in=["demo", "other"]))
+            promoted = _run_with_home(
+                home, lambda: overlay.promote_user(root, "retry_loops/shared"))
+            self.assertEqual(promoted["scope"]["kind"], "user")
+            self.assertTrue(_run_with_home(
+                home, lambda: overlay._user_delta_path("retry_loops/shared")).is_file())
+            self.assertNotIn("accepted", overlay.DELTA_STATUSES)
+
+    def test_composition_layers_committed_wins_and_round_override_expires(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            delta_id = "verification_debt/local"
+            _run_with_home(home, lambda: overlay.add_delta(
+                root, delta_id, rule="delegation-verification-evidence-v1", summary="s",
+                candidate_scope="user_candidate", observed_in=["demo", "other"]))
+            _run_with_home(home, lambda: overlay.promote_user(root, delta_id))
+            policy = {
+                "schema": "waystone-project-policy-1",
+                "policies": [{
+                    "id": "verification_debt/committed",
+                    "rule": "delegation-verification-evidence-v1", "stage": "warning",
+                    "params": {}, "summary": "committed", "provenance": {"source_delta": delta_id},
+                }],
+            }
+            (root / "docs").mkdir()
+            (root / "docs" / "waystone-policy.yaml").write_text(
+                yaml.safe_dump(policy, sort_keys=False))
+            _run_with_home(home, lambda: overlay.set_round_override(
+                root, "2026-07-15-l2d", "delegation-verification-evidence-v1",
+                "warning", "one-round exception"))
+
+            composed = _run_with_home(home, lambda: overlay.compose_policy(
+                root, round_id="2026-07-15-l2d"))
+            self.assertEqual([layer["name"] for layer in composed["layers"]],
+                             ["base", "user", "project", "round"])
+            effective = next(row for row in composed["effective"]
+                             if row["rule"] == "delegation-verification-evidence-v1")
+            self.assertEqual((effective["layer"], effective["stage"]), ("round", "warning"))
+            self.assertTrue(any(row["layer"] == "project" for row in composed["shadowed"]))
+
+            _run_with_home(home, lambda: overlay.expire_round_overrides(root, "2026-07-15-l2d"))
+            composed = _run_with_home(home, lambda: overlay.compose_policy(root))
+            effective = next(row for row in composed["effective"]
+                             if row["rule"] == "delegation-verification-evidence-v1")
+            self.assertEqual((effective["layer"], effective["source_kind"]),
+                             ("project", "committed"))
+            shadow = next(row for row in composed["shadowed"] if row["id"] == delta_id)
+            self.assertEqual(shadow["reason"], "committed-wins")
+            self.assertTrue(any(row["resolution"] == "committed-wins"
+                                for row in composed["conflicts"]))
+            override = _json.loads(overlay._round_override_path(root).read_text())
+            self.assertIsNotNone(override["expired_at"])
+            self.assertFalse(_run_with_home(
+                home, lambda: overlay.expire_round_overrides(root, "2026-07-16-next")))
+
+    def test_same_scope_conflict_is_least_restrictive_and_recorded(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            for delta_id in ("verification_debt/observe", "verification_debt/warn"):
+                _run_with_home(home, lambda did=delta_id: overlay.add_delta(
+                    root, did, rule="delegation-verification-evidence-v1", summary="s"))
+            warning = overlay.load_delta(root, "verification_debt/warn")
+            warning["status"] = "warning"
+            overlay._write_delta(root, warning)
+            composed = _run_with_home(home, lambda: overlay.compose_policy(root))
+            effective = next(row for row in composed["effective"]
+                             if row["rule"] == "delegation-verification-evidence-v1")
+            self.assertEqual(effective["stage"], "observing")
+            self.assertEqual(composed["conflicts"][0]["resolution"], "least-restrictive")
+            _run_with_home(home, lambda: overlay.evaluate_boundary(root, "check", {}))
+            rows = _read_warnings(root, home)
+            self.assertTrue(any(row["event"] == "conflict" for row in rows))
+
+    def test_consent_log_and_materialization_require_explicit_acceptance(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            delta_id = "verification_debt/materialize"
+            _run_with_home(home, lambda: overlay.add_delta(
+                root, delta_id, rule="delegation-verification-evidence-v1", summary="verified",
+                pointers=["facts.json#verification_debt"]))
+            self._replay(root, delta_id)
+            with self.assertRaises(common.WorkflowError) as cm:
+                _run_with_home(home, lambda: overlay.materialize(root, delta_id))
+            self.assertIn("consent", str(cm.exception))
+
+            consent = _run_with_home(home, lambda: common.record_consent(
+                root, "materialize", "accept", {"rule_id": delta_id}))
+            self.assertEqual(set(consent), {"surface", "choice", "at", "context"})
+            path = _run_with_home(home, lambda: overlay.materialize(root, delta_id))
+            document = yaml.safe_load(path.read_text())
+            self.assertEqual(document["schema"], "waystone-project-policy-1")
+            self.assertEqual(document["policies"][0]["provenance"]["source_delta"], delta_id)
+            self.assertEqual(document["policies"][0]["provenance"]["evidence"]["pointers"],
+                             ["facts.json#verification_debt"])
+            self.assertIn("docs/waystone-policy.yaml", git(
+                root, "status", "--short", "--untracked-files=all").stdout)
+
+    def test_consent_cli_records_standard_shape(self):
+        import contextlib
+        import io
+        import waystone
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = _run_with_home(home, lambda: waystone.main([
+                    "consent", "record", "install.agents", "accept",
+                    "--context", "kind=agents", "--root", str(root)]))
+            self.assertEqual(rc, 0)
+            rows = [_json.loads(line) for line in (root / ".waystone" / "consents.jsonl")
+                    .read_text().splitlines()]
+            self.assertEqual(rows[0]["context"], {"kind": "agents"})
+
+    def test_overlay_cli_verbs_are_explicit_gated_and_never_reach_enforce(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            delta_id = "verification_debt/cli"
+            _run_with_home(home, lambda: overlay.add_delta(
+                root, delta_id, rule="delegation-verification-evidence-v1", summary="s",
+                candidate_scope="user_candidate", observed_in=["demo", "other"]))
+            self._replay(root, delta_id)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(_run_with_home(home, lambda: overlay.main([
+                    "promote-user", delta_id, "--root", str(root)])), 0)
+                self.assertEqual(_run_with_home(home, lambda: overlay.main([
+                    "override", "delegation-verification-evidence-v1",
+                    "--round", "2026-07-15-cli", "--stage", "warning",
+                    "--root", str(root)])), 1)
+                self.assertEqual(_run_with_home(home, lambda: overlay.main([
+                    "override", "delegation-verification-evidence-v1",
+                    "--round", "2026-07-15-cli", "--stage", "enforce",
+                    "--reason", "must stay unreachable", "--root", str(root)])), 1)
+                self.assertEqual(_run_with_home(home, lambda: overlay.main([
+                    "override", "delegation-verification-evidence-v1",
+                    "--round", "2026-07-15-cli", "--stage", "warning",
+                    "--reason", "temporary", "--root", str(root)])), 0)
+                self.assertEqual(_run_with_home(home, lambda: overlay.main([
+                    "materialize", delta_id, "--consent-recorded", "--root", str(root)])), 0)
+            self.assertTrue((root / "docs" / "waystone-policy.yaml").is_file())
+
+    def test_managed_installs_are_template_exact_uncommitted_and_never_overwrite(self):
+        import contextlib
+        import io
+        import waystone
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            for kind in ("agents", "hooks"):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    rc = _run_with_home(home, lambda k=kind: waystone.main([
+                        "install", k, "--consent-recorded", "--root", str(root)]))
+                self.assertEqual(rc, 0)
+            repo_root = SCRIPTS.parent
+            self.assertEqual((root / ".claude" / "agents" / "waystone-operator.md").read_bytes(),
+                             (repo_root / "templates" / "waystone-operator-agent.md").read_bytes())
+            self.assertEqual((root / ".claude" / "settings.json").read_bytes(),
+                             (repo_root / "templates" / "waystone-boundary-hook.json").read_bytes())
+            status = git(root, "status", "--short", "--untracked-files=all").stdout
+            self.assertIn(".claude/agents/waystone-operator.md", status)
+            self.assertIn(".claude/settings.json", status)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = _run_with_home(home, lambda: waystone.main([
+                    "install", "agents", "--consent-recorded", "--root", str(root)]))
+            self.assertEqual(rc, 1)
+
+    def test_round_and_delegate_exposures_capture_composed_policy(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _round_review_project(d)
+            _run_with_home(home, lambda: overlay.add_delta(
+                root, "review_association/local", rule="round-close-open-findings-v1", summary="s"))
+            _run_with_home(home, lambda: overlay.set_round_override(
+                root, "2026-01-02-close", "round-close-open-findings-v1", "observing", "temporary"))
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = _run_with_home(home, lambda: round.close(
+                    root, "2026-01-02-close", done=["chore/close-me"], touched=[], commit="HEAD"))
+            self.assertEqual(rc, 0)
+            exposure = _json.loads((overlay._exposure_dir(root) /
+                                    "round-2026-01-02-close.json").read_text())
+            effective = next(row for row in exposure["policy_composition"]["effective"]
+                             if row["rule"] == "round-close-open-findings-v1")
+            self.assertEqual(effective["layer"], "round")
+            self.assertIsNotNone(_json.loads(overlay._round_override_path(root).read_text())["expired_at"])
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            _run_with_home(home, lambda: overlay.add_delta(
+                root, "verification_debt/local", rule="delegation-verification-evidence-v1",
+                summary="s"))
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(_deleg_run(root, home, _deleg_fake({"impl.py": "x\n"})), 0)
+            exposure = _json.loads((_latest_rec(root, home) / "exposure.json").read_text())
+            effective = next(row for row in exposure["policy_composition"]["effective"]
+                             if row["rule"] == "delegation-verification-evidence-v1")
+            self.assertEqual(effective["layer"], "project")
+
+
 class CodexPluginContractTests(unittest.TestCase):
     def test_dual_manifests_and_host_surfaces(self):
         root = SCRIPTS.parent
