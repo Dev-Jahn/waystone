@@ -2057,6 +2057,25 @@ class IngestTests(unittest.TestCase):
             self.assertEqual(review.ingest(root, None, src=src), 0)
             self.assertTrue((rdir / "2026-06-20-a-feedback.md").is_file())
 
+    def test_packet_ingest_records_round_bound_request_sha_sidecar(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self._root(d)
+            rdir = root / "docs" / "reviews"
+            rdir.mkdir(parents=True)
+            rid = "2026-06-20-a"
+            (rdir / f"{rid}-request.md").write_text(
+                f"# Review Request — {rid}\n\n"
+                f"- Reviewing: {'a' * 40}   (diff against (root))\n")
+            src = root / "inbox.md"
+            src.write_bytes(b"review body")
+            self.assertEqual(review.ingest(root, rid, src=src), 0)
+            sidecars = list(rdir.glob(f"{rid}-request.binding*.json"))
+            self.assertEqual(len(sidecars), 1)
+            binding = _json.loads(sidecars[0].read_text())
+            self.assertEqual(binding["round_id"], rid)
+            self.assertEqual(binding["target_sha"], "a" * 40)
+            self.assertIsNone(binding["base_sha"])
+
     def test_reingest_requires_force_and_preserves_source_on_refusal(self):
         with tempfile.TemporaryDirectory() as d:
             root = self._root(d)
@@ -3472,10 +3491,13 @@ class ImproveReviewsTests(unittest.TestCase):
             # triage findings: severity read structurally from the table cell (explicit). JW-GPT-001's
             # task-id cell names fix/thing (a joined task) → merged into ONE triage finding carrying
             # task_id; the separate fix/thing task finding is NOT emitted (dedup)
-            self.assertEqual(byid["JW-GPT-001"],
-                             {"id": "JW-GPT-001", "severity": "blocker", "status": "REAL",
-                              "type": "unknown", "source": "triage", "provenance": "explicit",
-                              "task_id": "fix/thing"})
+            expected = {"id": "JW-GPT-001", "severity": "blocker", "status": "REAL",
+                        "type": "unknown", "source": "triage", "provenance": "explicit",
+                        "task_id": "fix/thing"}
+            self.assertEqual({key: byid["JW-GPT-001"][key] for key in expected}, expected)
+            self.assertEqual(byid["JW-GPT-001"]["review_origin"], "2026-07-01-alpha")
+            self.assertTrue(byid["JW-GPT-001"]["source_pointer"].endswith(
+                "2026-07-01-alpha-feedback.md:22"))
             self.assertNotIn("fix/thing", byid)  # deduped into JW-GPT-001, not a second finding
             self.assertEqual(byid["JW-GPT-002"]["status"], "REJECTED")
             self.assertEqual(byid["JW-GPT-002"]["severity"], "minor")
@@ -7327,6 +7349,13 @@ class RoundExposureTests(unittest.TestCase):
             self.assertEqual(exp["bindings"]["implementer"], "codex:gpt-5.4-codex")
             self.assertEqual(exp["guards"], None)
             self.assertEqual(exp["waivers"], [])
+            bindings = list((root / "docs" / "reviews").glob(
+                "2026-01-02-close-request.binding*.json"))
+            self.assertEqual(len(bindings), 1)
+            binding = _json.loads(bindings[0].read_text())
+            self.assertEqual(binding["round_id"], "2026-01-02-close")
+            self.assertEqual(binding["target_sha"], git(root, "rev-parse", "HEAD").stdout.strip())
+            self.assertEqual(binding["canonical_store"], "local-packet")
 
     def test_profile_absent_null_bindings(self):
         with tempfile.TemporaryDirectory() as d:
@@ -7594,19 +7623,24 @@ class EvidenceTests(unittest.TestCase):
             task_rows = {r["task_id"]: r for r in rows if "task_id" in r}
             self.assertEqual(sorted(task_rows), ["feat/deleg-only", "fix/open", "fix/task-only"])
             # source=triage uses task_id; source=task uses id. Both become the same task_id field.
-            self.assertEqual(task_rows["fix/open"]["findings"], [
+            basic = ("round", "severity", "status", "type")
+            self.assertEqual([{key: finding[key] for key in basic}
+                              for finding in task_rows["fix/open"]["findings"]], [
                 {"round": "2026-01-01-r1", "severity": "blocker", "status": "REAL",
                  "type": "unknown"}])
-            self.assertEqual(task_rows["fix/task-only"]["findings"], [
+            self.assertEqual([{key: finding[key] for key in basic}
+                              for finding in task_rows["fix/task-only"]["findings"]], [
                 {"round": "2026-01-01-r1", "severity": "major", "status": "done",
                  "type": "unknown"}])
+            self.assertEqual(task_rows["fix/open"]["findings"][0]["review_origin"],
+                             "2026-01-01-r1")
             self.assertEqual(task_rows["fix/open"]["delegations"], [
                 {"binding": None, "did": "did-unverified", "env": None,
                  "overlays_active": [],
                  "scope_drift": {
                      "changed_files": [], "coverage_reason": "missing-packet",
                      "declared_scope": [], "evaluable": False, "outside_scope": [],
-                     "provenance": "unknown", "rule": "packet-path-scope-v1",
+                     "provenance": "unknown", "rule": "packet-declared-scope-v2",
                  },
                  "state": "needs-review", "verification_present": False}])
             self.assertTrue(task_rows["feat/deleg-only"]["delegations"][0]["verification_present"])
@@ -7670,7 +7704,9 @@ class EvidenceTests(unittest.TestCase):
             out = Path(d) / "out"
             _run_with_home(home, lambda: improve.run_evidence(registry, out, set()))
             rows = {r["task_id"]: r for r in self._rows(out) if "task_id" in r}
-            self.assertEqual(rows["feat/deleg-only"]["findings"], [{
+            basic = ("round", "severity", "status", "type")
+            self.assertEqual([{key: finding[key] for key in basic}
+                              for finding in rows["feat/deleg-only"]["findings"]], [{
                 "round": "2026-01-01-r1", "severity": "major", "status": "NEEDS-RULING",
                 "type": "unknown"}])
             facts = improve.run_audit(out)
@@ -7738,6 +7774,7 @@ class ImproveL2BTests(unittest.TestCase):
             (record / "packet.yaml").write_text(yaml.safe_dump({
                 "schema": "waystone-packet-1",
                 "task": {"id": "feat/x", "notes": "Only `src/` and `tests/test_api.py`."},
+                "declared_scope": ["src", "tests/test_api.py"],
                 "acceptance": ["Keep changes inside `src/` and `tests/test_api.py`."],
             }))
             (record / "artifact" / "contract.yaml").write_text(yaml.safe_dump({
@@ -7749,7 +7786,7 @@ class ImproveL2BTests(unittest.TestCase):
             }))
             drift = common.delegation_scope_drift(record)
             self.assertEqual(drift["outside_scope"], ["docs/readme.md"])
-            self.assertEqual(drift["provenance"], "inferred")
+            self.assertEqual(drift["provenance"], "explicit")
             unknown_record = out / "record-unknown"
             (unknown_record / "artifact").mkdir(parents=True)
             (unknown_record / "packet.yaml").write_text(yaml.safe_dump({
@@ -7760,7 +7797,7 @@ class ImproveL2BTests(unittest.TestCase):
                 "changed_files": [{"path": "src/y.py", "status": "M"}],
             }))
             unknown = common.delegation_scope_drift(unknown_record)
-            self.assertEqual(unknown["coverage_reason"], "no-declared-path-scope")
+            self.assertEqual(unknown["coverage_reason"], "scope-unknown")
             _write_jsonl(out / "evidence.jsonl", [{
                 "project": "demo", "task_id": "feat/x", "findings": [],
                 "delegations": [{"did": "d1", "scope_drift": drift},
@@ -7771,7 +7808,7 @@ class ImproveL2BTests(unittest.TestCase):
             self.assertEqual(lens["per_project"]["demo"]["delegations_drifted"], 1)
             self.assertEqual(lens["per_project"]["demo"]["outside_files"], 1)
             self.assertEqual(lens["per_project"]["demo"]["coverage"],
-                             {"no-declared-path-scope": 1})
+                             {"scope-unknown": 1})
 
     def test_warn_friction_counts_rule_boundary_and_round_trends_byte_stably(self):
         with tempfile.TemporaryDirectory() as d:
@@ -7831,8 +7868,10 @@ class ImproveL2BTests(unittest.TestCase):
             ])
             lens = {item["lens"]: item for item in self._audit_twice(out)["lenses"]}[
                 "delegation_opportunity"]
-            self.assertEqual([row["task_id"] for row in lens["candidates"]], ["feat/direct"])
-            self.assertEqual(lens["candidates"][0]["provenance"], "inferred")
+            candidates = [row for row in self._evidence_rows(out / "audit_candidates.jsonl")
+                          if row["lens"] == "delegation_opportunity"]
+            self.assertEqual([row["task_id"] for row in candidates], ["feat/direct"])
+            self.assertEqual(candidates[0]["provenance"], "inferred")
             self.assertEqual(lens["coverage"]["task_session_unknown"], 1)
 
     def test_env_unpreparedness_separates_env_prep_and_dependency_signatures(self):
@@ -7890,7 +7929,11 @@ class ImproveL2BTests(unittest.TestCase):
             lens = {item["lens"]: item for item in self._audit_twice(out)["lenses"]}[
                 "finding_concentration"]
             project = lens["per_project"]["demo"]
-            self.assertEqual(project["by_task"], {"feat/x": 1})
+            self.assertEqual(project["tasks_with_findings"], 1)
+            candidates = [row for row in self._evidence_rows(out / "audit_candidates.jsonl")
+                          if row["lens"] == "finding_concentration"]
+            self.assertEqual([(row["task_id"], row["findings"]) for row in candidates],
+                             [("feat/x", 1)])
             self.assertEqual(project["by_role"], {"main": 1})
             self.assertEqual(project["by_project_area"], {"scripts": 1})
             self.assertEqual(project["round_session_unknown"], 0)
@@ -7920,17 +7963,18 @@ class ImproveL2BTests(unittest.TestCase):
             out = Path(d)
             _write_jsonl(out / "reviews.jsonl", [
                 {"project": "demo", "round_id": "r1", "findings": [
-                    {"id": "f1", "type": "correctness", "source": "triage"},
-                    {"id": "u1", "type": "unknown", "source": "triage"}], "counts": {}},
+                    {"id": "f1", "type": "correctness", "status": "REAL", "source": "triage"},
+                    {"id": "u1", "type": "unknown", "status": "REAL", "source": "triage"}], "counts": {}},
                 {"project": "demo", "round_id": "r2", "findings": [
-                    {"id": "f2", "type": "correctness", "source": "triage"},
-                    {"id": "u2", "type": "unknown", "source": "triage"}], "counts": {}},
+                    {"id": "f2", "type": "correctness", "status": "REAL", "source": "triage"},
+                    {"id": "u2", "type": "unknown", "status": "REAL", "source": "triage"}], "counts": {}},
             ])
             lens = {item["lens"]: item for item in self._audit_twice(out)["lenses"]}[
                 "finding_concentration"]
             project = lens["per_project"]["demo"]
             self.assertEqual(project["recurring_types"], [{
-                "type": "correctness", "rounds": ["r1", "r2"],
+                "type": "correctness", "round_count": 2,
+                "first_round": "r1", "last_round": "r2",
                 "occurrences": 2, "recurrences": 1,
             }])
             self.assertEqual(project["unknown_type_excluded"], 2)
@@ -7956,7 +8000,7 @@ class ImproveL2BTests(unittest.TestCase):
             warnings.parent.mkdir(parents=True)
             _write_jsonl(warnings, [{
                 "at": "2026-07-01T00:30:00+00:00", "boundary": "round-close",
-                "delta_id": "verification_debt/x", "rule": "rule-x",
+                "delta_id": "review_association/x", "rule": "round-close-open-findings-v1",
                 "delta_status": "warning", "event": "fire", "message": "x",
                 "context": {"task_ids": ["feat/x"], "round_id": "2026-07-01-r1"},
             }])
@@ -7973,7 +8017,10 @@ class ImproveL2BTests(unittest.TestCase):
                        if row.get("task_id") == "feat/x")
             self.assertEqual(row["route_guard"]["round_exposure"]["overlays_active"],
                              [{"id": "verification_debt/x", "status": "warning"}])
-            self.assertEqual(row["route_guard"]["warning_refs"][0]["rule"], "rule-x")
+            warning_id = row["route_guard"]["warning_refs"][0]
+            normalized = {item["warning_id"]: item for item in
+                          self._evidence_rows(o1 / "evidence_warnings.jsonl")}
+            self.assertEqual(normalized[warning_id]["rule"], "round-close-open-findings-v1")
 
     def test_acceptance_event_binding_precedes_honest_status_approximation(self):
         with tempfile.TemporaryDirectory() as d:
@@ -7992,7 +8039,10 @@ class ImproveL2BTests(unittest.TestCase):
             (record / "status.json").write_text(_json.dumps({"state": "applied"}))
             (record / "artifact" / "verdict-1.json").write_text(_json.dumps({
                 "schema": "waystone-verdict-1", "decision": "apply",
+                "decided_by": "main-session", "criteria": [], "agent_checks": [],
+                "warnings_seen": [], "rationale": "accepted", "limitations": [],
                 "at": "2026-07-02T00:00:00+00:00", "provenance": "main-session",
+                "verify_number": None, "profile_fingerprint": None,
             }))
             exposure = root / ".waystone" / "exposure"
             exposure.mkdir(parents=True)
@@ -8013,6 +8063,271 @@ class ImproveL2BTests(unittest.TestCase):
             self.assertEqual(rows["fix/round"]["acceptance"]["event"], "round-close")
             self.assertEqual(rows["fix/fallback"]["acceptance"]["provenance"],
                              "current-task-state-approximation")
+
+
+class ImproveL2BAdversarialTests(unittest.TestCase):
+    """Adversarial review findings F1-F12: evidence must never be upgraded by guesswork."""
+
+    @staticmethod
+    def _project(base: Path, tasks_text: str, *, mode: str = "packet") -> tuple[Path, Path]:
+        root, registry = ImproveL2BTests._project(base, tasks_text)
+        config = yaml.safe_load((root / ".waystone.yml").read_text())
+        config["review"] = {"mode": mode}
+        (root / ".waystone.yml").write_text(yaml.safe_dump(config, sort_keys=False))
+        return root, registry
+
+    @staticmethod
+    def _verdict(*, decision: str = "apply", at: str = "2026-07-02T00:00:00+00:00") -> dict:
+        return {
+            "schema": "waystone-verdict-1", "decision": decision,
+            "decided_by": "main-session", "criteria": [], "agent_checks": [],
+            "warnings_seen": [], "rationale": "main accepted", "limitations": [],
+            "at": at, "provenance": "main-session", "verify_number": None,
+            "profile_fingerprint": None,
+        }
+
+    @staticmethod
+    def _rows(path: Path) -> list[dict]:
+        return [_json.loads(line) for line in path.read_text().splitlines() if line]
+
+    def test_f1_round_binding_rejects_foreign_marker_and_pr_projection_is_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, registry = self._project(
+                base, "  - id: feat/alpha\n    title: alpha task here\n    status: active\n")
+            rid = "2026-07-15-l2-b"
+            request = root / "docs" / "reviews" / f"{rid}-request.md"
+            request.write_text(review.emit_marker("review-cycle", {
+                "round_id": "2026-07-14-other", "cycle": 1,
+                "target_sha": "a" * 40, "base_sha": "b" * 40,
+                "reviewers": ["codex"],
+            }))
+            out = base / "out"
+            improve.run_reviews(registry, out)
+            row = self._rows(out / "reviews.jsonl")[0]
+            self.assertEqual(row["review_binding_provenance"], "unknown")
+            self.assertEqual(row["review_binding_reason"], "round-mismatched-review-marker")
+
+            review.write_round_request_binding(
+                root, rid, "c" * 40, "d" * 40, ["codex"], mode="packet")
+            improve.run_reviews(registry, out)
+            row = self._rows(out / "reviews.jsonl")[0]
+            self.assertEqual(row["review_binding_reason"], "missing-structured-reviewing-line")
+            request.write_text(
+                f"# Review Request — {rid}\n\n"
+                f"- Reviewing: {'c' * 40}   (diff against {'d' * 40})\n")
+            improve.run_reviews(registry, out)
+            row = self._rows(out / "reviews.jsonl")[0]
+            self.assertEqual((row["target_sha"], row["base_sha"]), ("c" * 40, "d" * 40))
+            self.assertEqual(row["review_binding_source"], "round-request-sidecar")
+
+            config = yaml.safe_load((root / ".waystone.yml").read_text())
+            config["review"]["mode"] = "pr"
+            (root / ".waystone.yml").write_text(yaml.safe_dump(config, sort_keys=False))
+            improve.run_reviews(registry, out)
+            row = self._rows(out / "reviews.jsonl")[0]
+            self.assertEqual(row["review_binding_provenance"], "unknown")
+            self.assertEqual(row["review_binding_reason"], "pr-comment-canonical-unavailable")
+
+    def test_f2_only_delegate_canonical_verdict_becomes_explicit(self):
+        with tempfile.TemporaryDirectory() as d:
+            record = Path(d) / "delegation"
+            (record / "artifact").mkdir(parents=True)
+            bad = record / "artifact" / "verdict-1.json"
+            bad.write_text(_json.dumps({
+                "schema": "waystone-verdict-1", "decision": "apply",
+                "at": "2026-07-01T00:00:00+00:00",
+            }))
+            acceptance, skipped = improve._latest_verdict_acceptance(record)
+            self.assertIsNone(acceptance)
+            self.assertEqual(skipped, 1)
+            bad.write_text(_json.dumps(self._verdict()))
+            loaded = delegate.load_canonical_verdict(bad)
+            self.assertEqual(loaded["decision"], "apply")
+            acceptance, skipped = improve._latest_verdict_acceptance(record)
+            self.assertEqual(acceptance["event"], "delegation-verdict")
+            self.assertEqual(skipped, 0)
+
+    def test_f3_latest_reclose_exposure_and_verdict_kind_authority(self):
+        exposures = [
+            {"round_id": "r1", "at": "2026-07-03T00:00:00+00:00", "session_id": "old"},
+            {"round_id": "r1", "at": "2026-07-04T00:00:00+00:00", "session_id": "new"},
+        ]
+        self.assertEqual(improve._round_session_binding("r1", exposures)[:2], ("new", "explicit"))
+        same_time = [
+            {"round_id": "r2", "at": "2026-07-04T00:00:00+00:00", "session_id": "two",
+             "_file": "/x/round-r2-2.json"},
+            {"round_id": "r2", "at": "2026-07-04T00:00:00+00:00", "session_id": "ten",
+             "_file": "/x/round-r2-10.json"},
+        ]
+        self.assertEqual(improve._round_session_binding("r2", same_time)[:2],
+                         ("ten", "explicit"))
+        task = {"status": "done", "round": "r1"}
+        delegations = [{"did": "d1", "acceptance": {
+            "event": "delegation-verdict", "at": "2026-07-02T00:00:00+00:00",
+            "decision": "apply", "resolved": True, "provenance": "explicit",
+        }}]
+        self.assertEqual(
+            improve._task_acceptance(task, delegations, exposures)["event"],
+            "delegation-verdict")
+
+    def test_f4_conflicting_warning_context_is_quarantined(self):
+        warning = {
+            "boundary": "delegate-run", "rule": "delegation-verification-evidence-v1",
+            "context": {"task_id": "feat/a", "delegation_id": "did-b"},
+        }
+        refs, reason = improve._warning_task_ids(warning, {"did-b": "feat/b"})
+        self.assertEqual(refs, set())
+        self.assertEqual(reason, "conflicting-context")
+        malformed = {**warning, "context": {"task_ids": "feat/a"}}
+        refs, reason = improve._warning_task_ids(malformed, {})
+        self.assertEqual(refs, set())
+        self.assertEqual(reason, "invalid-context-schema")
+
+    def test_f5_execution_kind_never_masquerades_as_profile_role(self):
+        self.assertEqual(improve._session_role({
+            "kind": "subagent", "agent_meta": {"agentType": "Explore"},
+        }), "unknown")
+        self.assertEqual(improve._session_role({"kind": "main"}), "main")
+        self.assertNotIn("Explore", delegate.PROFILE_ROLES)
+
+    def test_f6_recurrence_counts_verified_real_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d)
+            _write_jsonl(out / "reviews.jsonl", [
+                {"project": "demo", "round_id": "r1", "findings": [{
+                    "id": "f1", "type": "correctness", "status": "REAL",
+                    "source": "triage"}], "counts": {}},
+                {"project": "demo", "round_id": "r2", "findings": [{
+                    "id": "f2", "type": "correctness", "status": "NEEDS-RULING",
+                    "source": "triage"}], "counts": {}},
+            ])
+            lens = next(row for row in improve.run_audit(out)["lenses"]
+                        if row["lens"] == "finding_concentration")
+            project = lens["per_project"]["demo"]
+            self.assertEqual(project["recurring_types"], [])
+            self.assertEqual(project["recurrence_status_coverage"], {"NEEDS-RULING": 1})
+
+    def test_f7_remediation_rounds_and_reopen_transition_survive_dedup(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, registry = self._project(base, (
+                "  - id: fix/reopened\n    title: reopened finding task\n    status: active\n"
+                "    severity: major\n    origin: review-r1\n    round: 2026-07-03-r3\n"))
+            (root / "tasks.archive.yaml").write_text(yaml.safe_dump({
+                "version": 1, "project": "demo", "tasks": [{
+                    "id": "fix/reopened", "title": "reopened finding task", "status": "done",
+                    "severity": "major", "origin": "review-r1", "round": "2026-07-02-r2",
+                }],
+            }, sort_keys=False))
+            out = base / "out"
+            improve.run_reviews(registry, out)
+            finding = self._rows(out / "reviews.jsonl")[0]["findings"][0]
+            self.assertEqual(finding["review_origin"], "r1")
+            self.assertEqual(finding["fixing_rounds"], ["2026-07-02-r2", "2026-07-03-r3"])
+            self.assertEqual(finding["reopen_count"], 1)
+            lens = next(row for row in improve.run_audit(out)["lenses"]
+                        if row["lens"] == "finding_concentration")
+            self.assertEqual(lens["per_project"]["demo"]["distinct_remediation_rounds"], 2)
+            self.assertEqual(lens["per_project"]["demo"]["reopens"], 1)
+
+    def test_f8_missing_evidence_keeps_env_prep_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d)
+            _write_jsonl(out / "sessions.jsonl", [{
+                "project": "demo", "kind": "main", "session_id": "s1", "file": "/s1",
+                "tools": {"by_category": {}},
+                "env_unpreparedness": {"signatures": {"command-not-found": 1}, "examples": []},
+            }])
+            lens = next(row for row in improve.run_audit(out)["lenses"]
+                        if row["lens"] == "env_unpreparedness")
+            project = lens["per_project"]["demo"]
+            self.assertIsNone(project["env_prep_failures"])
+            self.assertFalse(project["evidence_available"])
+            self.assertEqual(project["dependency_error_signatures"], {"command-not-found": 1})
+
+    def test_f9_orphan_rows_are_in_final_coverage(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, registry = self._project(
+                base, "  - id: feat/known\n    title: known task here\n    status: active\n")
+            record = root / ".waystone" / "delegations" / "did-orphan"
+            (record / "artifact").mkdir(parents=True)
+            (record / "exposure.json").write_text(_json.dumps({"task_id": "feat/orphan"}))
+            (record / "status.json").write_text(_json.dumps({"state": "needs-review"}))
+            out = base / "out"
+            coverage = improve.run_evidence(registry, out, set())
+            self.assertEqual(coverage["row_totals"], {"tasks": 2, "findings": 0, "delegations": 1})
+            self.assertEqual(coverage["task_session_unknown"], 2)
+
+    def test_f10_warning_sweep_is_linear_and_rows_are_normalized_once(self):
+        import time
+
+        count = 4000
+        warnings = [{
+            "at": f"2026-07-15T00:{i // 60:02d}:{i % 60:02d}+00:00",
+            "boundary": "round-close", "rule": "round-close-open-findings-v1",
+            "event": "fire", "context": {},
+        } for i in range(count)]
+        exposures = [{
+            "round_id": f"r{i}", "at": warning["at"], "_file": str(i),
+        } for i, warning in enumerate(warnings)]
+        started = time.monotonic()
+        observation = improve._warning_observation("demo", warnings, 0, True, exposures, 0)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual(observation["fire"], count)
+        self.assertLessEqual(len(observation["recent_rounds"]), 5)
+
+    def test_f11_facts_are_bounded_and_path_line_is_preserved(self):
+        parsed = improve._parse_triage(
+            "## Findings (triage skeleton v2)\n"
+            "| finding | severity | type | verdict | evidence | task id |\n"
+            "|---|---|---|---|---|---|\n"
+            "| JW-GPT-001 — x | major | scope | REAL | `scripts/improve.py:731` | fix/x |\n")
+        self.assertEqual(parsed[0]["evidence_pointers"], ["scripts/improve.py:731"])
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d)
+            _write_jsonl(out / "sessions.jsonl", [{
+                "project": "demo", "kind": "main", "session_id": f"s{i}",
+                "file": f"/logs/s{i}.jsonl", "tools": {"by_category": {"file_write": 4}},
+                "delegations": 0, "retry_loops": {"count": 1},
+                "context_heavy": {"max_result_bytes": 0}, "usage": {"input": 0},
+            } for i in range(12)])
+            _write_jsonl(out / "evidence.jsonl", [{
+                "project": "demo", "task_id": f"feat/t{i}", "findings": [], "delegations": [],
+                "task_context": {"session_id": f"s{i}", "acceptance_criteria": 1},
+            } for i in range(12)])
+            facts = improve.run_audit(out)
+            lens = next(row for row in facts["lenses"] if row["lens"] == "delegation_opportunity")
+            self.assertNotIn("candidates", lens)
+            self.assertLessEqual(len(lens["examples"]), 5)
+            self.assertTrue(all(example.get("pointer") for example in lens["examples"]))
+            candidates = self._rows(out / "audit_candidates.jsonl")
+            self.assertEqual(len(candidates), 12)
+
+    def test_f12_scope_is_structured_and_packet_text_is_never_mined(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "repo"
+            root.mkdir()
+            (root / ".waystone.yml").write_text("version: 1\nproject: demo\n")
+            (root / "tasks.yaml").write_text(
+                "version: 1\nproject: demo\ntasks:\n"
+                "  - id: feat/scope\n    title: structured scope task\n    status: active\n"
+                "    notes: run https://example.com/a and uv run scripts/improve.py\n"
+                "    accept: [tests pass]\n")
+            self.assertEqual(tasks.main([
+                "set", "feat/scope", str(root), "--scope-add", "scripts",
+                "--scope-add", "hooks/scripts/session_context.py",
+            ]), 0)
+            task = common.load_tasks(root)["tasks"][0]
+            self.assertEqual(task["scope"], ["scripts", "hooks/scripts/session_context.py"])
+            packet, _ = delegate._build_packet(
+                common.load_tasks(root), "feat/scope", [], root)
+            self.assertEqual(packet["declared_scope"], task["scope"])
+            task.pop("scope")
+            packet, _ = delegate._build_packet(
+                {"project": "demo", "tasks": [task]}, "feat/scope", [], root)
+            self.assertEqual(packet["declared_scope"], [])
 
 
 class DelegateVerifyTests(unittest.TestCase):

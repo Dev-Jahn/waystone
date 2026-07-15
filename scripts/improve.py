@@ -739,17 +739,25 @@ _TRIAGE_HEADING = "## Findings (triage skeleton"
 _FINDING_ID_RE = re.compile(r"JW-GPT-\d+")
 _VERDICT_RE = re.compile(r"\b(REAL|REJECTED|NEEDS-RULING)\b", re.IGNORECASE)
 _FINDING_PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])((?:\.?[A-Za-z0-9_.-]+/)+(?:[A-Za-z0-9_.-]+))(?::\d+(?::\d+)?)?")
+    r"(?<![A-Za-z0-9_.-])((?:\.?[A-Za-z0-9_.-]+/)+(?:[A-Za-z0-9_.-]+))"
+    r"(?::(\d+)(?::\d+)?)?")
 
 
-def _finding_paths(value: str) -> list[str]:
+def _finding_evidence(value: str) -> tuple[list[str], list[str]]:
     paths: set[str] = set()
+    pointers: set[str] = set()
     without_urls = re.sub(r"\b[a-z][a-z0-9+.-]*://\S+", "", value, flags=re.I)
     for match in _FINDING_PATH_RE.finditer(without_urls):
         path = match.group(1).removeprefix("./")
         if "://" not in path and ".." not in path.split("/"):
             paths.add(path)
-    return sorted(paths)
+            if match.group(2):
+                pointers.add(f"{path}:{match.group(2)}")
+    return sorted(paths), sorted(pointers)
+
+
+def _finding_paths(value: str) -> list[str]:
+    return _finding_evidence(value)[0]
 
 
 def _parse_triage(feedback_text: str) -> list[dict]:
@@ -761,7 +769,8 @@ def _parse_triage(feedback_text: str) -> list[dict]:
         return []
     out: list[dict] = []
     columns: dict[str, int] | None = None
-    for line in feedback_text[idx:].splitlines():
+    first_line = feedback_text[:idx].count("\n") + 1
+    for line_number, line in enumerate(feedback_text[idx:].splitlines(), first_line):
         line = line.strip()
         if not line.startswith("|"):
             continue
@@ -795,12 +804,14 @@ def _parse_triage(feedback_text: str) -> list[dict]:
             status = vm.group(1).upper() if vm else None
         task_id = cell("task id", 4).strip().strip("`")
         finding = {"id": m.group(0), "severity": severity, "type": finding_type, "status": status,
-                   "task_id": task_id or None}
-        paths = _finding_paths(cell("evidence", 3))
+                   "task_id": task_id or None, "line": line_number}
+        paths, pointers = _finding_evidence(cell("evidence", 3))
         if paths:
             finding["paths"] = paths
             finding["path_provenance"] = "inferred"
             finding["path_rule"] = "triage-evidence-path-v1"
+        if pointers:
+            finding["evidence_pointers"] = pointers
         out.append(finding)
     return out
 
@@ -808,38 +819,57 @@ def _parse_triage(feedback_text: str) -> list[dict]:
 def _finding_tasks_by_round(root: Path) -> dict[str, list[dict]]:
     """Finding-derived tasks grouped by REVIEW round (from `origin: review-<round-id>`), read from
     tasks.yaml + tasks.archive.yaml. Severity comes structurally from the task's `severity` field."""
-    docs: list[dict] = []
-    try:
-        docs.append(load_tasks(root))
-    except (OSError, yaml.YAMLError):
-        pass
+    docs: list[tuple[str, dict]] = []
     arch = root / "tasks.archive.yaml"
     if arch.is_file():
         try:
             data = load_yaml(arch)
             if isinstance(data, dict):
-                docs.append(data)
+                docs.append(("archive", data))
         except (OSError, yaml.YAMLError):
             pass
+    try:
+        docs.append(("live", load_tasks(root)))
+    except (OSError, yaml.YAMLError):
+        pass
+    histories: dict[str, list[tuple[str, dict]]] = {}
+    for source, doc in docs:
+        for task in doc.get("tasks", []) or []:
+            if isinstance(task, dict) and isinstance(task.get("id"), str):
+                histories.setdefault(task["id"], []).append((source, task))
     by_round: dict[str, list[dict]] = {}
-    for doc in docs:
-        for t in doc.get("tasks", []) or []:
-            if not isinstance(t, dict):
-                continue
-            origin = t.get("origin")
+    terminal = {"done", "dropped"}
+    for task_id, history in histories.items():
+        fixing_rounds = list(dict.fromkeys(
+            task.get("round") for _source, task in history if isinstance(task.get("round"), str)))
+        status_history = [{
+            "source": source, "status": task.get("status"), "fixing_round": task.get("round"),
+        } for source, task in history]
+        reopen_count = sum(
+            before.get("status") in terminal and after.get("status") not in terminal
+            for (_before_source, before), (_after_source, after) in zip(history, history[1:]))
+        origins = list(dict.fromkeys(
+            task.get("origin") for _source, task in history
+            if isinstance(task.get("origin"), str) and task["origin"].startswith("review-")))
+        effective = history[-1][1]
+        for origin in origins:
             if not (isinstance(origin, str) and origin.startswith("review-")):
                 continue
             rid = origin[len("review-"):]
-            sev = t.get("severity")
+            sev = effective.get("severity")
             severity = sev if sev in SEVERITIES else None
             by_round.setdefault(rid, []).append({
-                "id": t.get("id"),
+                "id": task_id,
                 "severity": severity,
                 "type": "unknown",
-                "status": t.get("status"),
-                "round": t.get("round"),
-                "session_id": t.get("session_id"),
-                "anchor": t.get("anchor"),
+                "status": effective.get("status"),
+                "round": effective.get("round"),
+                "session_id": effective.get("session_id"),
+                "anchor": effective.get("anchor"),
+                "review_origin": rid,
+                "fixing_rounds": fixing_rounds,
+                "status_history": status_history,
+                "reopen_count": reopen_count,
                 "source": "task",
                 "provenance": "explicit" if severity else "unknown",
             })
@@ -868,35 +898,94 @@ def _round_exposure_rows(root: Path) -> tuple[list[dict], int]:
     return rows, skipped
 
 
-def _round_session_binding(round_id: str, exposures: list[dict]) -> tuple[object, str, str | None]:
-    matches = [row for row in exposures if row.get("round_id") == round_id]
-    session_ids = {row.get("session_id") for row in matches if isinstance(row.get("session_id"), str)}
-    if len(session_ids) == 1:
-        return next(iter(session_ids)), "explicit", None
-    reason = "missing-round-exposure" if not matches else "round-session-unavailable-or-conflicting"
+def _latest_round_exposures(exposures: list[dict]) -> dict[str, dict]:
+    def order(row: dict) -> tuple[str, int, str]:
+        path = Path(row.get("_file") or "")
+        stem = path.stem
+        base = f"round-{row.get('round_id')}"
+        suffix = stem.removeprefix(base + "-") if stem.startswith(base + "-") else ""
+        sequence = int(suffix) if suffix.isdigit() else 1
+        return row.get("at") or "", sequence, str(path)
+
+    latest: dict[str, dict] = {}
+    for row in exposures:
+        round_id = row.get("round_id")
+        if not isinstance(round_id, str):
+            continue
+        current = latest.get(round_id)
+        if current is None or order(row) > order(current):
+            latest[round_id] = row
+    return latest
+
+
+def _round_session_binding(round_id: str, exposures: list[dict] | dict[str, dict]) -> tuple[object, str, str | None]:
+    latest = exposures if isinstance(exposures, dict) else _latest_round_exposures(exposures)
+    match = latest.get(round_id)
+    if match is not None and isinstance(match.get("session_id"), str):
+        return match["session_id"], "explicit", None
+    reason = "missing-round-exposure" if match is None else "round-session-unavailable"
     return {"provenance": "unknown"}, "unknown", reason
 
 
-def _review_sha_binding(request_file: Path | None) -> tuple[str | None, str | None, str, str | None]:
+def _review_sha_binding(request_file: Path | None, round_id: str, mode: str,
+                        sidecars: list[dict]) -> tuple[str | None, str | None, str, str | None, str | None]:
+    if mode == "pr":
+        return None, None, "unknown", "pr-comment-canonical-unavailable", None
     if request_file is None:
-        return None, None, "unknown", "missing-review-request"
+        return None, None, "unknown", "missing-review-request", None
+    import review
+
+    packet_binding = review.parse_packet_request_binding(request_file)
+    if sidecars:
+        def sidecar_order(row: dict) -> tuple[str, int, str]:
+            path = Path(row["_file"])
+            match = re.search(r"-request\.binding(?:-(\d+))?\.json$", path.name)
+            sequence = int(match.group(1)) if match and match.group(1) else 1
+            return row["at"], sequence, str(path)
+
+        latest = max(sidecars, key=sidecar_order)
+        if packet_binding is None:
+            return None, None, "unknown", "missing-structured-reviewing-line", None
+        if packet_binding != (latest["target_sha"], latest.get("base_sha")):
+            return None, None, "unknown", "request-binding-sidecar-mismatch", None
+        return (latest["target_sha"], latest.get("base_sha"), "explicit", None,
+                "round-request-sidecar")
     try:
         text = request_file.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        return None, None, "unknown", "unreadable-review-request"
-    import review
-
-    markers = [marker for marker in review.parse_markers(text, "review-cycle")
-               if review.marker_valid(marker)]
+        return None, None, "unknown", "unreadable-review-request", None
+    valid = [marker for marker in review.parse_markers(text, "review-cycle")
+             if review.marker_valid(marker)]
+    markers = [marker for marker in valid if marker.get("round_id") == round_id]
     if not markers:
-        return None, None, "unknown", "missing-valid-review-cycle-marker"
+        reason = "round-mismatched-review-marker" if valid else "missing-valid-review-cycle-marker"
+        return None, None, "unknown", reason, None
     latest_cycle = max(marker["cycle"] for marker in markers)
     bindings = {(marker.get("target_sha"), marker.get("base_sha"))
                 for marker in markers if marker["cycle"] == latest_cycle}
     if len(bindings) != 1:
-        return None, None, "unknown", "conflicting-review-cycle-markers"
+        return None, None, "unknown", "conflicting-review-cycle-markers", None
     target_sha, base_sha = next(iter(bindings))
-    return target_sha, base_sha, "explicit", None
+    return target_sha, base_sha, "explicit", None, "round-bound-request-marker"
+
+
+def _round_request_sidecars(rdir: Path) -> dict[str, list[dict]]:
+    import review
+
+    rows: dict[str, list[dict]] = {}
+    if not rdir.is_dir():
+        return rows
+    for path in sorted(rdir.glob("*-request.binding*.json")):
+        data = _load_record_mapping(path, "json")
+        if (data is None or data.get("schema") != review.ROUND_REQUEST_BINDING_SCHEMA
+                or not isinstance(data.get("round_id"), str)
+                or not review._is_sha(data.get("target_sha"))
+                or (data.get("base_sha") is not None and not review._is_sha(data.get("base_sha")))
+                or data.get("mode") != "packet" or data.get("canonical_store") != "local-packet"
+                or not isinstance(data.get("at"), str)):
+            continue
+        rows.setdefault(data["round_id"], []).append({**data, "_file": str(path)})
+    return rows
 
 
 def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
@@ -908,9 +997,12 @@ def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
             request_files[p.stem[: -len("-request")]] = p
         for p in sorted(rdir.glob("*-feedback.md")):
             feedback_files[p.stem[: -len("-feedback")]] = p
+    request_sidecars = _round_request_sidecars(rdir)
     tasks_by_round = _finding_tasks_by_round(root)
     round_exposures, _exposures_skipped = _round_exposure_rows(root)
-    round_ids = sorted(set(request_files) | set(feedback_files) | set(tasks_by_round))
+    latest_round_exposures = _latest_round_exposures(round_exposures)
+    round_ids = sorted(
+        set(request_files) | set(feedback_files) | set(tasks_by_round) | set(request_sidecars))
 
     rows: list[dict] = []
     for rid in round_ids:
@@ -930,12 +1022,15 @@ def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
                     "status": f["status"],
                     "source": "triage",
                     "provenance": "explicit" if f["severity"] else "unknown",
+                    "source_pointer": f"{fb}:{f['line']}",
                 }
                 if f.get("paths"):
                     entry.update({
                         "paths": f["paths"], "path_provenance": f["path_provenance"],
                         "path_rule": f["path_rule"],
                     })
+                if f.get("evidence_pointers"):
+                    entry["evidence_pointers"] = f["evidence_pointers"]
                 # dedup: a triage row whose task-id cell names a task that also joins via origin is
                 # ONE finding — keep the triage row (triage severity), annotate its task_id, and drop
                 # the separate task finding so it is not double-counted
@@ -943,6 +1038,9 @@ def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
                 entry["task_id"] = tid or None
                 if tid and tid in tasks_by_id:
                     referenced_task_ids.add(tid)
+                    task_finding = tasks_by_id[tid]
+                    for key in ("review_origin", "fixing_rounds", "status_history", "reopen_count"):
+                        entry[key] = task_finding[key]
                 findings.append(entry)
         # finding-derived tasks not referenced by any triage row remain as source "task"
         findings.extend(t for t in round_tasks if t.get("id") not in referenced_task_ids)
@@ -951,9 +1049,11 @@ def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
         for f in findings:
             counts[f["severity"] if f["severity"] in SEVERITIES else "unknown"] += 1
         req = request_files.get(rid)
-        target_sha, base_sha, review_provenance, review_reason = _review_sha_binding(req)
+        mode = (cfg.get("review") or {}).get("mode", "packet")
+        target_sha, base_sha, review_provenance, review_reason, review_source = (
+            _review_sha_binding(req, rid, mode, request_sidecars.get(rid, [])))
         session_id, session_provenance, session_reason = _round_session_binding(
-            rid, round_exposures)
+            rid, latest_round_exposures)
         rows.append({
             "project": name,
             "root": str(root),
@@ -964,6 +1064,7 @@ def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
             "base_sha": base_sha,
             "review_binding_provenance": review_provenance,
             "review_binding_reason": review_reason,
+            "review_binding_source": review_source,
             "session_id": session_id,
             "round_session_provenance": session_provenance,
             "round_session_reason": session_reason,
@@ -1085,32 +1186,30 @@ def _load_record_mapping(path: Path, kind: str) -> dict | None:
 
 
 def _latest_verdict_acceptance(record: Path) -> tuple[dict | None, int]:
-    candidates: list[tuple[int, Path]] = []
-    for path in (record / "artifact").glob("verdict-*.json"):
-        match = re.fullmatch(r"verdict-([1-9]\d*)\.json", path.name)
-        if match:
-            candidates.append((int(match.group(1)), path))
-    if not candidates:
-        return None, 0
-    _number, path = max(candidates)
-    verdict = _load_record_mapping(path, "json")
-    if (verdict is None or verdict.get("decision") not in ("apply", "discard")
-            or not isinstance(verdict.get("at"), str)):
+    import delegate
+
+    try:
+        latest = delegate.latest_canonical_verdict(record)
+    except WorkflowError:
         return None, 1
+    if latest is None:
+        return None, 0
+    _path, verdict = latest
     return {
         "event": "delegation-verdict", "at": verdict["at"],
         "decision": verdict["decision"], "resolved": verdict["decision"] == "apply",
-        "provenance": "explicit",
+        "decided_by": verdict["decided_by"], "provenance": "explicit",
     }, 0
 
 
-def _project_delegation_rows(root: Path) -> tuple[list[dict], int]:
+def _project_delegation_rows(root: Path) -> tuple[list[dict], int, int]:
     """Project task-linked delegation facts parsed directly from immutable/local record files."""
     rows: list[dict] = []
     skipped = 0
+    verdicts_invalid = 0
     directory = project_state_path(root) / "delegations"
     if not directory.is_dir():
-        return rows, skipped
+        return rows, skipped, verdicts_invalid
     for record in sorted(directory.iterdir()):
         if not record.is_dir() or not ((record / "claim.json").exists()
                                       or (record / "exposure.json").exists()):
@@ -1127,7 +1226,7 @@ def _project_delegation_rows(root: Path) -> tuple[list[dict], int]:
             continue
         report = (contract or {}).get("delegate_report") or {}
         acceptance, verdict_skipped = _latest_verdict_acceptance(record)
-        skipped += verdict_skipped
+        verdicts_invalid += verdict_skipped
         row = {
             "task_id": exposure["task_id"], "did": record.name, "state": status.get("state"),
             "verification_present": (
@@ -1141,7 +1240,7 @@ def _project_delegation_rows(root: Path) -> tuple[list[dict], int]:
             row["acceptance"] = acceptance
         rows.append(row)
     rows.sort(key=lambda row: row["did"])
-    return rows, skipped
+    return rows, skipped, verdicts_invalid
 
 
 def _project_task_rows(root: Path) -> list[dict]:
@@ -1170,7 +1269,7 @@ def _load_warning_rows(root: Path) -> tuple[list[dict], int, bool]:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
         return [], 1, True
-    for line in lines:
+    for line_number, line in enumerate(lines, 1):
         if not line.strip():
             continue
         try:
@@ -1187,6 +1286,7 @@ def _load_warning_rows(root: Path) -> tuple[list[dict], int, bool]:
             "event": row["event"], "delta_id": row.get("delta_id"),
             "delta_status": row.get("delta_status"),
             "context": row.get("context") if isinstance(row.get("context"), dict) else {},
+            "source_pointer": f"{path}:{line_number}",
         })
     rows.sort(key=lambda row: (
         row["at"], row["boundary"], row["rule"], row["event"], str(row.get("delta_id"))))
@@ -1206,18 +1306,23 @@ def _warning_observation(name: str, warnings: list[dict], warnings_skipped: int,
         by_rule_boundary.setdefault((row["rule"], row["boundary"]), Counter())[row["event"]] += 1
 
     rounds: list[dict] = []
-    previous_at: str | None = None
-    for exposure in exposures:
-        selected = [row for row in counted
-                    if (previous_at is None or row["at"] > previous_at)
-                    and row["at"] <= exposure["at"]]
+    chronological = sorted(_latest_round_exposures(exposures).values(), key=lambda row: (
+        row["at"], row["round_id"], row.get("_file") or ""))
+    counted = sorted(counted, key=lambda row: (
+        row["at"], row["boundary"], row["rule"], row["event"], str(row.get("delta_id"))))
+    warning_index = 0
+    previous_index = 0
+    for exposure in chronological:
+        while warning_index < len(counted) and counted[warning_index]["at"] <= exposure["at"]:
+            warning_index += 1
+        selected = counted[previous_index:warning_index]
         rounds.append({
             "round_id": exposure["round_id"], "closed_at": exposure["at"],
             "fire": sum(row["event"] == "fire" for row in selected),
             "conflict": sum(row["event"] == "conflict" for row in selected),
         })
-        previous_at = exposure["at"]
-    outside = sum(1 for row in counted if not exposures or row["at"] > exposures[-1]["at"])
+        previous_index = warning_index
+    outside = len(counted) - warning_index
     normalize = lambda groups: {key: {event: groups[key].get(event, 0)
                                       for event in ("conflict", "fire")}
                                 for key in sorted(groups)}
@@ -1241,41 +1346,77 @@ def _warning_observation(name: str, warnings: list[dict], warnings_skipped: int,
     }
 
 
-def _warning_task_ids(warning: dict, did_to_task: dict[str, str]) -> set[str]:
+_WARNING_CONTEXT_BOUNDARIES = {
+    "delegation-verification-evidence-v1": {"delegate-run", "delegate-apply", "check"},
+    "round-close-open-findings-v1": {"round-close", "review-ingest", "check"},
+}
+
+
+def _warning_task_ids(warning: dict, did_to_task: dict[str, str]) -> tuple[set[str], str | None]:
     context = warning.get("context") or {}
-    task_ids: set[str] = set()
+    rule = warning.get("rule")
+    boundary = warning.get("boundary")
+    if (not isinstance(context, dict) or boundary not in _WARNING_CONTEXT_BOUNDARIES.get(rule, set())):
+        return set(), "invalid-context-schema"
+    allowed = ({"delegation_id", "task_id", "task_ids", "delta_ids"}
+               if rule == "delegation-verification-evidence-v1"
+               else {"task_id", "task_ids", "delegation_id", "round_id", "unlinked", "delta_ids"})
+    if set(context) - allowed:
+        return set(), "invalid-context-schema"
+    if "task_id" in context and not isinstance(context["task_id"], str):
+        return set(), "invalid-context-schema"
+    if ("task_ids" in context and (not isinstance(context["task_ids"], list)
+            or any(not isinstance(task, str) for task in context["task_ids"]))):
+        return set(), "invalid-context-schema"
+    if "delegation_id" in context and not isinstance(context["delegation_id"], str):
+        return set(), "invalid-context-schema"
+    if "round_id" in context and context["round_id"] is not None and not isinstance(context["round_id"], str):
+        return set(), "invalid-context-schema"
+    if ("delta_ids" in context and (not isinstance(context["delta_ids"], list)
+            or any(not isinstance(delta_id, str) for delta_id in context["delta_ids"]))):
+        return set(), "invalid-context-schema"
+    if "unlinked" in context and (type(context["unlinked"]) is not int or context["unlinked"] < 0):
+        return set(), "invalid-context-schema"
+
+    direct: set[str] = set()
     if isinstance(context.get("task_id"), str):
-        task_ids.add(context["task_id"])
+        direct.add(context["task_id"])
     if isinstance(context.get("task_ids"), list):
-        task_ids.update(task for task in context["task_ids"] if isinstance(task, str))
+        direct.update(context["task_ids"])
     did = context.get("delegation_id")
-    if isinstance(did, str) and did in did_to_task:
-        task_ids.add(did_to_task[did])
-    return task_ids
+    delegated = {did_to_task[did]} if isinstance(did, str) and did in did_to_task else set()
+    if direct and delegated and direct != delegated:
+        return set(), "conflicting-context"
+    task_ids = direct or delegated
+    if isinstance(did, str) and not delegated and not direct:
+        return set(), "unresolved-delegation-context"
+    return task_ids, None
 
 
-def _round_exposure_projection(task: dict, exposures: list[dict]) -> dict | None:
-    matches = [row for row in exposures if row.get("round_id") == task.get("round")]
-    if not matches:
+def _round_exposure_projection(task: dict, exposures: list[dict] | dict[str, dict]) -> dict | None:
+    latest = exposures if isinstance(exposures, dict) else _latest_round_exposures(exposures)
+    match = latest.get(task.get("round"))
+    if match is None:
         return None
-    latest = matches[-1]
-    return {key: latest.get(key) for key in (
+    return {key: match.get(key) for key in (
         "round_id", "at", "session_id", "head_sha", "overlays_active", "bindings")}
 
 
-def _task_acceptance(task: dict, delegations: list[dict], exposures: list[dict]) -> dict:
-    events = [dict(delegation["acceptance"], delegation_id=delegation["did"])
-              for delegation in delegations if isinstance(delegation.get("acceptance"), dict)]
-    if task.get("status") in ("done", "dropped"):
-        matches = [row for row in exposures if row.get("round_id") == task.get("round")]
-        if matches:
-            events.append({
-                "event": "round-close", "at": matches[0]["at"], "resolved": True,
-                "round_id": matches[0]["round_id"], "provenance": "explicit",
-            })
-    if events:
-        return sorted(events, key=lambda row: (
-            row["at"], row["event"], row.get("delegation_id") or ""))[-1]
+def _task_acceptance(task: dict, delegations: list[dict],
+                     exposures: list[dict] | dict[str, dict]) -> dict:
+    # Event-kind authority, not wall-clock order: main's canonical delegation verdict is the final
+    # acceptance event (§17-1). A later re-close cannot compete with it.
+    verdicts = [dict(delegation["acceptance"], delegation_id=delegation["did"])
+                for delegation in delegations if isinstance(delegation.get("acceptance"), dict)]
+    if verdicts:
+        return max(verdicts, key=lambda row: (row["at"], row.get("delegation_id") or ""))
+    latest = exposures if isinstance(exposures, dict) else _latest_round_exposures(exposures)
+    exposure = latest.get(task.get("round"))
+    if task.get("status") in ("done", "dropped") and exposure is not None:
+        return {
+            "event": "round-close", "at": exposure["at"], "resolved": True,
+            "round_id": exposure["round_id"], "provenance": "explicit",
+        }
     return {
         "event": None, "at": None, "resolved": task.get("status") in ("done", "dropped"),
         "provenance": "current-task-state-approximation",
@@ -1297,11 +1438,12 @@ def run_evidence(registry_path: Path, out_dir: Path, projects: set[str],
     task_rows: list[dict] = []
     scanned: list[str] = []
     skipped: list[dict] = []
-    unlinked = delegation_skipped = 0
-    finding_total = delegation_total = 0
+    unlinked = delegation_skipped = verdicts_invalid = 0
     warning_observations: list[dict] = []
     warning_rows_skipped = round_exposures_skipped = 0
     task_session_unknown = acceptance_approximations = 0
+    normalized_warnings: list[dict] = []
+    warning_context_coverage: Counter = Counter()
 
     for entry in entries:
         name = entry.get("name") or "(unnamed)"
@@ -1325,6 +1467,7 @@ def run_evidence(registry_path: Path, out_dir: Path, projects: set[str],
             continue
 
         exposures, exposure_skipped = _round_exposure_rows(root)
+        latest_exposures = _latest_round_exposures(exposures)
         warnings, warning_skipped, warnings_present = _load_warning_rows(root)
         warning_rows_skipped += warning_skipped
         round_exposures_skipped += exposure_skipped
@@ -1361,14 +1504,19 @@ def run_evidence(registry_path: Path, out_dir: Path, projects: set[str],
                     "task_context": {"round": None, "session_id": None,
                                      "acceptance_criteria": 0, "anchor": None},
                 })
-                row["findings"].append({
+                projected_finding = {
                     "round": review.get("round_id"), "severity": finding.get("severity"),
                     "status": finding.get("status"), "type": finding.get("type", "unknown"),
-                })
-                finding_total += 1
+                }
+                for key in ("review_origin", "fixing_rounds", "status_history", "reopen_count",
+                            "source_pointer", "evidence_pointers"):
+                    if key in finding:
+                        projected_finding[key] = finding[key]
+                row["findings"].append(projected_finding)
 
-        delegations, n_skipped = _project_delegation_rows(root)
+        delegations, n_skipped, n_verdicts_invalid = _project_delegation_rows(root)
         delegation_skipped += n_skipped
+        verdicts_invalid += n_verdicts_invalid
         for delegation in delegations:
             task_id = delegation["task_id"]
             row = by_task.setdefault(task_id, {
@@ -1380,12 +1528,16 @@ def run_evidence(registry_path: Path, out_dir: Path, projects: set[str],
             })
             row["delegations"].append({key: value for key, value in delegation.items()
                                        if key != "task_id"})
-            delegation_total += 1
         did_to_task = {delegation["did"]: delegation["task_id"] for delegation in delegations}
-        warning_refs: dict[str, list[dict]] = {}
-        for warning in warnings:
-            for task_id in _warning_task_ids(warning, did_to_task):
-                warning_refs.setdefault(task_id, []).append(warning)
+        warning_refs: dict[str, list[str]] = {}
+        for number, warning in enumerate(warnings, 1):
+            warning_id = f"{name}:warning-{number:06d}"
+            normalized_warnings.append({"project": name, "warning_id": warning_id, **warning})
+            task_ids, reason = _warning_task_ids(warning, did_to_task)
+            if reason is not None:
+                warning_context_coverage[reason] += 1
+            for task_id in task_ids:
+                warning_refs.setdefault(task_id, []).append(warning_id)
         for row in by_task.values():
             row["findings"].sort(
                 key=lambda f: (
@@ -1394,17 +1546,26 @@ def run_evidence(registry_path: Path, out_dir: Path, projects: set[str],
                 ))
             row["delegations"].sort(key=lambda x: x["did"])
             task = tasks_by_id.get(row["task_id"], {})
-            row["acceptance"] = _task_acceptance(task, row["delegations"], exposures)
+            row["acceptance"] = _task_acceptance(task, row["delegations"], latest_exposures)
             if row["acceptance"]["provenance"] == "current-task-state-approximation":
                 acceptance_approximations += 1
             row["route_guard"] = {
-                "round_exposure": _round_exposure_projection(task, exposures),
+                "round_exposure": _round_exposure_projection(task, latest_exposures),
                 "warning_refs": warning_refs.get(row["task_id"], []),
             }
             task_rows.append(row)
         scanned.append(name)
 
     task_rows.sort(key=lambda r: (r["project"], r["task_id"]))
+    normalized_warnings.sort(key=lambda row: (row["project"], row["warning_id"]))
+    task_session_unknown = sum(
+        not isinstance((row.get("task_context") or {}).get("session_id"), str)
+        for row in task_rows)
+    acceptance_approximations = sum(
+        (row.get("acceptance") or {}).get("provenance") == "current-task-state-approximation"
+        for row in task_rows)
+    finding_total = sum(len(row.get("findings") or []) for row in task_rows)
+    delegation_total = sum(len(row.get("delegations") or []) for row in task_rows)
     coverage = {
         "generated_from": generated_from,
         "projects_total": len(entries),
@@ -1412,10 +1573,12 @@ def run_evidence(registry_path: Path, out_dir: Path, projects: set[str],
         "projects_skipped": sorted(skipped, key=lambda s: s["project"]),
         "unlinked_findings": unlinked,
         "delegations_skipped": delegation_skipped,
+        "verdicts_invalid": verdicts_invalid,
         "warning_rows_skipped": warning_rows_skipped,
         "round_exposures_skipped": round_exposures_skipped,
         "task_session_unknown": task_session_unknown,
         "acceptance_approximations": acceptance_approximations,
+        "warning_context_coverage": dict(sorted(warning_context_coverage.items())),
         "warning_observations": sorted(warning_observations, key=lambda row: row["project"]),
         "row_totals": {"tasks": len(task_rows), "findings": finding_total,
                        "delegations": delegation_total},
@@ -1424,6 +1587,8 @@ def run_evidence(registry_path: Path, out_dir: Path, projects: set[str],
     lines = [_dumps(row) + "\n" for row in task_rows]
     lines.append(_dumps({"coverage": coverage}) + "\n")
     (out_dir / "evidence.jsonl").write_text("".join(lines), encoding="utf-8")
+    (out_dir / "evidence_warnings.jsonl").write_text(
+        "".join(_dumps(row) + "\n" for row in normalized_warnings), encoding="utf-8")
     return coverage
 
 
@@ -1467,8 +1632,28 @@ def _direct_work(s: dict) -> int:
 
 
 def _lens(name: str, rule: str, provenance: str, per_project: dict, examples: list, **extra) -> dict:
+    bounded: list[dict] = []
+    for raw in examples:
+        if not isinstance(raw, dict):
+            continue
+        example = dict(raw)
+        if not isinstance(example.get("pointer"), str):
+            if isinstance(example.get("file"), str):
+                example["pointer"] = f"{example['file']}:{example.get('line', 1)}"
+            elif isinstance(example.get("task_id"), str):
+                example["pointer"] = f"evidence.jsonl#task={example['task_id']}"
+            elif isinstance(example.get("did"), str):
+                example["pointer"] = f"evidence.jsonl#delegation={example['did']}"
+            elif isinstance(example.get("session_id"), str):
+                example["pointer"] = f"sessions.jsonl#session={example['session_id']}"
+            elif isinstance(example.get("round_id"), str):
+                example["pointer"] = f"reviews.jsonl#round={example['round_id']}"
+        if isinstance(example.get("pointer"), str):
+            bounded.append(example)
+        if len(bounded) == 5:
+            break
     d = {"lens": name, "rule": rule, "provenance": provenance,
-         "per_project": per_project, "examples": examples[:5]}
+         "per_project": per_project, "examples": bounded}
     d.update(extra)
     return d
 
@@ -1690,7 +1875,7 @@ def _lens_delegation_opportunity(sessions: list[dict], evidence_rows: list[dict]
         for row in candidates[:5]]
     return _lens(
         "delegation_opportunity", "delegation-opportunity-v1", "inferred", per, examples,
-        candidates=candidates, coverage=dict(sorted(coverage.items())),
+        _projection_rows=candidates, coverage=dict(sorted(coverage.items())),
         thresholds={"direct_work_min": DELEGATION_DIRECT_WORK_MIN,
                     "context_input_tokens_min": DELEGATION_CONTEXT_TOKENS_MIN,
                     "context_result_bytes_gt": CONTEXT_HEAVY_BYTES})
@@ -1767,7 +1952,8 @@ def _lens_error_landscape(sessions: list[dict]) -> dict:
     return _lens("error_landscape", "error-landscape-v1", "explicit", per, examples)
 
 
-def _lens_env_unpreparedness(sessions: list[dict], evidence_rows: list[dict]) -> dict:
+def _lens_env_unpreparedness(sessions: list[dict], evidence_rows: list[dict],
+                             evidence_available: bool = True) -> dict:
     projects = {session.get("project") or "" for session in sessions}
     task_rows = _evidence_task_rows(evidence_rows)
     projects.update(row.get("project") or "" for row in task_rows)
@@ -1806,7 +1992,8 @@ def _lens_env_unpreparedness(sessions: list[dict], evidence_rows: list[dict]) ->
             "sessions": len(session_groups.get(project, [])),
             "sessions_with_dependency_signatures": sessions_with_signatures,
             "dependency_error_signatures": dict(sorted(signatures.items())),
-            "env_prep_failures": len(failed_env),
+            "env_prep_failures": len(failed_env) if evidence_available else None,
+            "evidence_available": evidence_available,
             "coverage": {"sessions_without_signature_projection": sessions_without_projection},
         }
     return _lens(
@@ -1843,13 +2030,9 @@ def _lens_review_association(reviews: list[dict]) -> dict:
 
 
 def _session_role(session: dict) -> str:
+    """Only the canonical main execution is role-bearing without a task/delegation work join."""
     if session.get("kind") == "main":
         return "main"
-    meta = session.get("agent_meta") or {}
-    if isinstance(meta.get("agentType"), str) and meta["agentType"]:
-        return meta["agentType"]
-    if isinstance(session.get("kind"), str) and session["kind"]:
-        return session["kind"]
     return "unknown"
 
 
@@ -1861,13 +2044,18 @@ def _lens_finding_concentration(reviews: list[dict], sessions: list[dict]) -> di
                 (session.get("project") or "", session["session_id"]), []).append(session)
     per: dict[str, dict] = {}
     examples: list[dict] = []
+    projection_rows: list[dict] = []
     for project, rows in _by_project(reviews).items():
         by_role: Counter = Counter()
+        by_session_kind: Counter = Counter()
         by_area: Counter = Counter()
         by_task: Counter = Counter()
         type_rounds: dict[str, set[str]] = {}
         type_occurrences: Counter = Counter()
         unknown_type = rejected_type = unknown_task = unknown_area = unknown_role = 0
+        recurrence_status_coverage: Counter = Counter()
+        remediation_rounds: set[str] = set()
+        reopens = 0
         round_session_unknown = 0
         for row in rows:
             findings = row.get("findings") or []
@@ -1875,19 +2063,25 @@ def _lens_finding_concentration(reviews: list[dict], sessions: list[dict]) -> di
             matches = (session_index.get((project, session_id), [])
                        if isinstance(session_id, str) else [])
             role = _session_role(matches[0]) if len(matches) == 1 else "unknown"
+            session_kind = (matches[0].get("kind") if len(matches) == 1
+                            and isinstance(matches[0].get("kind"), str) else "unknown")
             if role == "unknown":
                 round_session_unknown += 1
             for finding in findings:
                 finding_type = finding.get("type", "unknown")
-                if finding.get("status") == "REJECTED":
+                status = finding.get("status")
+                if status == "REJECTED":
                     rejected_type += 1
-                elif finding_type in FINDING_TYPES:
+                elif status == "REAL" and finding_type in FINDING_TYPES:
                     type_occurrences[finding_type] += 1
                     if isinstance(row.get("round_id"), str):
                         type_rounds.setdefault(finding_type, set()).add(row["round_id"])
+                elif status != "REAL":
+                    recurrence_status_coverage[str(status) if status is not None else "unknown"] += 1
                 else:
                     unknown_type += 1
                 by_role[role] += 1
+                by_session_kind[session_kind] += 1
                 if role == "unknown":
                     unknown_role += 1
                 task_id = (finding.get("id") if finding.get("source") == "task"
@@ -1902,31 +2096,47 @@ def _lens_finding_concentration(reviews: list[dict], sessions: list[dict]) -> di
                     unknown_area += 1
                 for area in areas:
                     by_area[area] += 1
+                remediation_rounds.update(
+                    value for value in (finding.get("fixing_rounds") or [])
+                    if isinstance(value, str))
+                if isinstance(finding.get("reopen_count"), int):
+                    reopens += finding["reopen_count"]
                 if len(examples) < 5:
                     examples.append({
                         "project": project, "round_id": row.get("round_id"),
                         "finding_id": finding.get("id"), "type": finding_type,
                         "task_id": task_id, "role": role,
                         "project_areas": areas or ["unknown"],
+                        "pointer": finding.get("source_pointer")
+                        or f"reviews.jsonl#round={row.get('round_id')}/finding={finding.get('id')}",
                     })
         recurring = []
         for finding_type in sorted(type_rounds):
             round_ids = sorted(type_rounds[finding_type])
             if len(round_ids) > 1:
                 recurring.append({
-                    "type": finding_type, "rounds": round_ids,
+                    "type": finding_type, "round_count": len(round_ids),
+                    "first_round": round_ids[0], "last_round": round_ids[-1],
                     "occurrences": type_occurrences[finding_type],
                     "recurrences": len(round_ids) - 1,
                 })
+        projection_rows.extend({
+            "project": project, "task_id": task_id, "findings": count,
+            "pointer": f"evidence.jsonl#task={task_id}",
+        } for task_id, count in sorted(by_task.items()))
         per[project] = {
             "rounds": len(rows),
             "findings_total": sum(len(row.get("findings") or []) for row in rows),
-            "by_task": dict(sorted(by_task.items())),
+            "tasks_with_findings": len(by_task),
             "by_role": dict(sorted(by_role.items())),
+            "by_session_kind": dict(sorted(by_session_kind.items())),
             "by_project_area": dict(sorted(by_area.items())),
             "recurring_types": recurring,
             "unknown_type_excluded": unknown_type,
             "rejected_type_excluded": rejected_type,
+            "recurrence_status_coverage": dict(sorted(recurrence_status_coverage.items())),
+            "distinct_remediation_rounds": len(remediation_rounds),
+            "reopens": reopens,
             "unknown_task": unknown_task,
             "unknown_project_area": unknown_area,
             "unknown_role": unknown_role,
@@ -1934,6 +2144,7 @@ def _lens_finding_concentration(reviews: list[dict], sessions: list[dict]) -> di
         }
     return _lens(
         "finding_concentration", "finding-concentration-v1", "inferred", per, examples,
+        _projection_rows=projection_rows,
         recurrence_rule="same-type-across-rounds-v1",
         signal_provenance={"taxonomy": "explicit", "role": "explicit-or-unknown",
                            "project_area": "inferred"})
@@ -2037,7 +2248,8 @@ def run_audit(in_dir: Path, lens_scope: str | None = None) -> dict:
         ("warn_friction", ("evidence",), lambda: _lens_warn_friction(data["evidence"])),
         ("error_landscape", ("sessions",), lambda: _lens_error_landscape(data["sessions"])),
         ("env_unpreparedness", ("sessions",),
-         lambda: _lens_env_unpreparedness(data["sessions"], data.get("evidence", []))),
+         lambda: _lens_env_unpreparedness(
+             data["sessions"], data.get("evidence", []), present.get("evidence", False))),
         ("review_association", ("reviews",), lambda: _lens_review_association(data["reviews"])),
         ("finding_concentration", ("reviews",),
          lambda: _lens_finding_concentration(data["reviews"], data.get("sessions", []))),
@@ -2047,11 +2259,17 @@ def run_audit(in_dir: Path, lens_scope: str | None = None) -> dict:
     if lens_scope is not None:
         lens_specs = [spec for spec in lens_specs if lens_scope in LENS_SCOPES[spec[0]]]
     lenses: list[dict] = []
+    candidate_rows: list[dict] = []
     skipped: list[dict] = []
     for name, requirements, builder in lens_specs:
         missing = [requirement for requirement in requirements if not present.get(requirement)]
         if not missing:
-            lenses.append(builder())
+            lens = builder()
+            for row in lens.pop("_projection_rows", []):
+                projected = {"lens": name, **row}
+                projected.setdefault("pointer", f"evidence.jsonl#task={row.get('task_id')}")
+                candidate_rows.append(projected)
+            lenses.append(lens)
         else:
             names = [(_AUDIT_INPUTS.get(requirement) or "evidence.jsonl")
                      for requirement in missing]
@@ -2071,6 +2289,11 @@ def run_audit(in_dir: Path, lens_scope: str | None = None) -> dict:
     }
     if lens_scope is not None:
         facts["scope"] = lens_scope
+    candidate_rows.sort(key=lambda row: (
+        row.get("lens") or "", row.get("project") or "", row.get("task_id") or "",
+        row.get("session_id") or ""))
+    (in_dir / "audit_candidates.jsonl").write_text(
+        "".join(_dumps(row) + "\n" for row in candidate_rows), encoding="utf-8")
     (in_dir / "facts.json").write_text(_dumps(facts) + "\n", encoding="utf-8")
     return facts
 

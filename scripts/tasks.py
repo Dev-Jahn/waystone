@@ -13,6 +13,7 @@ error-prone. These verbs give the agent a small surface so it never touches the 
   waystone task add    <id> [root] --title "..." [--status/--severity/--deps/...]   insert a validated block
   waystone task set    <id> <field> <value> [root]                                  set one field (deps: comma-separated ids)
   waystone task set    <id> [root] --accept-add "criterion" [--accept-add ...]       append exact criteria
+  waystone task set    <id> [root] --scope-add "prefix" [--scope-add ...]            append repo-relative path prefixes
   waystone task drop   <id> [root]                                                  status -> dropped
   waystone task archive [root] [--threshold N] [--keep K]                           relocate old done/dropped
 
@@ -33,8 +34,8 @@ import yaml  # noqa: E402
 import round  # noqa: E402  — reuse the AST-bounded text-surgery helpers
 import validate  # noqa: E402
 from common import (  # noqa: E402
-    WorkflowError, find_project_root, hold_lock, load_tasks, migrate_project_state,
-    project_lock_path, write_text_atomic,
+    WorkflowError, canonical_scope_prefixes, find_project_root, hold_lock, load_tasks,
+    migrate_project_state, normalize_scope_prefix, project_lock_path, write_text_atomic,
 )
 
 ARCHIVE_NAME = "tasks.archive.yaml"
@@ -44,7 +45,7 @@ TERMINAL = ("done", "dropped")
 
 # field order for a written task block (only fields actually supplied are emitted)
 _FIELD_ORDER = ("title", "status", "severity", "milestone", "deps",
-                "anchor", "origin", "branch", "notes", "round", "ruling", "result")
+                "anchor", "origin", "branch", "notes", "scope", "round", "ruling", "result")
 
 # task fields whose value is a YAML list, set from a comma-separated CLI value (like `add --deps`)
 _LIST_FIELDS = ("deps",)
@@ -53,6 +54,8 @@ _LIST_FIELDS = ("deps",)
 # Exact repeated additions use the dedicated --accept-add path; one-off human criteria use run --accept.
 ACCEPT_REJECT_MSG = ("accept is a YAML list of free-text criteria — use repeated "
                      "`waystone task set <id> --accept-add <criterion>` or pass --accept at delegation time")
+SCOPE_REJECT_MSG = ("scope is a YAML list of repo-relative path prefixes — use repeated "
+                    "`waystone task set <id> --scope-add <prefix>`")
 
 
 # ---- pure helpers ------------------------------------------------------------
@@ -261,6 +264,43 @@ def cmd_accept_add(root: Path, task_id: str, criteria: list[str]) -> int:
     return rc
 
 
+def cmd_scope_add(root: Path, task_id: str, prefixes: list[str]) -> int:
+    """Append validated repo-relative prefixes through the ordinary atomic task-set path."""
+    normalized: list[str] = []
+    for prefix in prefixes:
+        path = normalize_scope_prefix(prefix)
+        if path is None:
+            print("task set: --scope-add requires a repo-relative path prefix without glob, '..', "
+                  "URL, or whitespace", file=sys.stderr)
+            return 1
+        normalized.append(path)
+    try:
+        data = load_tasks(root)
+        task = next(t for t in _tasks(data) if t["id"] == task_id)
+    except StopIteration:
+        print(f"task set: task id not found in registry: {task_id}", file=sys.stderr)
+        return 1
+    try:
+        scope = canonical_scope_prefixes(task.get("scope", []))
+    except WorkflowError as e:
+        print(f"task set: {task_id}.scope is invalid: {e}", file=sys.stderr)
+        return 1
+    for prefix in normalized:
+        if prefix not in scope:
+            scope.append(prefix)
+    tasks_path = root / "tasks.yaml"
+    try:
+        new_text = round.set_task_field(
+            tasks_path.read_text(encoding="utf-8"), task_id, "scope", _fmt(scope))
+    except (KeyError, round.WorkflowError) as e:
+        print(f"task set: {e}", file=sys.stderr)
+        return 1
+    rc = _write_validated(tasks_path, new_text, "set")
+    if rc == 0:
+        print(f"task set: {task_id}.scope += {_fmt(normalized)}")
+    return rc
+
+
 def cmd_archive(root: Path, threshold: int, keep: int) -> int:
     data = load_tasks(root)
     ids = select_for_archive(data, threshold=threshold, keep=keep)
@@ -317,7 +357,7 @@ def cmd_archive(root: Path, threshold: int, keep: int) -> int:
 _VALUE_FLAGS = {"title", "status", "severity", "deps", "milestone", "anchor", "origin",
                 "branch", "notes", "round", "ruling", "result", "type", "threshold", "keep",
                 "accept"}  # accept is recognized only to reject it cleanly (see ACCEPT_REJECT_MSG)
-_REPEAT_FLAGS = {"accept-add"}
+_REPEAT_FLAGS = {"accept-add", "scope-add"}
 
 
 def _split(rest: list[str]) -> tuple[list[str], dict]:
@@ -426,6 +466,12 @@ def main(argv: list[str]) -> int:
         if opts.get("accept-add") is None:
             print("waystone task set: --accept-add requires a value", file=sys.stderr)
             return 1
+        if opts.get("scope-add") is None:
+            print("waystone task set: --scope-add requires a value", file=sys.stderr)
+            return 1
+        if opts.get("accept-add") and opts.get("scope-add"):
+            print("waystone task set: choose only one of --accept-add or --scope-add", file=sys.stderr)
+            return 1
         if opts.get("accept-add"):
             if not pos or len(pos) > 2:
                 print("waystone task set: --accept-add requires <id> and optional project root", file=sys.stderr)
@@ -434,11 +480,23 @@ def main(argv: list[str]) -> int:
             if root is None:
                 return 1
             return mutate(root, lambda: cmd_accept_add(root, pos[0], opts["accept-add"]))
+        if opts.get("scope-add"):
+            if not pos or len(pos) > 2:
+                print("waystone task set: --scope-add requires <id> and optional project root",
+                      file=sys.stderr)
+                return 1
+            root = need_root(pos[1] if len(pos) > 1 else None)
+            if root is None:
+                return 1
+            return mutate(root, lambda: cmd_scope_add(root, pos[0], opts["scope-add"]))
         if len(pos) < 3:
             print("waystone task set: <id> <field> <value> required", file=sys.stderr)
             return 1
         if pos[1] == "accept":
             print(f"waystone task set: {ACCEPT_REJECT_MSG}", file=sys.stderr)
+            return 1
+        if pos[1] == "scope":
+            print(f"waystone task set: {SCOPE_REJECT_MSG}", file=sys.stderr)
             return 1
         root = need_root(pos[3] if len(pos) > 3 else None)
         if root is None:

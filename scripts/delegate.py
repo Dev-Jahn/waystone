@@ -37,9 +37,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
 from common import (  # noqa: E402
-    WorkflowError, _project_slug, ensure_project_state_dir, find_project_root, git_full_sha,
-    hold_lock, load_config, load_tasks, migrate_project_state, project_lock_path,
-    project_state_path, worktrees_cache_dir, write_text_atomic,
+    WorkflowError, _project_slug, canonical_scope_prefixes, ensure_project_state_dir,
+    find_project_root, git_full_sha, hold_lock, load_config, load_tasks, migrate_project_state,
+    project_lock_path, project_state_path, worktrees_cache_dir, write_text_atomic,
 )
 
 DELEG_REF_NS = "refs/waystone/delegations"
@@ -476,6 +476,7 @@ def _build_packet(data: dict, task_id: str, accept_flags: list[str], root: Path,
         raise WorkflowError(
             f"task {task_id} has no acceptance criteria — add `accept:` (YAML list) to the task or pass --accept")
     deps = [{"id": d, "status": by_id.get(d, {}).get("status", "unknown")} for d in (task.get("deps") or [])]
+    declared_scope = canonical_scope_prefixes(task.get("scope", []))
     packet = {
         "schema": "waystone-packet-1",
         "task": {
@@ -485,6 +486,7 @@ def _build_packet(data: dict, task_id: str, accept_flags: list[str], root: Path,
         },
         "acceptance": acceptance,
         "accept_provenance": accept_provenance,
+        "declared_scope": declared_scope,
         "project": {"name": data.get("project"), "root": str(root.resolve())},
     }
     if retry_note is not None:
@@ -1495,6 +1497,21 @@ def _validate_verdict_input(verdict: dict) -> None:
     _validate_verdict_fields(verdict, stored=False)
 
 
+def load_canonical_verdict(path: Path) -> dict:
+    """Load one stored verdict through the same schema/provenance validator used by apply."""
+    verdict = _load_json_object(Path(path), "verdict artifact")
+    _validate_verdict_fields(verdict, stored=True)
+    return verdict
+
+
+def latest_canonical_verdict(record: Path) -> tuple[Path, dict] | None:
+    """Return the latest member of a canonical contiguous verdict sequence."""
+    paths = _verdict_paths(Path(record))
+    if not paths:
+        return None
+    return paths[-1], load_canonical_verdict(paths[-1])
+
+
 def _load_packet(rec: Path) -> dict:
     path = rec / "packet.yaml"
     try:
@@ -1909,11 +1926,8 @@ def _cleanup(root: Path, did: str, *, preserve_refs: bool = False) -> None:
 
 
 def _latest_verdict(rec: Path) -> dict | None:
-    paths = _verdict_paths(rec)
-    if not paths:
-        return None
-    latest = paths[-1]
-    return _load_json_object(latest, "verdict artifact")
+    latest = latest_canonical_verdict(rec)
+    return latest[1] if latest is not None else None
 
 
 def apply_delegation(root: Path, did: str, override_no_verdict_reason: str | None = None) -> int:

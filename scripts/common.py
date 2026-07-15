@@ -15,7 +15,6 @@ import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime
-from fnmatch import fnmatchcase
 from pathlib import Path
 
 import yaml
@@ -347,10 +346,6 @@ def resolve_project_paths(project_root: Path, source: Path | None = None) -> tup
     return (wanted,)
 
 
-_PACKET_PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9_.-])((?:\.?[A-Za-z0-9_.-]+/)+(?:[A-Za-z0-9_.*?{}-]+/?))(?::\d+)?")
-
-
 def _record_scope_path(value: object) -> str | None:
     if not isinstance(value, str):
         return None
@@ -365,41 +360,46 @@ def _record_scope_path(value: object) -> str | None:
     return candidate
 
 
-def _packet_declared_scope(packet: dict) -> tuple[list[str], str]:
-    task = packet.get("task") if isinstance(packet.get("task"), dict) else {}
-    structured = packet.get("scope", task.get("scope"))
-    if isinstance(structured, list):
-        paths = sorted({path for value in structured if (path := _record_scope_path(value))})
-        if paths:
-            return paths, "explicit"
+def normalize_scope_prefix(value: object) -> str | None:
+    """Canonical repo-relative prefix for task.scope and packet.declared_scope."""
+    if not isinstance(value, str):
+        return None
+    path = value.strip()
+    if path.startswith("./"):
+        path = path[2:]
+    if (not path or path.startswith(("/", "~")) or ":" in path or "\\" in path
+            or any(part in ("", "..") for part in path.rstrip("/").split("/"))
+            or any(char.isspace() for char in path) or any(char in path for char in "*?[")):
+        return None
+    return path.rstrip("/") or None
 
-    values: list[str] = []
-    for value in (task.get("anchor"), task.get("notes")):
-        if isinstance(value, str):
-            values.append(value)
-    values.extend(value for value in (packet.get("acceptance") or []) if isinstance(value, str))
-    paths: set[str] = set()
-    for value in values:
-        for quoted in re.findall(r"`([^`\n]+)`", value):
-            path = _record_scope_path(quoted)
-            if path:
-                paths.add(path)
-        for match in _PACKET_PATH_RE.finditer(value):
-            path = _record_scope_path(match.group(1))
-            if path:
-                paths.add(path)
-    return sorted(paths), "inferred" if paths else "unknown"
+
+def canonical_scope_prefixes(value: object) -> list[str]:
+    """Validate structured scope without mining any natural-language field."""
+    if not isinstance(value, list):
+        raise WorkflowError("scope must be a list of repo-relative path prefixes")
+    out: list[str] = []
+    for index, raw in enumerate(value):
+        path = normalize_scope_prefix(raw)
+        if path is None:
+            raise WorkflowError(
+                f"scope[{index}] must be a repo-relative path prefix without glob, '..', URL, or whitespace")
+        if path not in out:
+            out.append(path)
+    return out
+
+
+def _packet_declared_scope(packet: dict) -> tuple[list[str], str]:
+    try:
+        paths = canonical_scope_prefixes(packet.get("declared_scope"))
+    except WorkflowError:
+        return [], "unknown"
+    return (paths, "explicit") if paths else ([], "unknown")
 
 
 def _path_in_declared_scope(path: str, declared: list[str]) -> bool:
     for scope in declared:
-        if any(char in scope for char in "*?["):
-            if fnmatchcase(path, scope):
-                return True
-            continue
-        if scope.endswith("/") and path.startswith(scope):
-            return True
-        if path == scope or path.startswith(scope.rstrip("/") + "/"):
+        if path == scope or path.startswith(scope + "/"):
             return True
     return False
 
@@ -408,13 +408,13 @@ def delegation_scope_drift(record_dir: Path) -> dict:
     """Compare one delegation packet's declared path scope with its computed changed files.
 
     The record directory is the whole interface so live boundary rules can reuse the same calculation.
-    Natural-language packet fields contribute only syntactically explicit repository paths and remain
-    provenance ``inferred``; a missing path scope is unevaluable rather than guessed.
+    Only packet.declared_scope is consumed. Notes, anchors, commands, URLs, and acceptance text are
+    never interpreted as paths; absent structured scope remains unknown.
     """
     packet_path = Path(record_dir) / "packet.yaml"
     contract_path = Path(record_dir) / "artifact" / "contract.yaml"
     base = {
-        "rule": "packet-path-scope-v1", "evaluable": False, "provenance": "unknown",
+        "rule": "packet-declared-scope-v2", "evaluable": False, "provenance": "unknown",
         "declared_scope": [], "changed_files": [], "outside_scope": [],
     }
     for path, label in ((packet_path, "packet"), (contract_path, "contract")):
@@ -435,7 +435,7 @@ def delegation_scope_drift(record_dir: Path) -> dict:
 
     declared, provenance = _packet_declared_scope(packet)
     if not declared:
-        return {**base, "coverage_reason": "no-declared-path-scope"}
+        return {**base, "coverage_reason": "scope-unknown"}
     raw_changed = contract.get("changed_files")
     if not isinstance(raw_changed, list):
         return {**base, "declared_scope": declared, "provenance": provenance,
@@ -450,7 +450,7 @@ def delegation_scope_drift(record_dir: Path) -> dict:
     changed = sorted(set(changed))
     outside = [path for path in changed if not _path_in_declared_scope(path, declared)]
     return {
-        "rule": "packet-path-scope-v1", "evaluable": True, "provenance": provenance,
+        "rule": "packet-declared-scope-v2", "evaluable": True, "provenance": provenance,
         "declared_scope": declared, "changed_files": changed, "outside_scope": outside,
         "coverage_reason": None,
     }

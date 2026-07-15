@@ -181,6 +181,9 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
         print(f"round close: --commit {commit!r} does not resolve to a commit", file=sys.stderr)
         return 1
     ctext = cfg_path.read_text(encoding="utf-8")
+    prev_raw = (cfg.get("state") or {}).get("last_round_commit")
+    prev_wm = git_full_sha(root, str(prev_raw)) if prev_raw else None
+    created_event_paths: list[Path] = []
     try:
         ctext_new = set_config_scalar(ctext, "last_round_commit", full, section="state")
     except KeyError:
@@ -253,10 +256,15 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
             ssot.regenerate(root)  # one full regen; raises WorkflowError (caught below) not sys.exit
         try:
             import overlay
-            overlay.write_round_exposure(
+            exposure_path, _exposure = overlay.write_round_exposure(
                 root, round_id, git_full_sha(root, "HEAD"), full, session_id=session_id)
+            created_event_paths.append(exposure_path)
+            binding_path = review.write_round_request_binding(
+                root, round_id, full, prev_wm, review_reviewers,
+                mode=(cfg.get("review") or {}).get("mode", "packet"))
+            created_event_paths.append(binding_path)
         except Exception as e:  # noqa: BLE001 — exposure is part of the close transaction
-            raise WorkflowError(f"round exposure not recorded: {e}") from e
+            raise WorkflowError(f"round exposure/request binding not recorded: {e}") from e
     except Exception as e:  # noqa: BLE001 — any failure must roll every written artifact back
         write_text_atomic(tasks_path, orig_tasks_text)
         write_text_atomic(cfg_path, ctext)
@@ -268,6 +276,8 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
             shutil.rmtree(gen_dir, ignore_errors=True)
             if gen_existed:
                 shutil.copytree(gen_backup, gen_dir)
+        for event_path in reversed(created_event_paths):
+            event_path.unlink(missing_ok=True)
         if gen_backup is not None:
             shutil.rmtree(gen_backup.parent, ignore_errors=True)
         print(f"round close: closeout failed mid-write and was rolled back — {e}", file=sys.stderr)
@@ -278,7 +288,6 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     # report the watermark move so the review request can name the diff base (prev tip → this tip).
     # `prev_wm` is the watermark BEFORE this close advanced it — the previous round's tip; resolve it
     # to a full sha (it may be stored short) so it can be copied verbatim as the review base.
-    prev_wm = git_full_sha(root, str(prev_raw)) if (prev_raw := (cfg.get("state") or {}).get("last_round_commit")) else None
     print(f"round {round_id} closed: {len(done)} done, {len(set(done + touched))} stamped; "
           f"watermark {(prev_wm[:12] if prev_wm else '(root)')} → {full[:12]}")
     print(f"  review diff base = {prev_wm or '(root)'}  (previous round tip; head = {full})")

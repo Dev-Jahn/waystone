@@ -37,6 +37,7 @@ import json
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -49,6 +50,9 @@ from common import (  # noqa: E402
 
 CODEX_BOT = "chatgpt-codex-connector[bot]"  # REST `user.login` form
 INBOX = Path("/tmp/review.md")  # fixed drop-file: user saves the reviewer reply here, byte-exact
+ROUND_REQUEST_BINDING_SCHEMA = "waystone-round-request-binding-1"
+PACKET_REVIEWING_RE = re.compile(
+    r"(?m)^- Reviewing:\s*([0-9a-f]{40})\s+\(diff against\s+([0-9a-f]{40}|\(root\))\)\s*$")
 
 
 def is_codex(login: str | None) -> bool:
@@ -72,6 +76,53 @@ def emit_marker(kind: str, fields: dict) -> str:
     body = yaml.safe_dump(dict(fields), sort_keys=False, default_flow_style=False,
                           allow_unicode=True).strip()
     return f"<!-- waystone-{kind}:v1\n{body}\n-->"
+
+
+def write_round_request_binding(root: Path, round_id: str, target_sha: str, base_sha: str | None,
+                                reviewers: list[str], *, mode: str) -> Path:
+    """Append an immutable round-bound sidecar for packet request projection.
+
+    PR comments remain the canonical PR-mode event store; the local row records that relationship
+    but is never promoted to a reviewed-SHA fact by the offline improve projection.
+    """
+    if not _is_sha(target_sha) or (base_sha is not None and not _is_sha(base_sha)):
+        raise WorkflowError("round request binding requires full target/base commit SHAs")
+    if mode not in ("packet", "pr") or not _is_strlist(reviewers):
+        raise WorkflowError("round request binding requires packet|pr mode and literal reviewers")
+    cfg = load_config(root)
+    directory = Path(root) / cfg["reviews_dir"]
+    directory.mkdir(parents=True, exist_ok=True)
+    row = {
+        "schema": ROUND_REQUEST_BINDING_SCHEMA, "round_id": round_id,
+        "target_sha": target_sha, "base_sha": base_sha, "reviewers": reviewers,
+        "mode": mode, "canonical_store": "github-pr-comment" if mode == "pr" else "local-packet",
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    base = directory / f"{round_id}-request.binding.json"
+    path = base
+    number = 2
+    content = json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+    while True:
+        try:
+            with path.open("x", encoding="utf-8") as stream:
+                stream.write(content)
+            return path
+        except FileExistsError:
+            path = base.with_name(f"{base.stem}-{number}{base.suffix}")
+            number += 1
+
+
+def parse_packet_request_binding(path: Path) -> tuple[str, str | None] | None:
+    """Read the packet template's single structured Reviewing line; ambiguity stays unknown."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    matches = PACKET_REVIEWING_RE.findall(text)
+    if len(matches) != 1:
+        return None
+    target_sha, raw_base = matches[0]
+    return target_sha, None if raw_base == "(root)" else raw_base
 
 
 # ---- strict marker schema (a marker is BELIEVED only if every field is the exact type) --------
@@ -718,6 +769,18 @@ def ingest(root: Path, round_id: str | None, src: Path = INBOX, reviewer: str | 
                   "pass --force to replace it", file=sys.stderr)
             return 1
     src.unlink()
+    if (cfg.get("review") or {}).get("mode", "packet") == "packet":
+        request_binding = parse_packet_request_binding(rdir / f"{round_id}-request.md")
+        if request_binding is not None:
+            target_sha, base_sha = request_binding
+            try:
+                write_round_request_binding(
+                    root, round_id, target_sha, base_sha,
+                    resolve_reviewers(root, (cfg.get("review") or {}).get("reviewers", [])),
+                    mode="packet")
+            except (OSError, WorkflowError) as e:
+                print(f"review ingest: packet request binding unavailable ({e}); projection will "
+                      "remain unknown", file=sys.stderr)
     print(f"ingested {len(body)} bytes verbatim → {dest} (consumed {src})")
     print(f"  {len(findings)} finding(s) parsed — verify each before registering")
     # M2 §6: evaluate overlay warns at the review-ingest boundary (best-effort; never blocks).
