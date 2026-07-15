@@ -13,7 +13,7 @@
 <img alt="version" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FDev-Jahn%2Fwaystone%2Fmain%2F.claude-plugin%2Fplugin.json&query=%24.version&prefix=v&label=version&style=flat-square">
 <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-8A5CF6?style=flat-square">
 <img alt="Codex plugin" src="https://img.shields.io/badge/Codex-plugin-111111?style=flat-square">
-<img alt="tests" src="https://img.shields.io/badge/tests-317-success?style=flat-square">
+<img alt="tests" src="https://img.shields.io/badge/tests-429-success?style=flat-square">
 <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square">
 </p>
 
@@ -21,7 +21,7 @@
 
 Waystone is a Claude Code and Codex plugin that gives a project a durable source of direction, a validated task list, bounded work cycles, independent review, and a way to learn from past agent sessions. It is built for research and software projects that span many sessions or agents — where context, decisions, and verification evidence would otherwise scatter across chats and memory files.
 
-> **Status:** v0.8.3 is implemented. v0.9 is the planned step toward user- and project-specific enforcement and larger-scale multi-agent orchestration.
+> **Status:** v0.9.0 is implemented — one shared project state across Claude Code and Codex, cross-process locking, and fully autonomous delegation behind harness-enforced acceptance gates. Upgrading from v0.8 migrates local state automatically and losslessly on first run. Next: user- and project-specific enforcement and larger-scale orchestration.
 
 <br>
 
@@ -29,7 +29,7 @@ Waystone is a Claude Code and Codex plugin that gives a project a durable source
 
 - **Direction that survives sessions.** One durable project-direction document, plus a re-entry note written before compaction or exit, so a later session continues without reconstructing context.
 - **Evidence, not "done".** Reviewer comments are treated as claims and verified against the code before they become tracked work.
-- **Control you keep.** Delegated work runs in an isolated worktree; the worker never owns final approval — you apply or discard.
+- **Acceptance with evidence.** Delegated work runs in an isolated worktree, and nothing lands without a recorded criterion-by-criterion verdict backed by verification evidence — every decision stays auditable and reversible.
 - **Cheap by default.** Most validation, rendering, bookkeeping, and log parsing are plain scripts that spend no model tokens.
 
 <br>
@@ -118,7 +118,7 @@ periodically to analyze past sessions and review results.
 | `/waystone:init` | `$waystone:init` | Sets up a new project or adds Waystone to an existing one without rewriting its history. |
 | `/waystone:round` | `$waystone:round` | Closes a bounded work cycle, updates progress, refreshes generated views, and creates a review request. |
 | `/waystone:review` | `$waystone:review` | Preserves a reviewer reply exactly, verifies each issue, and turns confirmed issues into tasks. |
-| `/waystone:delegate` | `$waystone:delegate` | Runs one task in an isolated worktree, optionally verifies it independently, then asks you to apply or discard. |
+| `/waystone:delegate` | `$waystone:delegate` | Autonomously runs one task in an isolated worktree, verifies it, and resolves it with a recorded evidence-backed verdict. |
 | `/waystone:status` | `$waystone:status` | Shows active, blocked, and pending work across registered local or remote projects. |
 | `/waystone:improve` | `$waystone:improve` | Analyzes host session history and review evidence, then proposes evidence-backed workflow improvements. |
 
@@ -218,7 +218,7 @@ The `improve` skill reads Claude Code logs from `$CLAUDE_CONFIG_DIR/projects` (o
 
 Scripts produce repeatable facts first; the model only interprets them. Each recommendation states where it came from and whether it is directly observed or inferred. Project analysis and its accept/reject decisions stay under `{project_root}/.waystone/improve/`; opt-in `--user-wide` analysis stays under `~/.waystone/improve/`. Raw prompts and source files are not copied into the report, and decisions are remembered so later runs focus on new evidence.
 
-For a small, predefined set of recommendations, v0.8 can separately store a project-specific check in **observation mode** (`waystone overlay`): it records when the check would have fired but does not warn or block. Promoting it to a warning requires a deterministic replay over past evidence and another explicit command. `waystone check` evaluates the active rules against the current project state; v0.8 warnings remain visible but never block.
+For a small, predefined set of recommendations, Waystone can separately store a project-specific check in **observation mode** (`waystone overlay`): it records when the check would have fired but does not warn or block. Promoting it to a warning requires a deterministic replay over past evidence and another explicit command. `waystone check` evaluates the active rules against the current project state; warnings remain visible but never block until the enforcement arc lands.
 
 <br>
 
@@ -227,11 +227,12 @@ For a small, predefined set of recommendations, v0.8 can separately store a proj
 | Version | Main capability | Status |
 |---|---|---|
 | **v0.7 — Observe & Advise** | Organize projects, run review-centered work cycles, analyze past sessions, and make evidence-backed recommendations. | Implemented |
-| **v0.8 — Delegate & Verify** | Run coding tasks through an isolated, reproducible delegation flow; verify results independently; begin project-specific observation and warning rules. | Implemented — current release |
-| **v0.9 — Adapt & Enforce** | Separate user-wide and project-specific rules, promote proven checks to enforceable guards with recorded waivers, support larger parallel task groups. | Planned |
+| **v0.8 — Delegate & Verify** | Run coding tasks through an isolated, reproducible delegation flow; verify results independently; begin project-specific observation and warning rules. | Implemented |
+| **v0.9 — Unify & Automate** | Share one project state across Claude Code and Codex with cross-process locking; let the main session run delegation end-to-end behind harness-enforced acceptance gates; scope improve analysis to the project by default. | Implemented — current release |
+| **Next — Adapt & Enforce** | Promote proven checks to enforceable guards with recorded waivers, and support larger parallel task groups. | Planned |
 
 <details>
-<summary>The intended v0.9 loop</summary>
+<summary>The intended Adapt & Enforce loop</summary>
 
 <br>
 
