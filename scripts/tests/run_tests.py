@@ -2251,7 +2251,7 @@ class ImproveDiscoveryTests(unittest.TestCase):
             only_b = improve.discover([src], {"slug-b"})
             self.assertEqual([k for _, _, k in only_b], ["tool_result"])
 
-    def test_cli_default_out_honors_home(self):
+    def test_cli_user_wide_out_honors_home(self):
         import contextlib
         import io
         with tempfile.TemporaryDirectory() as d:
@@ -2263,7 +2263,7 @@ class ImproveDiscoveryTests(unittest.TestCase):
             def run():
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
-                    rc = improve.main(["trace", "--source", str(src)])
+                    rc = improve.main(["trace", "--user-wide", "--source", str(src)])
                 return rc
 
             rc = _run_with_home(home, run)
@@ -2774,7 +2774,7 @@ class ImproveReviewsTests(unittest.TestCase):
                 self.assertEqual((o1 / name).read_bytes(), (o2 / name).read_bytes(),
                                  f"{name} not byte-identical across re-runs")
 
-    def test_cli_default_out_honors_home(self):
+    def test_cli_user_wide_out_honors_home(self):
         import contextlib
         import io
         with tempfile.TemporaryDirectory() as d:
@@ -2788,7 +2788,7 @@ class ImproveReviewsTests(unittest.TestCase):
             def run():
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
-                    rc = improve.main(["reviews"])
+                    rc = improve.main(["reviews", "--user-wide"])
                 return rc
 
             rc = _run_with_home(home, run)
@@ -2944,10 +2944,15 @@ class ImproveDecideTests(unittest.TestCase):
     def _lines(self, path: Path):
         return [_json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
+    @staticmethod
+    def _user_wide(home: Path, argv: list[str]) -> int:
+        return _run_with_home(home, lambda: improve.main([*argv, "--user-wide"]))
+
     def test_append_shape(self):
         with tempfile.TemporaryDirectory() as d:
-            out = Path(d) / "improve"
-            rc = improve.main(
+            home = Path(d) / "home"
+            out = home / ".waystone" / "improve" / "shape"
+            rc = self._user_wide(home,
                 ["decide", "main_direct_work/heavy-mains", "accept",
                  "--title", "delegate heavy mains", "--note", "seen in 3 sessions", "--out", str(out)])
             self.assertEqual(rc, 0)
@@ -2964,8 +2969,10 @@ class ImproveDecideTests(unittest.TestCase):
 
     def test_optional_fields_omitted(self):
         with tempfile.TemporaryDirectory() as d:
-            out = Path(d) / "improve"
-            rc = improve.main(["decide", "retry_loops/same-cmd", "reject", "--out", str(out)])
+            home = Path(d) / "home"
+            out = home / ".waystone" / "improve" / "optional"
+            rc = self._user_wide(
+                home, ["decide", "retry_loops/same-cmd", "reject", "--out", str(out)])
             self.assertEqual(rc, 0)
             rec = self._lines(out / "decisions.jsonl")[0]
             self.assertNotIn("title", rec)
@@ -2974,10 +2981,13 @@ class ImproveDecideTests(unittest.TestCase):
 
     def test_redecision_appends_history_latest_wins(self):
         with tempfile.TemporaryDirectory() as d:
-            out = Path(d) / "improve"
+            home = Path(d) / "home"
+            out = home / ".waystone" / "improve" / "history"
             rid = "verification_debt/add-verify"
-            self.assertEqual(improve.main(["decide", rid, "reject", "--out", str(out)]), 0)
-            self.assertEqual(improve.main(["decide", rid, "accept", "--out", str(out)]), 0)
+            self.assertEqual(self._user_wide(
+                home, ["decide", rid, "reject", "--out", str(out)]), 0)
+            self.assertEqual(self._user_wide(
+                home, ["decide", rid, "accept", "--out", str(out)]), 0)
             lines = self._lines(out / "decisions.jsonl")
             self.assertEqual(len(lines), 2)  # both preserved (append-only history)
             self.assertEqual([l["decision"] for l in lines], ["reject", "accept"])
@@ -2987,19 +2997,26 @@ class ImproveDecideTests(unittest.TestCase):
 
     def test_missing_and_invalid_args(self):
         with tempfile.TemporaryDirectory() as d:
-            out = Path(d) / "improve"
+            home = Path(d) / "home"
+            out = home / ".waystone" / "improve" / "invalid"
             # missing decision verb
-            self.assertEqual(improve.main(["decide", "main_direct_work/x", "--out", str(out)]), 1)
+            self.assertEqual(self._user_wide(
+                home, ["decide", "main_direct_work/x", "--out", str(out)]), 1)
             # decision must be accept|reject
-            self.assertEqual(improve.main(["decide", "main_direct_work/x", "maybe", "--out", str(out)]), 1)
+            self.assertEqual(self._user_wide(
+                home, ["decide", "main_direct_work/x", "maybe", "--out", str(out)]), 1)
             # rec-id must be <lens>/<kebab-gist> (single slash)
-            self.assertEqual(improve.main(["decide", "noslash", "accept", "--out", str(out)]), 1)
+            self.assertEqual(self._user_wide(
+                home, ["decide", "noslash", "accept", "--out", str(out)]), 1)
             # no uppercase / non-kebab gist
-            self.assertEqual(improve.main(["decide", "Lens/Bad_Gist", "accept", "--out", str(out)]), 1)
+            self.assertEqual(self._user_wide(
+                home, ["decide", "Lens/Bad_Gist", "accept", "--out", str(out)]), 1)
             # gist may not end in a hyphen
-            self.assertEqual(improve.main(["decide", "lens/bad-", "accept", "--out", str(out)]), 1)
+            self.assertEqual(self._user_wide(
+                home, ["decide", "lens/bad-", "accept", "--out", str(out)]), 1)
             # unknown flag rejected
-            self.assertEqual(improve.main(["decide", "lens/ok", "accept", "--bogus", "x", "--out", str(out)]), 1)
+            self.assertEqual(self._user_wide(
+                home, ["decide", "lens/ok", "accept", "--bogus", "x", "--out", str(out)]), 1)
             # a precondition failure never creates the log
             self.assertFalse((out / "decisions.jsonl").exists())
 
@@ -3014,18 +3031,259 @@ class ImproveDecideTests(unittest.TestCase):
             def run():
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
-                    return improve.main(["decide", "context_heavy/trim", "accept"])
+                    return improve.main(
+                        ["decide", "context_heavy/trim", "accept", "--user-wide"])
             rc = _run_with_home(home, run)
             self.assertEqual(rc, 0)
             default_log = home / ".waystone" / "improve" / "decisions.jsonl"
             self.assertTrue(default_log.is_file())  # default --out honors HOME
 
-            explicit = d / "elsewhere"
+            explicit = home / ".waystone" / "improve" / "elsewhere"
             rc2 = _run_with_home(home, lambda: improve.main(
-                ["decide", "context_heavy/trim", "reject", "--out", str(explicit)]))
+                ["decide", "context_heavy/trim", "reject", "--out", str(explicit),
+                 "--user-wide"]))
             self.assertEqual(rc2, 0)
             self.assertTrue((explicit / "decisions.jsonl").is_file())  # override lands elsewhere
             self.assertEqual(len(self._lines(default_log)), 1)  # default log untouched by the override
+
+
+class ImproveScopeTests(unittest.TestCase):
+    """0.9.0-a C3: project-first improve storage, scope isolation, and user-wide opt-in."""
+
+    @staticmethod
+    def _project(root: Path, name: str) -> None:
+        root.mkdir(parents=True)
+        (root / ".waystone.yml").write_text(f"version: 1\nproject: {name}\n")
+        (root / "tasks.yaml").write_text(f"version: 1\nproject: {name}\ntasks: []\n")
+        reviews = root / "docs" / "reviews"
+        reviews.mkdir(parents=True)
+        (reviews / f"2026-07-15-{name}-request.md").write_text(f"# {name}\n")
+
+    @staticmethod
+    def _claude_slug(root: Path) -> str:
+        import re
+        return re.sub(r"[^A-Za-z0-9]", "-", str(root.resolve()))
+
+    @staticmethod
+    def _claude_session(source: Path, root: Path, session_id: str) -> None:
+        project = source / ImproveScopeTests._claude_slug(root)
+        project.mkdir(parents=True, exist_ok=True)
+        _write_jsonl(project / f"{session_id}.jsonl", [
+            {"type": "user", "uuid": f"u-{session_id}", "cwd": str(root),
+             "message": {"role": "user", "content": "work"}},
+        ])
+
+    @staticmethod
+    def _codex_session(source: Path, root: Path, session_id: str) -> None:
+        _write_jsonl(source / f"rollout-2026-07-15T00-00-00-{session_id}.jsonl", [
+            {"timestamp": "2026-07-15T00:00:00Z", "type": "session_meta", "payload": {
+                "id": session_id, "cwd": str(root), "thread_source": "user"}},
+            {"timestamp": "2026-07-15T00:00:01Z", "type": "response_item", "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "work"}]}},
+        ])
+
+    @staticmethod
+    def _run(home: Path, cwd: Path, argv: list[str]) -> int:
+        import contextlib
+        import io
+        import os
+
+        previous = Path.cwd()
+        try:
+            os.chdir(cwd)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return _run_with_home(home, lambda: improve.main(argv))
+        finally:
+            os.chdir(previous)
+
+    @staticmethod
+    def _rows(path: Path) -> list[dict]:
+        return [_json.loads(line) for line in path.read_text().splitlines() if line]
+
+    def _fixture(self, directory: str) -> tuple[Path, Path, Path, Path]:
+        base = Path(directory)
+        home = base / "home"
+        home.mkdir()
+        alpha, beta = base / "alpha", base / "beta"
+        self._project(alpha, "alpha")
+        self._project(beta, "beta")
+        registry = home / ".waystone" / "projects.json"
+        registry.parent.mkdir(parents=True)
+        registry.write_text(_json.dumps({"projects": [
+            {"name": "alpha", "path": str(alpha)},
+            {"name": "beta", "path": str(beta)},
+        ]}))
+        return home, alpha, beta, registry
+
+    def test_project_default_filters_claude_and_keeps_outputs_and_decisions_local(self):
+        with tempfile.TemporaryDirectory() as d:
+            home, alpha, beta, _registry = self._fixture(d)
+            source = Path(d) / "claude-projects"
+            self._claude_session(source, alpha, "11111111-1111-1111-1111-111111111111")
+            self._claude_session(source, beta, "22222222-2222-2222-2222-222222222222")
+            machine = home / ".waystone" / "improve"
+            machine.mkdir()
+            sentinel = machine / "sentinel"
+            sentinel.write_text("legacy-user-wide")
+
+            self.assertEqual(self._run(
+                home, alpha, ["trace", "--source", str(source), "--host", "claude"]), 0)
+            project_out = alpha / ".waystone" / "improve"
+            rows = self._rows(project_out / "sessions.jsonl")
+            self.assertEqual([row["project"] for row in rows], [self._claude_slug(alpha)])
+            self.assertEqual((alpha / ".waystone" / ".gitignore").read_text(), "*\n")
+            self.assertEqual(sentinel.read_text(), "legacy-user-wide")
+            self.assertEqual(set(machine.iterdir()), {sentinel})
+
+            self.assertEqual(self._run(
+                home, alpha, ["decide", "verification_debt/add-tests", "accept"]), 0)
+            self.assertTrue((project_out / "decisions.jsonl").is_file())
+            self.assertFalse((machine / "decisions.jsonl").exists())
+
+    def test_project_default_filters_codex_by_current_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            home, alpha, beta, _registry = self._fixture(d)
+            source = Path(d) / "codex-sessions"
+            source.mkdir()
+            self._codex_session(source, alpha, "33333333-3333-3333-3333-333333333333")
+            self._codex_session(source, beta, "44444444-4444-4444-4444-444444444444")
+
+            self.assertEqual(self._run(
+                home, alpha, ["trace", "--source", str(source), "--host", "codex"]), 0)
+            rows = self._rows(alpha / ".waystone" / "improve" / "sessions.jsonl")
+            self.assertEqual([row["project"] for row in rows], [alpha.name])
+
+    def test_user_wide_scans_all_projects_and_never_touches_project_improve(self):
+        with tempfile.TemporaryDirectory() as d:
+            home, alpha, beta, _registry = self._fixture(d)
+            source = Path(d) / "claude-projects"
+            self._claude_session(source, alpha, "55555555-5555-5555-5555-555555555555")
+            self._claude_session(source, beta, "66666666-6666-6666-6666-666666666666")
+            project_out = alpha / ".waystone" / "improve"
+            project_out.mkdir(parents=True)
+            sentinel = project_out / "sentinel"
+            sentinel.write_text("project-only")
+
+            self.assertEqual(self._run(home, alpha, [
+                "trace", "--user-wide", "--source", str(source), "--host", "claude"]), 0)
+            machine = home / ".waystone" / "improve"
+            rows = self._rows(machine / "sessions.jsonl")
+            self.assertEqual(
+                {row["project"] for row in rows},
+                {self._claude_slug(alpha), self._claude_slug(beta)},
+            )
+            self.assertEqual(self._run(home, alpha, [
+                "decide", "main_direct_work/delegate-more", "accept", "--user-wide"]), 0)
+            self.assertTrue((machine / "decisions.jsonl").is_file())
+            self.assertEqual(set(project_out.iterdir()), {sentinel})
+            self.assertEqual(sentinel.read_text(), "project-only")
+
+    def test_review_and_evidence_sources_follow_mode_scope(self):
+        with tempfile.TemporaryDirectory() as d:
+            home, alpha, _beta, _registry = self._fixture(d)
+            for subcommand in ("reviews", "evidence"):
+                self.assertEqual(self._run(home, alpha, [subcommand]), 0)
+            project_out = alpha / ".waystone" / "improve"
+            self.assertEqual(
+                _json.loads((project_out / "reviews_coverage.json").read_text())["projects_scanned"],
+                ["alpha"],
+            )
+            self.assertEqual(
+                self._rows(project_out / "evidence.jsonl")[-1]["coverage"]["projects_scanned"],
+                ["alpha"],
+            )
+
+            for subcommand in ("reviews", "evidence"):
+                self.assertEqual(self._run(home, alpha, [subcommand, "--user-wide"]), 0)
+            machine = home / ".waystone" / "improve"
+            self.assertEqual(
+                _json.loads((machine / "reviews_coverage.json").read_text())["projects_scanned"],
+                ["alpha", "beta"],
+            )
+            self.assertEqual(
+                self._rows(machine / "evidence.jsonl")[-1]["coverage"]["projects_scanned"],
+                ["alpha", "beta"],
+            )
+
+    def test_audit_lens_classification_and_scope_data_are_explicit(self):
+        with tempfile.TemporaryDirectory() as d:
+            home, alpha, _beta, _registry = self._fixture(d)
+            project_out = alpha / ".waystone" / "improve"
+            machine_out = home / ".waystone" / "improve"
+            project_out.mkdir(parents=True)
+            machine_out.mkdir(parents=True)
+            project_sessions = [{
+                "project": "alpha", "kind": "main", "session_id": "a", "file": "/a",
+                "tools": {"by_category": {}}, "delegations": 0, "verification": {"runs": 0},
+                "build": {"runs": 0}, "retry_loops": {"count": 0}, "context_heavy": {},
+                "errors": {},
+            }]
+            _write_jsonl(project_out / "sessions.jsonl", project_sessions)
+            _write_jsonl(machine_out / "sessions.jsonl", [
+                *project_sessions, {**project_sessions[0], "project": "beta", "session_id": "b"},
+            ])
+            _write_jsonl(project_out / "delegations.jsonl", [])
+            _write_jsonl(machine_out / "delegations.jsonl", [])
+            _write_jsonl(project_out / "reviews.jsonl", [])
+            _write_jsonl(machine_out / "reviews.jsonl", [])
+            coverage = {"row_totals": {"sessions": 1, "delegations": 0}}
+            (project_out / "parse_coverage.json").write_text(_json.dumps(coverage))
+            (machine_out / "parse_coverage.json").write_text(_json.dumps(coverage))
+
+            self.assertEqual(self._run(home, alpha, ["audit"]), 0)
+            self.assertEqual(self._run(home, alpha, ["audit", "--user-wide"]), 0)
+            project_facts = _json.loads((project_out / "facts.json").read_text())
+            user_facts = _json.loads((machine_out / "facts.json").read_text())
+            project_lenses = {lens["lens"]: lens for lens in project_facts["lenses"]}
+            user_lenses = {lens["lens"]: lens for lens in user_facts["lenses"]}
+            self.assertEqual(improve.LENS_SCOPES, {
+                "main_direct_work": frozenset({"user-habit"}),
+                "verification_debt": frozenset({"project"}),
+                "retry_loops": frozenset({"project", "user-habit"}),
+                "context_heavy": frozenset({"project", "user-habit"}),
+                "delegation_pattern": frozenset({"user-habit"}),
+                "error_landscape": frozenset({"project"}),
+                "review_association": frozenset({"project"}),
+                "coverage_caveats": frozenset({"project", "user-habit"}),
+                "evidence_link": frozenset({"project"}),
+            })
+            self.assertEqual(project_facts["scope"], "project")
+            self.assertEqual(user_facts["scope"], "user-habit")
+            self.assertEqual(set(project_lenses), {
+                name for name, scopes in improve.LENS_SCOPES.items() if "project" in scopes
+                and name != "evidence_link"
+            })
+            self.assertEqual(set(user_lenses), {
+                name for name, scopes in improve.LENS_SCOPES.items() if "user-habit" in scopes
+                and name != "evidence_link"
+            })
+            for lens in set(project_lenses) & set(user_lenses):
+                if lens == "coverage_caveats":
+                    continue
+                self.assertEqual(set(project_lenses[lens]["per_project"]), {"alpha"})
+                self.assertEqual(set(user_lenses[lens]["per_project"]), {"alpha", "beta"})
+
+    def test_residence_guard_rejects_cross_scope_out_and_in(self):
+        with tempfile.TemporaryDirectory() as d:
+            home, alpha, _beta, _registry = self._fixture(d)
+            source = Path(d) / "claude-projects"
+            self._claude_session(source, alpha, "77777777-7777-7777-7777-777777777777")
+            project_out = alpha / ".waystone" / "improve"
+            machine_out = home / ".waystone" / "improve"
+
+            self.assertEqual(self._run(home, alpha, [
+                "trace", "--source", str(source), "--host", "claude",
+                "--out", str(machine_out / "project-attempt")]), 1)
+            self.assertEqual(self._run(home, alpha, [
+                "trace", "--user-wide", "--source", str(source), "--host", "claude",
+                "--out", str(project_out / "user-attempt")]), 1)
+            self.assertEqual(self._run(home, alpha, [
+                "audit", "--in", str(machine_out)]), 1)
+            self.assertEqual(self._run(home, alpha, [
+                "audit", "--user-wide", "--in", str(project_out)]), 1)
+            self.assertFalse((machine_out / "project-attempt").exists())
+            self.assertFalse((project_out / "user-attempt").exists())
 
 
 class ImproveM1DefectTests(unittest.TestCase):
@@ -3121,12 +3379,14 @@ class ImproveM1DefectTests(unittest.TestCase):
 
     # ---- finding 7: a relative --out/--in is refused (exit 1) for every subcommand ----
     def test_relative_out_in_refused(self):
-        self.assertEqual(self._quiet(lambda: improve.main(
-            ["trace", "--source", "/tmp", "--out", "rel/out"])), 1)
-        self.assertEqual(self._quiet(lambda: improve.main(["reviews", "--out", "rel/out"])), 1)
-        self.assertEqual(self._quiet(lambda: improve.main(["audit", "--in", "rel/in"])), 1)
-        self.assertEqual(self._quiet(lambda: improve.main(
-            ["decide", "lens/x", "accept", "--out", "rel/out"])), 1)
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "home"
+            run = lambda argv: _run_with_home(
+                home, lambda: self._quiet(lambda: improve.main([*argv, "--user-wide"])))
+            self.assertEqual(run(["trace", "--source", "/tmp", "--out", "rel/out"]), 1)
+            self.assertEqual(run(["reviews", "--out", "rel/out"]), 1)
+            self.assertEqual(run(["audit", "--in", "rel/in"]), 1)
+            self.assertEqual(run(["decide", "lens/x", "accept", "--out", "rel/out"]), 1)
 
     # ---- finding 8: registry MISSING is soft (exit 0); EXISTING but corrupt fails loud ----
     def test_registry_fail_loud(self):
@@ -3148,7 +3408,9 @@ class ImproveM1DefectTests(unittest.TestCase):
             (home / ".waystone").mkdir(parents=True)
             (home / ".waystone" / "projects.json").write_text("{ nope ")
             rc = _run_with_home(home, lambda: self._quiet(
-                lambda: improve.main(["reviews", "--out", str(d / "o2")])))
+                lambda: improve.main([
+                    "reviews", "--user-wide", "--out",
+                    str(home / ".waystone" / "improve" / "o2")])))
             self.assertEqual(rc, 1)
 
     # ---- finding 1: an unreadable INPUT transcript is recorded, not fatal, exit 0 ----
@@ -3184,17 +3446,19 @@ class ImproveM1DefectTests(unittest.TestCase):
         import stat
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
+            home = d / "home"
             src = d / "projects"
             slug = src / "s"
             slug.mkdir(parents=True)
             _write_jsonl(slug / f"{_UUID}.jsonl",
                          [{"type": "user", "uuid": "u", "message": {"role": "user", "content": "hi"}}])
-            locked = d / "locked"
-            locked.mkdir()
+            locked = home / ".waystone" / "improve" / "locked"
+            locked.mkdir(parents=True)
             os.chmod(locked, stat.S_IRUSR | stat.S_IXUSR)  # no write bit
             try:
-                rc = self._quiet(lambda: improve.main(
-                    ["trace", "--source", str(src), "--out", str(locked / "sub")]))
+                rc = _run_with_home(home, lambda: self._quiet(lambda: improve.main([
+                    "trace", "--user-wide", "--source", str(src),
+                    "--out", str(locked / "sub")])))
             finally:
                 os.chmod(locked, stat.S_IRWXU)
             self.assertEqual(rc, 2)
@@ -3203,8 +3467,10 @@ class ImproveM1DefectTests(unittest.TestCase):
     def test_explicit_missing_source_exit_1(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
-            rc = self._quiet(lambda: improve.main(
-                ["trace", "--source", str(d / "does-not-exist"), "--out", str(d / "out")]))
+            home = d / "home"
+            rc = _run_with_home(home, lambda: self._quiet(lambda: improve.main([
+                "trace", "--user-wide", "--source", str(d / "does-not-exist"),
+                "--out", str(home / ".waystone" / "improve" / "out")])))
             self.assertEqual(rc, 1)
 
     def test_missing_source_recorded_soft(self):
@@ -5079,10 +5345,11 @@ class EvidenceTests(unittest.TestCase):
                              (o2 / "evidence.jsonl").read_bytes())
             import contextlib
             import io
-            out = Path(d) / "cli"
+            out = home / ".waystone" / "improve" / "cli"
             with contextlib.redirect_stdout(io.StringIO()):
                 rc = _run_with_home(home, lambda: improve.main(
-                    ["evidence", "--out", str(out), "--project", "proj-a"]))
+                    ["evidence", "--user-wide", "--out", str(out),
+                     "--project", "proj-a"]))
             self.assertEqual(rc, 0)
             self.assertEqual([r for r in self._rows(o1) if "task_id" in r],
                              [r for r in self._rows(out) if "task_id" in r])

@@ -5,14 +5,14 @@
 # ///
 """`waystone improve` — mine Claude Code evidence into deterministic, local-only projection tables.
 
-  waystone improve trace   [--source DIR]... [--project SLUG]... [--out DIR]
-  waystone improve reviews [--out DIR]
-  waystone improve audit   [--in DIR]
-  waystone improve decide  <rec-id> accept|reject [--title T] [--note N] [--out DIR]
+  waystone improve trace   [--source DIR]... [--project SLUG]... [--out DIR] [--user-wide]
+  waystone improve reviews [--out DIR] [--user-wide]
+  waystone improve audit   [--in DIR] [--user-wide]
+  waystone improve decide  <rec-id> accept|reject [--title T] [--note N] [--out DIR] [--user-wide]
 
 `trace` walks each source (default `$CLAUDE_CONFIG_DIR/projects`, else `~/.claude/projects`),
 streams every transcript file line-by-line through cclog, and emits three regenerable artifacts
-into --out (default `~/.waystone/improve/`):
+into --out (default `<project>/.waystone/improve/`; `--user-wide` uses `~/.waystone/improve/`):
   sessions.jsonl        one row per transcript (main/subagent/workflow-subagent)
   delegations.jsonl     one row per agent_spawn tool_use
   parse_coverage.json   files-by-kind, event-type counts, unknown/skip/error tallies
@@ -71,16 +71,35 @@ from cclog import (  # noqa: E402
 from common import (  # noqa: E402
     SEVERITIES,
     WorkflowError,
+    ensure_project_state_dir,
+    find_project_root,
     has_project_config,
     load_config,
     load_tasks,
     load_yaml,
     machine_dir,
+    project_state_path,
     registry_path,
 )
 
 HEAD_LEN = 120
 CONTEXT_HEAVY_BYTES = 100 * 1024
+PROJECT_LENS_SCOPE = "project"
+USER_HABIT_LENS_SCOPE = "user-habit"
+
+# Lens selection is mode policy, separate from the unchanged lens calculations below. Cross-scope
+# lenses run over only the projection directory selected by that mode.
+LENS_SCOPES = {
+    "main_direct_work": frozenset({USER_HABIT_LENS_SCOPE}),
+    "verification_debt": frozenset({PROJECT_LENS_SCOPE}),
+    "retry_loops": frozenset({PROJECT_LENS_SCOPE, USER_HABIT_LENS_SCOPE}),
+    "context_heavy": frozenset({PROJECT_LENS_SCOPE, USER_HABIT_LENS_SCOPE}),
+    "delegation_pattern": frozenset({USER_HABIT_LENS_SCOPE}),
+    "error_landscape": frozenset({PROJECT_LENS_SCOPE}),
+    "review_association": frozenset({PROJECT_LENS_SCOPE}),
+    "coverage_caveats": frozenset({PROJECT_LENS_SCOPE, USER_HABIT_LENS_SCOPE}),
+    "evidence_link": frozenset({PROJECT_LENS_SCOPE}),
+}
 
 # ------------------------------------------------------------------ verify-cmd-v2
 # Conservative Bash-command classification. Order matters: TEST, then BUILD (so `tsc --build` is a
@@ -749,9 +768,24 @@ def _registry_path() -> Path:
     return registry_path()
 
 
-def run_reviews(registry_path: Path, out_dir: Path) -> dict:
+def _project_entry(root: Path) -> dict:
+    root = root.resolve()
+    try:
+        name = load_config(root).get("project")
+    except (OSError, yaml.YAMLError, ValueError) as e:
+        raise WorkflowError(f"project config is unreadable: {root} ({type(e).__name__})") from e
+    if not isinstance(name, str) or not name.strip():
+        raise WorkflowError(f"project config has no non-empty project name: {root}")
+    return {"name": name, "path": str(root)}
+
+
+def run_reviews(registry_path: Path, out_dir: Path, project_root: Path | None = None) -> dict:
     entries: list = []
-    if registry_path.is_file():
+    generated_from = str(registry_path)
+    if project_root is not None:
+        entries = [_project_entry(project_root)]
+        generated_from = str(project_root.resolve())
+    elif registry_path.is_file():
         # a MISSING registry is a fresh install (0 projects, exit 0); an EXISTING but corrupt one is
         # a degraded state that must fail loud (§3.8), not masquerade as "no registered projects"
         try:
@@ -791,7 +825,7 @@ def run_reviews(registry_path: Path, out_dir: Path) -> dict:
 
     rows.sort(key=lambda r: (r["project"], r["round_id"]))
     coverage = {
-        "generated_from": str(registry_path),
+        "generated_from": generated_from,
         "projects_total": len(entries),
         "projects_scanned": sorted(scanned),
         "projects_skipped": sorted(skipped, key=lambda s: s["project"]),
@@ -852,10 +886,16 @@ def _project_delegation_rows(root: Path) -> tuple[list[dict], int]:
     return rows, skipped
 
 
-def run_evidence(registry_path: Path, out_dir: Path, projects: set[str]) -> dict:
+def run_evidence(registry_path: Path, out_dir: Path, projects: set[str],
+                 project_root: Path | None = None) -> dict:
     """Project task-id projection joining review findings to delegation evidence. No timestamps:
     identical registry/files yield byte-identical evidence.jsonl (S10)."""
-    entries = _registry_entries(registry_path)
+    generated_from = str(registry_path)
+    if project_root is not None:
+        entries = [_project_entry(project_root)]
+        generated_from = str(project_root.resolve())
+    else:
+        entries = _registry_entries(registry_path)
     if projects:
         entries = [e for e in entries if e.get("name") in projects]
     task_rows: list[dict] = []
@@ -925,7 +965,7 @@ def run_evidence(registry_path: Path, out_dir: Path, projects: set[str]) -> dict
 
     task_rows.sort(key=lambda r: (r["project"], r["task_id"]))
     coverage = {
-        "generated_from": str(registry_path),
+        "generated_from": generated_from,
         "projects_total": len(entries),
         "projects_scanned": sorted(scanned),
         "projects_skipped": sorted(skipped, key=lambda s: s["project"]),
@@ -1219,7 +1259,9 @@ def _lens_evidence_link(rows: list[dict]) -> dict:
         round_session_mapping={"provenance": "unknown"})
 
 
-def run_audit(in_dir: Path) -> dict:
+def run_audit(in_dir: Path, lens_scope: str | None = None) -> dict:
+    if lens_scope not in (None, PROJECT_LENS_SCOPE, USER_HABIT_LENS_SCOPE):
+        raise WorkflowError(f"unknown improve lens scope: {lens_scope!r}")
     present: dict[str, bool] = {}
     data: dict[str, object] = {}
     for key, fname in _AUDIT_INPUTS.items():
@@ -1243,6 +1285,8 @@ def run_audit(in_dir: Path) -> dict:
         ("review_association", "reviews", lambda: _lens_review_association(data["reviews"])),
         ("coverage_caveats", "parse_coverage", lambda: _lens_coverage_caveats(data["parse_coverage"])),
     ]
+    if lens_scope is not None:
+        lens_specs = [spec for spec in lens_specs if lens_scope in LENS_SCOPES[spec[0]]]
     lenses: list[dict] = []
     skipped: list[dict] = []
     for name, req, builder in lens_specs:
@@ -1251,7 +1295,7 @@ def run_audit(in_dir: Path) -> dict:
         else:
             skipped.append({"lens": name, "reason": f"missing {_AUDIT_INPUTS[req]}"})
     evidence_path = in_dir / "evidence.jsonl"
-    if evidence_path.is_file():
+    if (lens_scope is None or lens_scope in LENS_SCOPES["evidence_link"]) and evidence_path.is_file():
         try:
             evidence_rows = _load_jsonl(evidence_path)
         except (OSError, json.JSONDecodeError):
@@ -1269,6 +1313,8 @@ def run_audit(in_dir: Path) -> dict:
         "skipped_lenses": skipped,
         "lenses": lenses,
     }
+    if lens_scope is not None:
+        facts["scope"] = lens_scope
     (in_dir / "facts.json").write_text(_dumps(facts) + "\n", encoding="utf-8")
     return facts
 
@@ -1341,33 +1387,59 @@ def _parse_single_opt(argv: list[str], flag: str) -> str | None:
     return val
 
 
-def _default_out() -> Path:
-    return machine_dir() / "improve"
+def _scope_improve_dir(project_root: Path | None, user_wide: bool) -> Path:
+    if user_wide:
+        return machine_dir() / "improve"
+    if project_root is None:
+        raise WorkflowError("project scope requires a project root")
+    return project_state_path(project_root) / "improve"
 
 
-def _residence_checked(value: str | None, flag: str) -> Path:
-    """Resolve an --out/--in dir, refusing a RELATIVE path (design §14 residence rule): improve
-    outputs are plugin-local behavioral evidence and must never land in a cwd/shared repo. Absolute
-    paths (and the default when value is None) are fine."""
+def _residence_checked(value: str | None, flag: str, project_root: Path | None,
+                       user_wide: bool) -> Path:
+    """Resolve --out/--in inside the improve residence selected by the active scope."""
+    residence = _scope_improve_dir(project_root, user_wide).resolve()
     if value is None:
-        return _default_out()
+        return residence
     p = Path(value).expanduser()
     if not p.is_absolute():
         raise WorkflowError(
             f"{flag} must be an absolute path — a relative path would write behavioral evidence "
-            f"into the current directory (improve outputs are plugin-local): {value!r}")
-    return p
+            f"outside the active improve residence: {value!r}")
+    resolved = p.resolve()
+    if resolved != residence and residence not in resolved.parents:
+        mode = "user-wide" if user_wide else "project"
+        raise WorkflowError(
+            f"{flag} must stay inside the {mode} improve residence {residence}, got {resolved}")
+    return resolved
 
 
-def _cli_trace(argv: list[str]) -> int:
+def _prepare_project_output(project_root: Path | None, user_wide: bool) -> None:
+    if not user_wide:
+        if project_root is None:
+            raise WorkflowError("project scope requires a project root")
+        ensure_project_state_dir(project_root)
+
+
+def _trace_project(root: Path, host: str) -> str:
+    if host == "codex":
+        return root.resolve().name
+    return re.sub(r"[^A-Za-z0-9]", "-", str(root.resolve()))
+
+
+def _cli_trace(argv: list[str], project_root: Path | None, user_wide: bool) -> int:
     try:
         raw_sources, projects, out, explicit_host = _parse_trace_args(argv)
-        out_dir = _residence_checked(out, "--out")
+        if projects and not user_wide:
+            raise WorkflowError("--project requires --user-wide; project mode is fixed to the current root")
+        out_dir = _residence_checked(out, "--out", project_root, user_wide)
     except WorkflowError as e:
         print(f"waystone improve trace: {e}", file=sys.stderr)
         return 1
 
     host = explicit_host or ("codex" if os.environ.get("WAYSTONE_HOST") == "codex" else "claude")
+    if not user_wide:
+        projects = {_trace_project(project_root, host)}
     if raw_sources:
         sources = [Path(s).expanduser().resolve() for s in raw_sources]
         # an EXPLICITLY-named source that is not a directory is a precondition failure (exit 1); the
@@ -1391,7 +1463,11 @@ def _cli_trace(argv: list[str]) -> int:
     sources = [s for s in sources if not (str(s) in seen or seen.add(str(s)))]
 
     try:
+        _prepare_project_output(project_root, user_wide)
         cov = run_trace(sources, projects, out_dir, host=host)
+    except WorkflowError as e:
+        print(f"waystone improve trace: {e}", file=sys.stderr)
+        return 1
     except OSError as e:
         print(f"waystone improve trace: cannot write outputs — {e}", file=sys.stderr)
         return 2
@@ -1401,15 +1477,16 @@ def _cli_trace(argv: list[str]) -> int:
     return 0
 
 
-def _cli_reviews(argv: list[str]) -> int:
+def _cli_reviews(argv: list[str], project_root: Path | None, user_wide: bool) -> int:
     try:
         out = _parse_single_opt(argv, "--out")
-        out_dir = _residence_checked(out, "--out")
+        out_dir = _residence_checked(out, "--out", project_root, user_wide)
     except WorkflowError as e:
         print(f"waystone improve reviews: {e}", file=sys.stderr)
         return 1
     try:
-        cov = run_reviews(_registry_path(), out_dir)
+        _prepare_project_output(project_root, user_wide)
+        cov = run_reviews(_registry_path(), out_dir, None if user_wide else project_root)
     except WorkflowError as e:
         print(f"waystone improve reviews: {e}", file=sys.stderr)
         return 1
@@ -1423,19 +1500,23 @@ def _cli_reviews(argv: list[str]) -> int:
     return 0
 
 
-def _cli_evidence(argv: list[str]) -> int:
+def _cli_evidence(argv: list[str], project_root: Path | None, user_wide: bool) -> int:
     try:
         _sources, projects, out, host = _parse_trace_args(argv)
         if _sources:
             raise WorkflowError("--source is not valid for evidence")
         if host is not None:
             raise WorkflowError("--host is only valid for trace")
-        out_dir = _residence_checked(out, "--out")
+        if projects and not user_wide:
+            raise WorkflowError("--project requires --user-wide; project mode is fixed to the current root")
+        out_dir = _residence_checked(out, "--out", project_root, user_wide)
     except WorkflowError as e:
         print(f"waystone improve evidence: {e}", file=sys.stderr)
         return 1
     try:
-        coverage = run_evidence(_registry_path(), out_dir, projects)
+        _prepare_project_output(project_root, user_wide)
+        coverage = run_evidence(
+            _registry_path(), out_dir, projects, None if user_wide else project_root)
     except WorkflowError as e:
         print(f"waystone improve evidence: {e}", file=sys.stderr)
         return 1
@@ -1448,10 +1529,10 @@ def _cli_evidence(argv: list[str]) -> int:
     return 0
 
 
-def _cli_audit(argv: list[str]) -> int:
+def _cli_audit(argv: list[str], project_root: Path | None, user_wide: bool) -> int:
     try:
         inp = _parse_single_opt(argv, "--in")
-        in_dir = _residence_checked(inp, "--in")
+        in_dir = _residence_checked(inp, "--in", project_root, user_wide)
     except WorkflowError as e:
         print(f"waystone improve audit: {e}", file=sys.stderr)
         return 1
@@ -1460,7 +1541,12 @@ def _cli_audit(argv: list[str]) -> int:
               f"(run `waystone improve trace`/`reviews` first)", file=sys.stderr)
         return 1
     try:
-        facts = run_audit(in_dir)
+        _prepare_project_output(project_root, user_wide)
+        scope = USER_HABIT_LENS_SCOPE if user_wide else PROJECT_LENS_SCOPE
+        facts = run_audit(in_dir, scope)
+    except WorkflowError as e:
+        print(f"waystone improve audit: {e}", file=sys.stderr)
+        return 1
     except OSError as e:
         print(f"waystone improve audit: cannot write outputs — {e}", file=sys.stderr)
         return 2
@@ -1501,15 +1587,19 @@ def _parse_decide_args(argv: list[str]) -> tuple[str, str, str | None, str | Non
     return rec_id, decision, title, note, out
 
 
-def _cli_decide(argv: list[str]) -> int:
+def _cli_decide(argv: list[str], project_root: Path | None, user_wide: bool) -> int:
     try:
         rec_id, decision, title, note, out = _parse_decide_args(argv)
-        out_dir = _residence_checked(out, "--out")
+        out_dir = _residence_checked(out, "--out", project_root, user_wide)
     except WorkflowError as e:
         print(f"waystone improve decide: {e}", file=sys.stderr)
         return 1
     try:
+        _prepare_project_output(project_root, user_wide)
         rec = run_decide(rec_id, decision, title, note, out_dir)
+    except WorkflowError as e:
+        print(f"waystone improve decide: {e}", file=sys.stderr)
+        return 1
     except OSError as e:
         print(f"waystone improve decide: cannot write decision — {e}", file=sys.stderr)
         return 2
@@ -1520,22 +1610,39 @@ def _cli_decide(argv: list[str]) -> int:
 
 def main(argv: list[str]) -> int:
     if not argv:
-        print("waystone improve: expected subcommand (trace|reviews|audit|decide)\n" + __doc__, file=sys.stderr)
+        print("waystone improve: expected subcommand (trace|reviews|evidence|audit|decide)\n" + __doc__,
+              file=sys.stderr)
         return 1
     sub, rest = argv[0], argv[1:]
+    if sub not in ("trace", "reviews", "evidence", "audit", "decide"):
+        print(f"waystone improve: unknown subcommand {sub!r} "
+              f"(expected trace|reviews|evidence|audit|decide)\n" + __doc__,
+              file=sys.stderr)
+        return 1
+    if rest.count("--user-wide") > 1:
+        print(f"waystone improve {sub}: --user-wide may be passed only once", file=sys.stderr)
+        return 1
+    user_wide = "--user-wide" in rest
+    rest = [arg for arg in rest if arg != "--user-wide"]
+    project_root = None if user_wide else find_project_root(Path.cwd())
+    if not user_wide and project_root is None:
+        print(
+            f"waystone improve {sub}: no waystone project found from {Path.cwd()} "
+            "(run inside a project or pass --user-wide)",
+            file=sys.stderr,
+        )
+        return 1
     if sub == "trace":
-        return _cli_trace(rest)
+        return _cli_trace(rest, project_root, user_wide)
     if sub == "reviews":
-        return _cli_reviews(rest)
+        return _cli_reviews(rest, project_root, user_wide)
     if sub == "evidence":
-        return _cli_evidence(rest)
+        return _cli_evidence(rest, project_root, user_wide)
     if sub == "audit":
-        return _cli_audit(rest)
+        return _cli_audit(rest, project_root, user_wide)
     if sub == "decide":
-        return _cli_decide(rest)
-    print(f"waystone improve: unknown subcommand {sub!r} (expected trace|reviews|audit|decide)\n" + __doc__,
-          file=sys.stderr)
-    return 1
+        return _cli_decide(rest, project_root, user_wide)
+    raise AssertionError("unreachable improve subcommand")
 
 
 if __name__ == "__main__":
