@@ -5787,6 +5787,44 @@ class MigrationV2Phase1Tests(unittest.TestCase):
             self.assertIn("2 decision row", err.getvalue())
             self.assertIn("waystone improve trace --host codex", err.getvalue())
 
+    def test_decisions_merge_marker_prevents_duplicate_rows_after_interruption(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            home = d / "home"
+            source = home / ".claude" / "waystone" / "improve" / "decisions.jsonl"
+            source.parent.mkdir(parents=True)
+            _write_jsonl(source, [{"rec_id": "one", "at": "2026-07-15T01:00:00Z"}])
+            original = common._preserve_phase1_root
+            common._preserve_phase1_root = lambda _root: (_ for _ in ()).throw(
+                RuntimeError("injected after decisions merge"))
+            try:
+                with self.assertRaisesRegex(RuntimeError, "injected"):
+                    self._run(home, lambda: common.migrate_home_data(home))
+            finally:
+                common._preserve_phase1_root = original
+
+            destination = home / ".waystone" / "improve"
+            self.assertEqual(len(list(destination.glob(".merged-*"))), 1)
+            self._run(home, lambda: common.migrate_home_data(home))
+            rows = (destination / "decisions.jsonl").read_text().splitlines()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(_json.loads(rows[0])["rec_id"], "one")
+
+    def test_decisions_merge_preserves_legitimate_duplicate_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            home = d / "home"
+            row = {"rec_id": "same", "at": "2026-07-15T01:00:00Z"}
+            for host in (".claude", ".codex"):
+                source = home / host / "waystone" / "improve" / "decisions.jsonl"
+                source.parent.mkdir(parents=True)
+                _write_jsonl(source, [row])
+
+            self._run(home, lambda: common.migrate_home_data(home))
+
+            lines = (home / ".waystone" / "improve" / "decisions.jsonl").read_text().splitlines()
+            self.assertEqual([_json.loads(line) for line in lines], [row, row])
+
     def test_profile_stays_preserved_worktrees_stay_at_original_path_and_orphans_report(self):
         import contextlib
         import io
@@ -5939,6 +5977,34 @@ class MigrationV2Phase2Tests(unittest.TestCase):
                 self.assertEqual((self._source(home, host) / "profile.yml").read_text(), self.PROFILE)
             self.assertIn("seeded", err.getvalue())
 
+    def test_profile_seed_recovers_after_atomic_replace_commits_then_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(Path(d))
+            source = self._source(home, "claude")
+            source.mkdir(parents=True)
+            profile = source / "profile.yml"
+            profile.write_text(self.PROFILE)
+            live = (root / ".waystone" / "profile.yml").resolve()
+            original = common.os.replace
+
+            def replace_then_raise(old, new):
+                original(old, new)
+                if Path(new) == live:
+                    raise RuntimeError("injected after profile replace")
+
+            common.os.replace = replace_then_raise
+            try:
+                with self.assertRaisesRegex(RuntimeError, "injected"):
+                    _run_with_home(home, lambda: common.migrate_project_state(root))
+            finally:
+                common.os.replace = original
+
+            self.assertEqual(live.read_text(), self.PROFILE)
+            self.assertEqual(profile.read_text(), self.PROFILE)
+            _run_with_home(home, lambda: common.migrate_project_state(root))
+            self.assertEqual(live.read_text(), self.PROFILE)
+            self.assertEqual(profile.read_text(), self.PROFILE)
+
     def test_different_host_profiles_fail_loud_without_writing(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(Path(d))
@@ -6046,6 +6112,38 @@ class MigrationV2Phase2Tests(unittest.TestCase):
             self.assertFalse(newer.exists())
             self.assertIn("conflict", err.getvalue().lower())
 
+    def test_file_move_recovers_after_atomic_replace_commits_then_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(Path(d))
+            slug = common._project_slug(root)
+            source = self._source(home, "claude") / "start_here" / f"{slug}.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("frontier")
+            live = (root / ".waystone" / "start-here.md").resolve()
+            original = common.os.replace
+
+            def replace_then_raise(old, new):
+                original(old, new)
+                if Path(new) == live:
+                    raise RuntimeError("injected after file replace")
+
+            common.os.replace = replace_then_raise
+            try:
+                with self.assertRaisesRegex(RuntimeError, "injected"):
+                    _run_with_home(home, lambda: common.migrate_project_state(root))
+            finally:
+                common.os.replace = original
+
+            self.assertEqual(live.read_text(), "frontier")
+            self.assertEqual(source.read_text(), "frontier")
+            _run_with_home(home, lambda: common.migrate_project_state(root))
+            self.assertEqual(live.read_text(), "frontier")
+            self.assertFalse(source.exists())
+            conflicts = root / ".waystone" / "migration-conflicts"
+            self.assertFalse(conflicts.exists() and any(
+                path.is_file() and path.read_text() == "frontier"
+                for path in conflicts.rglob("*")))
+
     def test_phase2_is_self_extinguishing_and_second_run_changes_nothing(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(Path(d))
@@ -6121,21 +6219,17 @@ class MigrationV2Phase2Tests(unittest.TestCase):
             self.assertIn(str(new), listing)
             self.assertNotIn(str(old), listing)
 
-    def test_worktree_move_failure_uses_filesystem_move_then_repair(self):
+    def test_worktree_move_failure_uses_filesystem_move_then_real_repair(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(Path(d))
             slug, _record, old = self._legacy_record_and_worktree(root, home, "did-repair")
-            old.mkdir(parents=True)
-            (old / "sentinel").write_text("kept")
-            calls = []
+            old.parent.mkdir(parents=True, exist_ok=True)
+            self.assertEqual(git(root, "worktree", "add", "--detach", str(old), "HEAD").returncode, 0)
             original = common.git_rc
 
             def fake_git_rc(project, *args):
-                calls.append((project, args))
                 if args[:2] == ("worktree", "move"):
                     return 1, "", "move failed"
-                if args[:2] == ("worktree", "repair"):
-                    return 0, "", ""
                 return original(project, *args)
 
             common.git_rc = fake_git_rc
@@ -6144,10 +6238,55 @@ class MigrationV2Phase2Tests(unittest.TestCase):
             finally:
                 common.git_rc = original
             new = home / ".waystone" / "cache" / "worktrees" / slug / "did-repair"
-            self.assertEqual((new / "sentinel").read_text(), "kept")
-            self.assertEqual([args[0] for _project, args in calls], ["worktree", "worktree"])
-            self.assertEqual(calls[0][1][1], "move")
-            self.assertEqual(calls[1][1][1], "repair")
+            self.assertEqual(git(new, "rev-parse", "--git-dir").returncode, 0)
+            listing = git(root, "worktree", "list", "--porcelain").stdout
+            self.assertIn(str(new), listing)
+            self.assertNotIn(str(old), listing)
+            self.assertFalse(new.with_name(f"{new.name}.migrating").exists())
+
+    def test_worktree_fallback_resumes_after_move_commits_then_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(Path(d))
+            slug, _record, old = self._legacy_record_and_worktree(root, home, "did-resume")
+            old.parent.mkdir(parents=True, exist_ok=True)
+            self.assertEqual(git(root, "worktree", "add", "--detach", str(old), "HEAD").returncode, 0)
+            new = home / ".waystone" / "cache" / "worktrees" / slug / "did-resume"
+            marker = new.with_name(f"{new.name}.migrating")
+            original_git_rc = common.git_rc
+            original_move = common.shutil.move
+
+            def fail_native_move(project, *args):
+                if args[:2] == ("worktree", "move"):
+                    return 1, "", "move failed"
+                return original_git_rc(project, *args)
+
+            def move_then_raise(source, destination):
+                result = original_move(source, destination)
+                if Path(source) == old and Path(destination) == new:
+                    raise RuntimeError("injected after worktree move")
+                return result
+
+            common.git_rc = fail_native_move
+            common.shutil.move = move_then_raise
+            try:
+                with self.assertRaisesRegex(RuntimeError, "injected"):
+                    _run_with_home(home, lambda: common.migrate_project_state(root))
+            finally:
+                common.shutil.move = original_move
+
+            self.assertEqual(marker.read_text(), str(old))
+            self.assertTrue(new.is_dir())
+            self.assertFalse(old.exists())
+            try:
+                _run_with_home(home, lambda: common.migrate_project_state(root))
+            finally:
+                common.git_rc = original_git_rc
+
+            self.assertFalse(marker.exists())
+            self.assertEqual(git(new, "rev-parse", "--git-dir").returncode, 0)
+            listing = git(root, "worktree", "list", "--porcelain").stdout
+            self.assertIn(str(new), listing)
+            self.assertNotIn(str(old), listing)
 
     def test_worktree_repair_failure_marks_record_discard_only_and_warns(self):
         import contextlib

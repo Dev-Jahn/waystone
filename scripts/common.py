@@ -204,6 +204,41 @@ def _write_text_atomic(path: Path, text: str) -> None:
         raise
 
 
+def _copy_file_atomic(source: Path, destination: Path, *, remove_source: bool) -> None:
+    _regular_file(source, "source file")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp",
+                delete=False) as stream:
+            tmp = Path(stream.name)
+        shutil.copy2(source, tmp)
+        os.replace(tmp, destination)
+        if remove_source:
+            source.unlink()
+    except BaseException:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+        raise
+
+
+def _move_entry(source: Path, destination: Path) -> None:
+    mode = source.lstat().st_mode
+    if stat.S_ISLNK(mode):
+        raise WorkflowError(f"migration refuses symlinked source entry: {source}")
+    if stat.S_ISREG(mode):
+        _copy_file_atomic(source, destination, remove_source=True)
+        return
+    if stat.S_ISDIR(mode):
+        shutil.move(str(source), str(destination))
+        return
+    raise WorkflowError(f"migration refuses unsupported source entry: {source}")
+
+
 def _merge_registries(sources: list[tuple[str, Path]], destination: Path) -> list[dict]:
     registry = _read_registry(destination)
     merged: list[dict] = []
@@ -267,11 +302,6 @@ def _decision_lines(path: Path, order: int) -> list[tuple[float, int, int, str]]
 
 def _migrate_improve(sources: list[tuple[str, Path]], destination: Path) -> None:
     machine_improve = destination / "improve"
-    decision_sources = [("machine", machine_improve / "decisions.jsonl")]
-    decision_sources.extend((host, root / "improve" / "decisions.jsonl") for host, root in sources)
-    rows: list[tuple[float, int, int, str]] = []
-    for order, (_host, path) in enumerate(decision_sources):
-        rows.extend(_decision_lines(path, order))
 
     claude_root = next((root for host, root in sources if host == "claude"), None)
     if claude_root is not None:
@@ -288,7 +318,7 @@ def _migrate_improve(sources: list[tuple[str, Path]], destination: Path) -> None
                     )
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(child), str(target))
+                _move_entry(child, target)
                 print(f"waystone migration: moved improve projection {child} -> {target}",
                       file=sys.stderr)
 
@@ -304,10 +334,29 @@ def _migrate_improve(sources: list[tuple[str, Path]], destination: Path) -> None
                 file=sys.stderr,
             )
 
-    if rows:
+    decision_sources = [
+        (host, root / "improve" / "decisions.jsonl") for host, root in sources]
+    pending: list[tuple[Path, Path]] = []
+    for _host, path in decision_sources:
+        if not _regular_file(path, "decisions file"):
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        marker = machine_improve / f".merged-{digest}"
+        if _lexists(marker):
+            _regular_file(marker, "decisions merge marker")
+            continue
+        pending.append((path, marker))
+
+    if pending:
+        rows = _decision_lines(machine_improve / "decisions.jsonl", 0)
+        for order, (path, _marker) in enumerate(pending, 1):
+            rows.extend(_decision_lines(path, order))
         rows.sort(key=lambda row: (row[0], row[1], row[2]))
         _write_text_atomic(
             machine_improve / "decisions.jsonl", "".join(f"{row[3]}\n" for row in rows))
+        for marker in dict.fromkeys(marker for _path, marker in pending):
+            if not _lexists(marker):
+                _write_text_atomic(marker, "")
         print(
             f"waystone migration: merged {len(rows)} decision row(s) by timestamp -> "
             f"{machine_improve / 'decisions.jsonl'}",
@@ -353,12 +402,12 @@ def _merge_phase1_project_area(child: Path, target: Path, preserved: Path) -> bo
         destination = target / item.name
         if _lexists(destination):
             continue
-        shutil.move(str(item), str(destination))
+        _move_entry(item, destination)
         changed = True
     if not any(child.iterdir()):
         empty_target = _phase1_conflict_path(preserved, child)
         empty_target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(child), str(empty_target))
+        _move_entry(child, empty_target)
         changed = True
     return changed
 
@@ -418,13 +467,13 @@ def _preserve_phase1_root(root: Path) -> None:
                     and child.read_bytes() == target.read_bytes()):
                 conflict = _phase1_conflict_path(preserved, child)
                 conflict.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(child), str(conflict))
+                _move_entry(child, conflict)
                 changed = True
                 continue
             if child.name != "profile.yml":
                 conflict = _phase1_conflict_path(preserved, child)
                 conflict.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(child), str(conflict))
+                _move_entry(child, conflict)
                 print(
                     f"waystone migration: preservation conflict {child} -> {target}; "
                     f"preserved re-entry copy at {conflict}",
@@ -438,7 +487,7 @@ def _preserve_phase1_root(root: Path) -> None:
                 file=sys.stderr,
             )
             continue
-        shutil.move(str(child), str(target))
+        _move_entry(child, target)
         changed = True
     if _lexists(worktrees) and changed:
         print(
@@ -448,7 +497,7 @@ def _preserve_phase1_root(root: Path) -> None:
     if not _lexists(worktrees) and not any(root.iterdir()):
         empty_target = _unique_path(preserved / "phase1-reentries" / root.name)
         empty_target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(root), str(empty_target))
+        _move_entry(root, empty_target)
 
 
 def migrate_home_data(home: Path | None = None) -> Path:
@@ -464,7 +513,7 @@ def migrate_home_data(home: Path | None = None) -> Path:
         for child in sorted(old.iterdir()):
             if child.name == "worktrees":
                 continue
-            shutil.move(str(child), str(claude / child.name))
+            _move_entry(child, claude / child.name)
         if not any(old.iterdir()):
             old.rmdir()
     elif old_present and claude_present:
@@ -538,7 +587,7 @@ def _unique_path(path: Path) -> Path:
 def _quarantine(state: Path, host: str, logical: Path, source: Path) -> Path:
     target = _unique_path(state / "migration-conflicts" / host / logical)
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(source), str(target))
+    _move_entry(source, target)
     return target
 
 
@@ -578,11 +627,14 @@ def _migrate_file(state: Path, logical: Path, candidates: list[tuple[str, Path]]
 
     if not winner["live"]:
         live.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(winner["path"]), str(live))
+        _copy_file_atomic(winner["path"], live, remove_source=True)
 
     for row in rows:
         path = row["path"]
         if row["live"] or path == winner["path"] or not _lexists(path):
+            continue
+        if row["bytes"] == chosen:
+            path.unlink()
             continue
         preserved = _quarantine(state, row["host"], logical, path)
         if row["bytes"] != chosen:
@@ -631,7 +683,7 @@ def _profile_seed(root: Path, state: Path, sources: list[tuple[str, Path]]) -> N
             f"legacy profile conflict for {root}: {paths}; choose the project profile manually")
     chosen = next((path for host, path in profiles if host == "claude"), profiles[0][1])
     _ensure_project_state_raw(root)
-    shutil.copy2(chosen, live)
+    _copy_file_atomic(chosen, live, remove_source=False)
     print(
         f"waystone migration: seeded project profile {live} from {chosen}; legacy seed preserved",
         file=sys.stderr,
@@ -717,10 +769,87 @@ def _mark_worktree_discard_only(state: Path, did: str, reason: str) -> None:
     _write_text_atomic(status_path, json.dumps(status, ensure_ascii=False, indent=2) + "\n")
 
 
+def _worktree_migration_marker(new: Path) -> Path:
+    return new.with_name(f"{new.name}.migrating")
+
+
+def _worktree_is_valid(path: Path) -> tuple[bool, str]:
+    rc, _out, error = git_rc(path, "rev-parse", "--git-dir")
+    return rc == 0, error or str(rc)
+
+
+def _finish_worktree_fallback(
+        root: Path, state: Path, did: str, old: Path, new: Path, marker: Path,
+        move_error: str) -> bool:
+    repair_rc, _out, repair_error = git_rc(root, "worktree", "repair", str(new))
+    valid, validation_error = _worktree_is_valid(new) if repair_rc == 0 else (False, "")
+    if repair_rc == 0 and valid:
+        marker.unlink()
+        git_rc(root, "worktree", "unlock", str(new))
+        print(
+            f"waystone migration: git worktree move failed ({move_error}); "
+            f"moved {old} -> {new} and repaired git metadata",
+            file=sys.stderr,
+        )
+        return True
+
+    reason = "; ".join(part for part in (
+        f"git worktree move: {move_error}",
+        f"fallback repair: {repair_error or repair_rc}" if repair_rc else "",
+        f"fallback validation: {validation_error}" if repair_rc == 0 and not valid else "",
+    ) if part)
+    _mark_worktree_discard_only(state, did, reason)
+    print(
+        f"waystone migration: WARNING — WORKTREE MIGRATION FAILED FOR {did}; "
+        f"DELEGATION IS DISCARD-ONLY. {reason}",
+        file=sys.stderr,
+    )
+    return False
+
+
+def _pending_worktree_markers(slug: str) -> dict[str, tuple[Path, Path, Path]]:
+    directory = worktrees_cache_dir() / slug
+    if not _real_directory(directory, "worktree cache slug directory"):
+        return {}
+    pending = {}
+    for marker in sorted(directory.glob("*.migrating")):
+        _regular_file(marker, "worktree migration marker")
+        did = marker.name.removesuffix(".migrating")
+        old_text = marker.read_text(encoding="utf-8")
+        old = Path(old_text)
+        if not old.is_absolute() or old.name != did or old.parent.name != slug:
+            raise WorkflowError(f"invalid worktree migration marker {marker}: {old_text!r}")
+        new = directory / did
+        if _lexists(new):
+            _real_directory(new, "migrating worktree destination")
+            if _lexists(old):
+                raise WorkflowError(
+                    f"worktree migration has both source and destination: {old}, {new}")
+        pending[did] = (old, new, marker)
+    return pending
+
+
 def _migrate_worktree(root: Path, state: Path, slug: str, did: str, old: Path) -> None:
     new = worktrees_cache_dir() / slug / did
     new.parent.mkdir(parents=True, exist_ok=True)
-    move_rc, _out, move_err = git_rc(root, "worktree", "move", str(old), str(new))
+    marker = _worktree_migration_marker(new)
+    resuming = False
+    if _lexists(marker):
+        resuming = True
+        _regular_file(marker, "worktree migration marker")
+        marker_old = marker.read_text(encoding="utf-8")
+        if marker_old != str(old):
+            raise WorkflowError(
+                f"worktree migration marker source mismatch: {marker} contains {marker_old!r}, "
+                f"expected {str(old)!r}")
+        if _lexists(new):
+            if _lexists(old):
+                raise WorkflowError(
+                    f"worktree migration has both source and destination: {old}, {new}")
+            _finish_worktree_fallback(root, state, did, old, new, marker, "previous attempt")
+            return
+    move_rc, _out, move_err = ((1, "", "previous attempt") if resuming else
+                               git_rc(root, "worktree", "move", str(old), str(new)))
     if move_rc == 0:
         print(f"waystone migration: moved worktree {old} -> {new} with git worktree move",
               file=sys.stderr)
@@ -730,41 +859,38 @@ def _migrate_worktree(root: Path, state: Path, slug: str, did: str, old: Path) -
     if _lexists(new):
         filesystem_error = f"destination already exists: {new}"
     else:
+        git_rc(root, "worktree", "lock", str(old))
+        _write_text_atomic(marker, str(old))
         try:
             shutil.move(str(old), str(new))
         except OSError as e:
             filesystem_error = str(e)
-    repair_rc, _out, repair_err = ((1, "", filesystem_error) if filesystem_error else
-                                   git_rc(root, "worktree", "repair", str(new)))
-    if repair_rc == 0:
+    if filesystem_error:
+        reason = "; ".join((
+            f"git worktree move: {move_err or move_rc}",
+            f"fallback move: {filesystem_error}",
+        ))
+        _mark_worktree_discard_only(state, did, reason)
         print(
-            f"waystone migration: git worktree move failed ({move_err or move_rc}); "
-            f"moved {old} -> {new} and repaired git metadata",
+            f"waystone migration: WARNING — WORKTREE MIGRATION FAILED FOR {did}; "
+            f"DELEGATION IS DISCARD-ONLY. {reason}",
             file=sys.stderr,
         )
         return
-
-    reason = "; ".join(part for part in (
-        f"git worktree move: {move_err or move_rc}",
-        f"fallback move/repair: {repair_err or repair_rc}",
-    ) if part)
-    _mark_worktree_discard_only(state, did, reason)
-    print(
-        f"waystone migration: WARNING — WORKTREE MIGRATION FAILED FOR {did}; "
-        f"DELEGATION IS DISCARD-ONLY. {reason}",
-        file=sys.stderr,
-    )
+    _finish_worktree_fallback(
+        root, state, did, old, new, marker, move_err or str(move_rc))
 
 
 def migrate_project_state(root: Path, home: Path | None = None) -> bool:
     """Phase 2: lazily move one project's legacy host-keyed state into its project-local tier."""
     # 0.9.0-b adds the short project-lock span around this entry point; C2 must remain lock-free.
     root = Path(root).resolve()
+    slug = _project_slug(root)
+    pending_worktrees = _pending_worktree_markers(slug)
     sources = _phase2_sources(home)
     worktree_sources = _phase2_worktree_sources(home)
-    if not sources and not worktree_sources:
+    if not sources and not worktree_sources and not pending_worktrees:
         return False
-    slug = _project_slug(root)
     state = root / ".waystone"
     try:
         _real_directory(state, "project state directory")
@@ -793,10 +919,19 @@ def migrate_project_state(root: Path, home: Path | None = None) -> bool:
         has_project_items = has_project_items or any(
             path.is_dir() for source_list in trees.values() for _host, path in source_list)
         has_project_items = has_project_items or bool(delegations) or bool(worktrees)
+        has_project_items = has_project_items or bool(pending_worktrees)
         if not profile_needs_seed and not has_project_items:
             return False
 
         _ensure_project_state_raw(root)
+        for did, (old, new, marker) in pending_worktrees.items():
+            if not _lexists(new):
+                if not _lexists(old):
+                    raise WorkflowError(
+                        f"worktree migration marker has neither source nor destination: {marker}")
+                continue
+            _finish_worktree_fallback(
+                root, state, did, old, new, marker, "previous attempt")
         _profile_seed(root, state, sources)
         _migrate_file(state, Path("resume.md"), resume)
         _migrate_file(state, Path("start-here.md"), start_here)
@@ -812,6 +947,8 @@ def migrate_project_state(root: Path, home: Path | None = None) -> bool:
             _migrate_tree(state, Path("delegations") / did, candidates)
 
         for did, candidates in worktrees.items():
+            if did in pending_worktrees and not _lexists(candidates[0][1]):
+                continue
             if len(candidates) > 1:
                 if did not in blocked:
                     _warn_did_collision(did, candidates)
