@@ -8807,7 +8807,7 @@ class CodexPluginContractTests(unittest.TestCase):
         codex = _json.loads((root / ".codex-plugin" / "plugin.json").read_text())
         self.assertEqual((claude["name"], claude["version"]),
                          (codex["name"], codex["version"]))
-        self.assertEqual(codex["version"], "0.8.3")
+        self.assertEqual(codex["version"], "0.9.0")
         self.assertEqual(codex["skills"], "./skills/")
         self.assertNotIn("hooks", codex)
         for field in ("logo", "logoDark"):
