@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
+import math
 import os
 import re
 import shutil
@@ -10,6 +12,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -128,6 +132,99 @@ def worktrees_cache_dir(home: Path | None = None) -> Path:
 
 def registry_path(home: Path | None = None) -> Path:
     return machine_dir(home) / "projects.json"
+
+
+def _lock_verb() -> str:
+    """Best-effort diagnostic verb; flock, not this label, is the lock authority."""
+    argv = [str(arg) for arg in sys.argv]
+    program = Path(argv[0]).stem.removesuffix(".py") if argv else "waystone"
+    args = argv[1:]
+    if program == "waystone":
+        return " ".join(args[:2]) or "waystone"
+    group = {"tasks": "task", "tasks_guard": "tasks-guard"}.get(program, program)
+    return " ".join([group, *args[:1]])
+
+
+def _lock_timeout(timeout: float | None) -> float:
+    raw = os.environ.get("WAYSTONE_LOCK_TIMEOUT", "10") if timeout is None else timeout
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as e:
+        raise WorkflowError(f"WAYSTONE_LOCK_TIMEOUT must be a non-negative finite number, got {raw!r}") from e
+    if not math.isfinite(value) or value < 0:
+        raise WorkflowError(f"WAYSTONE_LOCK_TIMEOUT must be a non-negative finite number, got {raw!r}")
+    return value
+
+
+def _lock_holder_message(path: Path, stream) -> str:
+    try:
+        stream.seek(0)
+        holder = json.loads(stream.read() or "{}")
+    except (OSError, ValueError, TypeError):
+        holder = {}
+    if not isinstance(holder, dict):
+        holder = {}
+    pid = holder.get("pid", "unknown")
+    host = holder.get("host", "unknown")
+    verb = holder.get("verb", "unknown")
+    at = holder.get("at")
+    try:
+        since = datetime.fromisoformat(str(at)).strftime("%H:%M:%S")
+    except ValueError:
+        since = str(at or "unknown")
+    return (f"waystone: {path} is held by pid {pid} ({host}, {verb}, since {since}) — "
+            "retry after it finishes, or raise WAYSTONE_LOCK_TIMEOUT")
+
+
+@contextmanager
+def hold_lock(path: Path, timeout: float | None = None):
+    """Hold one persistent flock marker; the file is diagnostic only and is never unlinked."""
+    path = Path(path)
+    wait = _lock_timeout(timeout)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stream = path.open("a+", encoding="utf-8")
+    except OSError as e:
+        raise WorkflowError(f"waystone: cannot open lock {path}: {e}") from e
+
+    acquired = False
+    started = time.monotonic()
+    try:
+        while True:
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                remaining = wait - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise WorkflowError(_lock_holder_message(path, stream))
+                time.sleep(min(0.1, remaining))
+            except OSError as e:
+                raise WorkflowError(f"waystone: cannot lock {path}: {e}") from e
+
+        holder = {
+            "pid": os.getpid(),
+            "host": os.environ.get("WAYSTONE_HOST", "unknown"),
+            "verb": _lock_verb(),
+            "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        try:
+            stream.seek(0)
+            stream.truncate()
+            stream.write(json.dumps(holder, ensure_ascii=False) + "\n")
+            stream.flush()
+        except OSError as e:
+            raise WorkflowError(f"waystone: cannot write lock diagnostics {path}: {e}") from e
+        yield
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            finally:
+                stream.close()
+        else:
+            stream.close()
 
 
 def _legacy_claude_root(home: Path | None = None) -> Path:

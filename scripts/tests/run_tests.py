@@ -50,6 +50,53 @@ def init_repo(root: Path):
     git(root, "commit", "-qm", "c0")
 
 
+class LockPrimitiveTests(unittest.TestCase):
+    def test_hold_lock_records_diagnostics_and_never_unlinks_marker(self):
+        import json as _json
+        import os
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            lock = Path(d) / "state" / "lock"
+            with mock.patch.dict(os.environ, {"WAYSTONE_HOST": "codex"}, clear=False), \
+                    mock.patch.object(sys, "argv", ["waystone.py", "round", "close"]):
+                with common.hold_lock(lock, timeout=0.2):
+                    holder = _json.loads(lock.read_text())
+                    self.assertEqual(holder["pid"], os.getpid())
+                    self.assertEqual(holder["host"], "codex")
+                    self.assertEqual(holder["verb"], "round close")
+                    self.assertIn("at", holder)
+            self.assertTrue(lock.is_file())
+
+    def test_hold_lock_timeout_reports_holder_and_env_default(self):
+        import fcntl
+        import json as _json
+        import os
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            lock = Path(d) / "lock"
+            holder = {"pid": 4242, "host": "codex", "verb": "round close",
+                      "at": "2026-07-15T12:03:11+00:00"}
+            stream = lock.open("a+", encoding="utf-8")
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                stream.write(_json.dumps(holder) + "\n")
+                stream.flush()
+                with mock.patch.dict(os.environ, {"WAYSTONE_LOCK_TIMEOUT": "0.02"}, clear=False):
+                    with self.assertRaises(common.WorkflowError) as cm:
+                        with common.hold_lock(lock):
+                            self.fail("contended lock must never enter the protected section")
+                message = str(cm.exception)
+                self.assertIn(str(lock), message)
+                self.assertIn("pid 4242", message)
+                self.assertIn("codex, round close, since 12:03:11", message)
+                self.assertIn("raise WAYSTONE_LOCK_TIMEOUT", message)
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                stream.close()
+
+
 class MarkerTests(unittest.TestCase):
     def test_emit_parse_roundtrip(self):
         s = review.emit_marker("review-cycle", {"round_id": "2026-06-15-x", "cycle": 1,
