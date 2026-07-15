@@ -4318,6 +4318,45 @@ class DelegateRunTests(unittest.TestCase):
                     self._run(root, home, self._fake_runner({"impl.py": "y\n"}))
             self.assertIn("already has active delegation", str(cm.exception))
 
+    def test_claim_without_exposure_blocks_second_cli_run(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            fake = self._fake_runner({"impl.py": "x\n"})
+            original_snapshot = delegate._snapshot
+            original_runner = delegate._run_codex
+            observed = {}
+
+            def snapshot(cwd, message, *, exclude_uv_cache=False):
+                if Path(cwd).resolve() == root.resolve() and not observed:
+                    records = sorted(delegate._delegations_dir(root).iterdir())
+                    self.assertEqual(len(records), 1)
+                    claim = records[0] / "claim.json"
+                    self.assertTrue(claim.is_file())
+                    self.assertFalse((records[0] / "exposure.json").exists())
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err):
+                        observed["second_rc"] = delegate.main(
+                            ["run", "feat/xyz", "--root", str(root)])
+                    observed["second_err"] = err.getvalue()
+                return original_snapshot(cwd, message, exclude_uv_cache=exclude_uv_cache)
+
+            delegate._snapshot = snapshot
+            delegate._run_codex = fake
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    first_rc = _run_with_home(
+                        home, lambda: delegate.main(
+                            ["run", "feat/xyz", "--root", str(root)]))
+            finally:
+                delegate._snapshot = original_snapshot
+                delegate._run_codex = original_runner
+            self.assertEqual(first_rc, 0)
+            self.assertEqual(observed["second_rc"], 1)
+            self.assertIn("already has active delegation", observed["second_err"])
+
 
 def _deleg_project(d) -> tuple[Path, Path]:
     root = Path(d) / "repo"
@@ -4423,6 +4462,61 @@ class DelegateApplyTests(unittest.TestCase):
             self.assertTrue((rec / "artifact" / "contract.yaml").exists())   # record preserved
             self.assertNotEqual(git(root, "rev-parse", "--verify",
                                     f"refs/waystone/delegations/{rec.name}").returncode, 0)  # ref gone
+
+    def test_apply_cli_holds_project_then_record_lock_during_mutation(self):
+        import contextlib
+        import fcntl
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            _deleg_run(root, home, _deleg_fake({"impl.py": "print('x')\n"}))
+            rec = _latest_rec(root, home)
+            original_apply = delegate.apply_delegation
+
+            def checked_apply(project, did):
+                with common.project_lock_path(project).open("a+", encoding="utf-8") as stream:
+                    try:
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        project_lock_held = True
+                    else:
+                        project_lock_held = False
+                        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                self.assertTrue(project_lock_held)
+                self.assertTrue((rec / "record.lock").is_file())
+                return original_apply(project, did)
+
+            delegate.apply_delegation = checked_apply
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = _run_with_home(home, lambda: delegate.main(
+                        ["apply", rec.name, "--root", str(root)]))
+            finally:
+                delegate.apply_delegation = original_apply
+            self.assertEqual(rc, 0)
+            self.assertTrue((root / "impl.py").is_file())
+
+    def test_apply_cli_times_out_when_project_lock_is_preempted(self):
+        import contextlib
+        import io
+        import os
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            _deleg_run(root, home, _deleg_fake({"impl.py": "print('x')\n"}))
+            rec = _latest_rec(root, home)
+            err = io.StringIO()
+            with mock.patch.dict(os.environ, {"WAYSTONE_LOCK_TIMEOUT": "0.02"}, clear=False), \
+                    common.hold_lock(common.project_lock_path(root), timeout=0.2), \
+                    contextlib.redirect_stderr(err):
+                rc = _run_with_home(home, lambda: delegate.main(
+                    ["apply", rec.name, "--root", str(root)]))
+            self.assertEqual(rc, 1)
+            self.assertIn("is held by pid", err.getvalue())
+            self.assertFalse((root / "impl.py").exists())
+            self.assertEqual(delegate._read_status(rec)["state"], "needs-review")
 
     def test_apply_drift_is_atomic_exit1(self):
         with tempfile.TemporaryDirectory() as d:

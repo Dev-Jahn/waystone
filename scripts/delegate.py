@@ -430,8 +430,20 @@ def _iter_delegations(root: Path):
     if not ddir.is_dir():
         return
     for sub in sorted(ddir.iterdir()):
-        if sub.is_dir() and (sub / "exposure.json").exists():
+        if sub.is_dir() and ((sub / "claim.json").exists() or (sub / "exposure.json").exists()):
             yield sub.name, sub
+
+
+def _load_claim(rec: Path) -> dict:
+    p = rec / "claim.json"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise WorkflowError(f"corrupt claim.json in delegation record: {p} ({e})")
+    if (not isinstance(data, dict) or data.get("schema") != "waystone-delegation-claim-1"
+            or not isinstance(data.get("task_id"), str)):
+        raise WorkflowError(f"corrupt claim.json in delegation record: {p}")
+    return data
 
 
 def _load_exposure(rec: Path) -> dict:
@@ -468,17 +480,19 @@ def _active_delegation_for_task(root: Path, task_id: str) -> tuple[str, str] | N
         if state in TERMINAL_STATES:
             continue
         try:
-            tid = _load_exposure(sub).get("task_id")
+            claim_only = not (sub / "exposure.json").exists()
+            tid = (_load_claim(sub) if claim_only else _load_exposure(sub)).get("task_id")
         except WorkflowError:
             tid = None
+            claim_only = not (sub / "exposure.json").exists()
         if tid is not None and tid != task_id:
             continue  # a healthy record of another task never blocks this one
         if st is None or tid is None:
-            broken = "status.json" if st is None else "exposure.json"
+            broken = "status.json" if st is None else ("claim.json" if claim_only else "exposure.json")
             raise WorkflowError(
                 f"delegation record {did} has a corrupt {broken} — treated as an active lock (fail-safe); "
                 f"run `waystone delegate discard {did}` to clear it")
-        return did, state
+        return did, "claimed" if claim_only and state is None else state
     return None
 
 
@@ -557,10 +571,7 @@ def _add_worktree(root: Path, worktree_path: Path, base_sha: str) -> None:
 
 
 # ---- run (§§3-10 — the delegation vertical slice) -----------------------------
-def run_delegation(root: Path, task_id: str, role: str, accept_flags: list[str]) -> int:
-    """Snapshot -> worktree -> env prep -> runner -> artifact. Prints `key: value` progress to stdout;
-    raises WorkflowError (exit 1) on any precondition/env/runner failure, _RefusedWrite (exit 2) on a
-    plugin-local mkdir failure. Returns 0 on a produced artifact (state=needs-review)."""
+def _prepare_run(root: Path, task_id: str, role: str, accept_flags: list[str]) -> dict:
     _ensure_project_state_or_refuse(root)
     _check_snapshot_preconditions(root)
     profile, fingerprint = _load_profile(root)
@@ -570,20 +581,53 @@ def run_delegation(root: Path, task_id: str, role: str, accept_flags: list[str])
     model = _runner_model(binding["backend"])
     cfg = load_config(root)
     packet, _acceptance = _build_packet(load_tasks(root), task_id, accept_flags, root)
+    return {"task_id": task_id, "binding": binding, "model": model, "cfg": cfg,
+            "packet": packet, "fingerprint": fingerprint}
 
+
+def _claim_run(root: Path, plan: dict) -> tuple[str, Path]:
+    task_id = plan["task_id"]
     active = _active_delegation_for_task(root, task_id)
     if active:
         raise WorkflowError(
             f"task {task_id} already has active delegation {active[0]} (state {active[1]}) — "
             f"apply or discard it first")
-    overlays = _active_overlays(root)
+    plan["overlays"] = _active_overlays(root)
 
     did = _make_did(task_id)
     base_did, n = did, 2
-    while _record_dir(root, did).exists():  # same-second collision: deterministic suffix, never a
-        did = f"{base_did}-{n}"             # transition appended to an existing record (H4)
-        n += 1
-    record_dir = _record_dir(root, did)
+    _mkdir_or_refuse(_delegations_dir(root))
+    while True:
+        record_dir = _record_dir(root, did)
+        try:
+            record_dir.mkdir(exist_ok=False)
+            break
+        except FileExistsError:
+            did = f"{base_did}-{n}"
+            n += 1
+        except OSError as e:
+            raise _RefusedWrite(f"cannot claim delegation record {record_dir}: {e}") from e
+    claim = {"schema": "waystone-delegation-claim-1", "task_id": task_id, "at": _now_iso()}
+    try:
+        with (record_dir / "claim.json").open("x", encoding="utf-8") as stream:
+            stream.write(json.dumps(claim, ensure_ascii=False) + "\n")
+    except OSError as e:
+        try:
+            record_dir.rmdir()
+        except OSError:
+            pass
+        raise _RefusedWrite(f"cannot write delegation claim {record_dir / 'claim.json'}: {e}") from e
+    return did, record_dir
+
+
+def _run_claimed(root: Path, plan: dict, did: str, record_dir: Path) -> int:
+    task_id = plan["task_id"]
+    binding = plan["binding"]
+    model = plan["model"]
+    cfg = plan["cfg"]
+    packet = plan["packet"]
+    fingerprint = plan["fingerprint"]
+    overlays = plan["overlays"]
     artifact_dir = record_dir / "artifact"
     worktree_path = _worktree_path(root, did)
     _mkdir_or_refuse(artifact_dir)
@@ -591,7 +635,7 @@ def run_delegation(root: Path, task_id: str, role: str, accept_flags: list[str])
 
     head_sha = git_full_sha(root, "HEAD")
     base_sha, dirty = _snapshot(root, f"waystone delegation snapshot: {task_id} {did}")
-    _git_out(root, "update-ref", f"{DELEG_REF_NS}/{did}", base_sha)
+    _git_out(root, "update-ref", f"{DELEG_REF_NS}/{did}", base_sha, "")
     _add_worktree(root, worktree_path, base_sha)
     print(f"base_sha: {base_sha}")
     print(f"dirty: {str(dirty).lower()}")
@@ -661,6 +705,13 @@ def run_delegation(root: Path, task_id: str, role: str, accept_flags: list[str])
     print(f"artifact: {artifact_dir / 'contract.yaml'}")
     _warn_boundary(root, "delegate-run", {"delegation_id": did})
     return 0
+
+
+def run_delegation(root: Path, task_id: str, role: str, accept_flags: list[str]) -> int:
+    """Library entry: prepare, claim, then run without acquiring flock; CLI owns lock placement."""
+    plan = _prepare_run(root, task_id, role, accept_flags)
+    did, record_dir = _claim_run(root, plan)
+    return _run_claimed(root, plan, did, record_dir)
 
 
 def _warn_boundary(root: Path, boundary: str, context: dict) -> None:
@@ -929,7 +980,7 @@ def verify_delegation(root: Path, did: str) -> int:
 # ---- evaluation path (§12 — apply/discard/show/status) ------------------------
 def _load_delegation(root: Path, did: str) -> Path:
     rec = _record_dir(root, did)
-    if not (rec / "exposure.json").exists():
+    if not rec.is_dir() or not ((rec / "claim.json").exists() or (rec / "exposure.json").exists()):
         raise WorkflowError(f"unknown delegation {did}")
     return rec
 
@@ -1097,8 +1148,12 @@ def _cli_run(rest: list[str]) -> int:
     pos, opts = _parse_opts(rest, value=("role", "root"), repeat=("accept",))
     if not pos:
         raise WorkflowError("run requires a <task-id>")
-    return run_delegation(_resolve_root(opts.get("root")), pos[0],
-                          opts.get("role", "implementer"), opts.get("accept", []))
+    root = _resolve_root(opts.get("root"))
+    # Hold only prepare/owner-scan/claim. Snapshot, worktree setup, and the runner stay outside.
+    with hold_lock(project_lock_path(root)):
+        plan = _prepare_run(root, pos[0], opts.get("role", "implementer"), opts.get("accept", []))
+        did, record_dir = _claim_run(root, plan)
+    return _run_claimed(root, plan, did, record_dir)
 
 
 def _cli_status(rest: list[str]) -> int:
@@ -1121,9 +1176,12 @@ def _cli_apply(rest: list[str]) -> int:
     if not pos:
         raise WorkflowError("apply requires a <delegation-id>")
     root = _resolve_root(opts.get("root"))
-    rec = _load_delegation(root, pos[0])
-    with hold_lock(rec / "record.lock"):
-        return apply_delegation(root, pos[0])
+    # Required nested order: registry -> project -> record. Apply mutates the live tree, so it must
+    # serialize with round close/task mutations for the whole record check -> git apply -> state span.
+    with hold_lock(project_lock_path(root)):
+        rec = _load_delegation(root, pos[0])
+        with hold_lock(rec / "record.lock"):
+            return apply_delegation(root, pos[0])
 
 
 def _cli_discard(rest: list[str]) -> int:
