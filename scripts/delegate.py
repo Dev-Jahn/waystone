@@ -54,10 +54,10 @@ PROFILE_EXECUTIONS = (
     "main-session", "clean-subagent", "forked-subagent",
     "deterministic-workflow", "external-runner",
 )
-# §8.2 role/execution semantics. A listed pair is schema-valid, not necessarily shipped by a
-# consumer. In particular, verifier/reviewer exclude main-session and context-forked execution so
-# their independent/read-only responsibility is not silently weakened. main/orchestrator/clerk
-# bindings have no L1 executor: SessionStart routing injection is their only current consumer.
+# §8.2 L439 role/execution semantics: every worker role may run through a fork; verifier/reviewer
+# independence is from the implementer, not from inherited main context. A listed pair is
+# schema-valid, not necessarily shipped by a consumer. main/orchestrator/clerk bindings have no L1
+# executor: SessionStart routing injection is their only current consumer.
 VALID_ROLE_EXECUTIONS = {
     "main": ("main-session",),
     "orchestrator": (
@@ -69,8 +69,12 @@ VALID_ROLE_EXECUTIONS = {
     "clerk": (
         "clean-subagent", "forked-subagent", "deterministic-workflow", "external-runner",
     ),
-    "verifier": ("clean-subagent", "deterministic-workflow", "external-runner"),
-    "reviewer": ("clean-subagent", "deterministic-workflow", "external-runner"),
+    "verifier": (
+        "clean-subagent", "forked-subagent", "deterministic-workflow", "external-runner",
+    ),
+    "reviewer": (
+        "clean-subagent", "forked-subagent", "deterministic-workflow", "external-runner",
+    ),
 }
 _BACKEND_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*:[^\s:]+$")
 _LEGACY_VERIFIER_EXECUTIONS = ("codex-cli", "codex-companion")

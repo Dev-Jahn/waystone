@@ -124,6 +124,7 @@ def _load_registry(path: Path) -> dict:
             if not isinstance(aliases, list) or not all(isinstance(alias, str) for alias in aliases):
                 raise common.WorkflowError(
                     f"registry entry `aliases` must be a list of paths: {path}")
+    common.validate_registry_path_uniqueness(projects, path)
     registry["projects"] = projects
     return registry
 
@@ -223,6 +224,7 @@ def _project_main(argv: list[str]) -> int:
                     raise common.WorkflowError(f"alias path is already registered elsewhere: {requested}")
             target["aliases"] = sorted(
                 [*map(str, _entry_aliases(target)), str(requested)])
+            common.validate_registry_path_uniqueness(projects, path)
             _write_registry(path, registry)
             print(f"alias added: {requested}\t{root}")
             return 0
@@ -243,6 +245,7 @@ def _project_main(argv: list[str]) -> int:
                 print(f"already registered: {name}\t{root}")
                 return 0
             projects.append({"name": name, "path": str(root), "aliases": []})
+            common.validate_registry_path_uniqueness(projects, path)
             _write_registry(path, registry)
             print(f"registered: {name}\t{root}")
             return 0

@@ -16,6 +16,8 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from common import (  # noqa: E402
     git_branch_info, git_full_sha, hold_lock, load_config, load_tasks, migrate_project_state,
@@ -28,40 +30,38 @@ MAX_TASK_LINES = 8
 MAX_START_HERE = 2560  # ~2.5KB cap on the injected re-entry narrative (read-time, never truncates the file)
 MAX_CONTRACT = 1200
 CONTRACT_PATH = Path(__file__).resolve().parents[2] / "references" / "main-contract.md"
+ROUTING_POLICY_PATH = Path(__file__).resolve().parents[2] / "templates" / "routing-policy.yaml"
 MIGRATION_LOCK_TIMEOUT = 3.0
 
 
 def _routing_block(root: Path) -> list[str]:
-    """Render the static profile as a bounded routing policy. Missing profile means no block;
-    SessionStart never invents bindings. The two decision lines are §9's eight routing questions
-    compressed into stable propositions, not runtime model introspection."""
+    """Render bounded role guidance from the §9 policy artifact, never concrete model bindings."""
     import delegate
 
-    path = delegate._profile_path(root)
-    if not path.is_file():
-        return []
     try:
-        profile, _fingerprint = delegate._load_profile(root)
-        bindings = profile.get("bindings")
-        if not isinstance(bindings, dict):
-            raise ValueError("bindings is not a mapping")
-        lines = ["routing policy: static profile bindings"]
+        policy = yaml.safe_load(ROUTING_POLICY_PATH.read_text(encoding="utf-8"))
+        if not isinstance(policy, dict) or policy.get("schema") != "waystone-routing-policy-1":
+            raise ValueError("routing policy has the wrong schema")
+        roles = policy.get("roles")
+        if not isinstance(roles, dict) or set(roles) != set(delegate.PROFILE_ROLES):
+            raise ValueError("routing policy roles do not match the profile roles")
+        lines = ["routing policy: role guidance"]
         for role in delegate.PROFILE_ROLES:
-            if role not in bindings:
-                continue
-            binding = bindings[role]
-            if isinstance(binding, dict) and isinstance(binding.get("backend"), str):
-                execution = delegate._canonical_execution(role, binding)
-                line = f"  {role}→{binding['backend']} [{execution}]"
-                if isinstance(binding.get("use_for"), str):
-                    line += f" — {binding['use_for']}"
-                lines.append(line)
-        if len(lines) == 1:
-            raise ValueError("no readable bindings")
-        lines.extend([
-            "  choose: reasoning · context inheritance · independent perspective · bounded scope",
-            "  weigh: repetitive tools · retry cost · independent verification · budget sensitivity",
-        ])
+            guidance = roles[role]
+            if not isinstance(guidance, str) or not guidance.strip() or "\n" in guidance:
+                raise ValueError(f"routing guidance for {role} must be one non-empty line")
+            lines.append(f"  {role}: {guidance}")
+        profile_path = delegate._profile_path(root)
+        if not profile_path.is_file():
+            lines.append("bindings: unavailable; see `waystone paths` → profile")
+        else:
+            try:
+                delegate._load_profile(root)
+            except Exception:  # noqa: BLE001 — report damaged optional binding without model details
+                lines.append(
+                    "bindings: unavailable (profile unreadable); see `waystone paths` → profile")
+            else:
+                lines.append("bindings: see `waystone paths` → profile")
         return lines[:12]
     except Exception:  # noqa: BLE001 — one damaged live input must not break SessionStart
         return ["routing policy: — unreadable"]

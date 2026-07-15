@@ -2,10 +2,16 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "waystone-profile-1",
   "type": "object",
-  "required": ["schema", "bindings"],
+  "required": ["bindings"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"const": "waystone-profile-1"},
+    "schema": {
+      "oneOf": [
+        {"const": "waystone-profile-1"},
+        {"const": "jw-profile-1", "deprecated": true},
+        {"type": "null", "deprecated": true}
+      ]
+    },
     "bindings": {
       "type": "object",
       "minProperties": 1,
@@ -13,26 +19,34 @@
       "properties": {
         "main": {"$ref": "#/$defs/main"},
         "orchestrator": {"$ref": "#/$defs/orchestrator"},
-        "implementer": {"$ref": "#/$defs/worker"},
-        "clerk": {"$ref": "#/$defs/worker"},
-        "verifier": {"$ref": "#/$defs/independent"},
-        "reviewer": {"$ref": "#/$defs/independent"}
+        "implementer": {"$ref": "#/$defs/implementer"},
+        "clerk": {"$ref": "#/$defs/clerk"},
+        "verifier": {"$ref": "#/$defs/verifier"},
+        "reviewer": {"$ref": "#/$defs/reviewer"}
       }
     }
   },
   "$defs": {
     "binding": {
       "type": "object",
-      "required": ["execution", "backend"],
+      "required": ["backend"],
       "additionalProperties": false,
       "properties": {
         "execution": {
-          "enum": [
-            "main-session",
-            "clean-subagent",
-            "forked-subagent",
-            "deterministic-workflow",
-            "external-runner"
+          "oneOf": [
+            {
+              "enum": [
+                "main-session",
+                "clean-subagent",
+                "forked-subagent",
+                "deterministic-workflow",
+                "external-runner"
+              ]
+            },
+            {
+              "enum": ["codex-cli", "codex-companion"],
+              "deprecated": true
+            }
           ]
         },
         "backend": {
@@ -47,30 +61,59 @@
     "main": {
       "allOf": [
         {"$ref": "#/$defs/binding"},
-        {"properties": {"execution": {"const": "main-session"}}}
+        {"required": ["execution"], "properties": {"execution": {"const": "main-session"}}}
       ]
     },
     "orchestrator": {
       "allOf": [
         {"$ref": "#/$defs/binding"},
-        {"properties": {"execution": {"enum": [
+        {"required": ["execution"], "properties": {"execution": {"enum": [
           "main-session", "clean-subagent", "forked-subagent", "deterministic-workflow"
         ]}}}
       ]
     },
-    "worker": {
+    "implementer": {
       "allOf": [
         {"$ref": "#/$defs/binding"},
-        {"properties": {"execution": {"enum": [
+        {"required": ["execution"], "properties": {"execution": {"enum": [
           "clean-subagent", "forked-subagent", "deterministic-workflow", "external-runner"
         ]}}}
       ]
     },
-    "independent": {
+    "clerk": {
       "allOf": [
         {"$ref": "#/$defs/binding"},
-        {"properties": {"execution": {"enum": [
-          "clean-subagent", "deterministic-workflow", "external-runner"
+        {"required": ["execution"], "properties": {"execution": {"enum": [
+          "clean-subagent", "forked-subagent", "deterministic-workflow", "external-runner"
+        ]}}}
+      ]
+    },
+    "verifier": {
+      "oneOf": [
+        {
+          "allOf": [
+            {"$ref": "#/$defs/binding"},
+            {"properties": {"execution": {"enum": [
+              "clean-subagent", "forked-subagent", "deterministic-workflow", "external-runner"
+            ]}}}
+          ]
+        },
+        {
+          "allOf": [
+            {"$ref": "#/$defs/binding"},
+            {"required": ["execution"], "properties": {"execution": {
+              "enum": ["codex-cli", "codex-companion"],
+              "deprecated": true
+            }}}
+          ]
+        }
+      ]
+    },
+    "reviewer": {
+      "allOf": [
+        {"$ref": "#/$defs/binding"},
+        {"required": ["execution"], "properties": {"execution": {"enum": [
+          "clean-subagent", "forked-subagent", "deterministic-workflow", "external-runner"
         ]}}}
       ]
     }

@@ -1301,6 +1301,32 @@ class WaystoneStorageCliTests(unittest.TestCase):
             self.assertIn("already aliases", out)
             self.assertEqual(registry.read_bytes(), first)
 
+    def test_project_register_rejects_path_already_owned_as_alias(self):
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as d:
+            existing = Path(d) / "existing"
+            requested = Path(d) / "requested"
+            requested.mkdir()
+            (requested / ".waystone.yml").write_text("version: 1\nproject: requested\n")
+            (requested / "tasks.yaml").write_text(
+                "version: 1\nproject: requested\ntasks: []\n")
+            home = Path(d) / "home"
+            registry = home / ".waystone" / "projects.json"
+            registry.parent.mkdir(parents=True)
+            registry.write_text(_json.dumps({"projects": [{
+                "name": "existing", "path": str(existing.resolve()),
+                "aliases": [str(requested.resolve())],
+            }]}))
+            before = registry.read_bytes()
+
+            rc, _out, err = self._capture(
+                home, requested, ["project", "register", str(requested)])
+
+            self.assertEqual(rc, 1)
+            self.assertIn("already belongs to", err)
+            self.assertEqual(registry.read_bytes(), before)
+
 
 class ConfigTests(unittest.TestCase):
     def _cfg(self, body: str) -> dict:
@@ -1356,6 +1382,16 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "role:reviewer"):
             self._cfg(
                 "version: 1\nproject: x\nreview:\n  reviewers: ['role:implementer']\n")
+
+    def test_reviewer_role_reference_fails_loud_at_classifier_consumption(self):
+        current_head = "a" * 40
+        literal = review.classify([], current_head, macro_reviewers=("gpt-5.5-pro",))
+        self.assertFalse(literal["pro_result_at_head"])
+        with self.assertRaisesRegex(
+                common.WorkflowError,
+                "role references require the L2 reviewer resolver; "
+                "use a literal reviewer name for now"):
+            review.classify([], current_head, macro_reviewers=("role:reviewer",))
 
 
 
@@ -3656,6 +3692,34 @@ class ImproveScopeTests(unittest.TestCase):
             rows = self._rows(alpha / ".waystone" / "improve" / "sessions.jsonl")
             self.assertEqual([row["cwd"] for row in rows], [str(nested)])
 
+    def test_project_filters_include_registered_alias_cwds_for_both_hosts(self):
+        with tempfile.TemporaryDirectory() as d:
+            home, alpha, _beta, registry = self._fixture(d)
+            alias = Path(d) / "alpha-old-checkout"
+            alias_nested = alias / "src"
+            data = _json.loads(registry.read_text())
+            data["projects"][0]["aliases"] = [str(alias.resolve())]
+            registry.write_text(_json.dumps(data))
+
+            claude_source = Path(d) / "claude-projects"
+            self._claude_session(
+                claude_source, alias_nested,
+                "51515151-5151-5151-5151-515151515151")
+            self.assertEqual(self._run(
+                home, alpha, ["trace", "--source", str(claude_source), "--host", "claude"]), 0)
+            rows = self._rows(alpha / ".waystone" / "improve" / "sessions.jsonl")
+            self.assertEqual([row["cwd"] for row in rows], [str(alias_nested)])
+
+            codex_source = Path(d) / "codex-sessions"
+            codex_source.mkdir()
+            self._codex_session(
+                codex_source, alias_nested,
+                "52525252-5252-5252-5252-525252525252")
+            self.assertEqual(self._run(
+                home, alpha, ["trace", "--source", str(codex_source), "--host", "codex"]), 0)
+            rows = self._rows(alpha / ".waystone" / "improve" / "sessions.jsonl")
+            self.assertEqual([row["cwd"] for row in rows], [str(alias_nested)])
+
     def test_project_filter_excludes_unknown_cwd_and_records_coverage(self):
         with tempfile.TemporaryDirectory() as d:
             home, alpha, _beta, _registry = self._fixture(d)
@@ -4276,6 +4340,65 @@ def _write_profile(root: Path, body: str = _PROFILE_BODY):
 class DelegateProfileTests(unittest.TestCase):
     """0.8.0 M1 §11 — profile binding resolution (fail-loud, no default-model guessing)."""
 
+    @staticmethod
+    def _schema_accepts(schema: dict, instance: object) -> bool:
+        """Interpret only the JSON Schema vocabulary used by profile-schema.json."""
+        import re
+
+        def resolve(ref: str) -> dict:
+            node = schema
+            for part in ref.removeprefix("#/").split("/"):
+                node = node[part]
+            return node
+
+        def valid(node: dict, value: object) -> bool:
+            if "$ref" in node and not valid(resolve(node["$ref"]), value):
+                return False
+            if "allOf" in node and not all(valid(part, value) for part in node["allOf"]):
+                return False
+            if "oneOf" in node and sum(valid(part, value) for part in node["oneOf"]) != 1:
+                return False
+            expected_type = node.get("type")
+            type_matches = {
+                "object": isinstance(value, dict),
+                "string": isinstance(value, str),
+                "null": value is None,
+            }
+            if expected_type is not None and not type_matches.get(expected_type, False):
+                return False
+            if "const" in node and value != node["const"]:
+                return False
+            if "enum" in node and value not in node["enum"]:
+                return False
+            if isinstance(value, str):
+                if len(value) < node.get("minLength", 0):
+                    return False
+                if "pattern" in node and re.search(node["pattern"], value) is None:
+                    return False
+            if isinstance(value, dict):
+                required = node.get("required", [])
+                if any(field not in value for field in required):
+                    return False
+                if len(value) < node.get("minProperties", 0):
+                    return False
+                properties = node.get("properties", {})
+                if node.get("additionalProperties") is False and any(
+                        field not in properties for field in value):
+                    return False
+                if any(field in value and not valid(rule, value[field])
+                       for field, rule in properties.items()):
+                    return False
+            return True
+
+        return valid(schema, instance)
+
+    @staticmethod
+    def _schema_role_executions(schema: dict, role: str) -> list[str]:
+        definition = schema["$defs"][role]
+        branch = definition["oneOf"][0] if role == "verifier" else definition
+        execution = branch["allOf"][1]["properties"]["execution"]
+        return execution["enum"] if "enum" in execution else [execution["const"]]
+
     def test_missing_profile_raises(self):
         with tempfile.TemporaryDirectory() as d:
             home = Path(d) / "home"
@@ -4300,7 +4423,7 @@ class DelegateProfileTests(unittest.TestCase):
             self.assertEqual(b["execution"], "external-runner")
             self.assertEqual(b["source"], "profile")
 
-    def test_profile_schema_accepts_all_six_roles_and_open_runner_tokens(self):
+    def test_profile_schema_matches_runtime_combinations_and_profile_corpus(self):
         import json as _json
 
         with tempfile.TemporaryDirectory() as d:
@@ -4312,8 +4435,8 @@ class DelegateProfileTests(unittest.TestCase):
                 "  orchestrator: {execution: deterministic-workflow, backend: 'claude:opus'}\n"
                 "  implementer: {execution: external-runner, backend: 'codex:gpt'}\n"
                 "  clerk: {execution: forked-subagent, backend: 'local-runner:small'}\n"
-                "  verifier: {execution: clean-subagent, backend: 'gemini:pro'}\n"
-                "  reviewer: {execution: external-runner, backend: 'future.runner:model'}\n"
+                "  verifier: {backend: 'gemini:pro'}\n"
+                "  reviewer: {execution: forked-subagent, backend: 'future.runner:model'}\n"
             ))
             profile, _fingerprint = delegate._load_profile(root)
             self.assertEqual(set(profile["bindings"]), set(delegate.PROFILE_ROLES))
@@ -4323,8 +4446,48 @@ class DelegateProfileTests(unittest.TestCase):
                 set(schema["properties"]["bindings"]["properties"]),
                 set(delegate.PROFILE_ROLES),
             )
-            self.assertEqual(schema["$defs"]["binding"]["properties"]["execution"]["enum"],
-                             list(delegate.PROFILE_EXECUTIONS))
+            standard = schema["$defs"]["binding"]["properties"]["execution"]["oneOf"][0]
+            self.assertEqual(standard["enum"], list(delegate.PROFILE_EXECUTIONS))
+            for role in delegate.PROFILE_ROLES:
+                self.assertEqual(
+                    self._schema_role_executions(schema, role),
+                    list(delegate.VALID_ROLE_EXECUTIONS[role]),
+                )
+
+            corpus = [profile]
+            for legacy_execution in delegate._LEGACY_VERIFIER_EXECUTIONS:
+                corpus.append({
+                    "schema": "waystone-profile-1",
+                    "bindings": {
+                        "implementer": {
+                            "execution": "external-runner", "backend": "codex:gpt-test"},
+                        "verifier": {
+                            "execution": legacy_execution, "backend": "codex:gpt-test"},
+                    },
+                })
+            for instance in corpus:
+                delegate._validate_profile(instance, Path("profile.yml"))
+                self.assertTrue(self._schema_accepts(schema, instance), instance)
+
+            legacy_branch = schema["$defs"]["verifier"]["oneOf"][1]
+            legacy_execution = legacy_branch["allOf"][1]["properties"]["execution"]
+            self.assertEqual(
+                legacy_execution["enum"], list(delegate._LEGACY_VERIFIER_EXECUTIONS))
+            self.assertIs(legacy_execution["deprecated"], True)
+
+            for role in delegate.PROFILE_ROLES:
+                for execution in delegate.PROFILE_EXECUTIONS:
+                    instance = {"schema": "waystone-profile-1", "bindings": {role: {
+                        "execution": execution, "backend": "runner:model"}}}
+                    try:
+                        delegate._validate_profile(instance, Path("profile.yml"))
+                        runtime_accepts = True
+                    except delegate.WorkflowError:
+                        runtime_accepts = False
+                    self.assertEqual(
+                        self._schema_accepts(schema, instance), runtime_accepts,
+                        f"schema/runtime mismatch for {role}/{execution}",
+                    )
 
     def test_role_execution_combination_violation_fails_loud(self):
         with tempfile.TemporaryDirectory() as d:
@@ -7519,8 +7682,9 @@ class ContractInjectTests(unittest.TestCase):
             rc, ctx = self._context(module, root, home)
             self.assertEqual(rc, 0)
             self.assertLess(ctx.index("◆ OPERATING CONTRACT"), ctx.index("▶ START HERE"))
-            self.assertIn("implementer→codex:gpt-5.6-sol", ctx)
-            self.assertIn("verifier→codex:gpt-5.6-sol", ctx)
+            self.assertIn("implementer:", ctx)
+            self.assertIn("verifier:", ctx)
+            self.assertNotIn("gpt-5.6-sol", ctx)
             self.assertIn("warning 1 (verification_debt/warn)", ctx)
             self.assertIn("observing 1 (review_association/observe)", ctx)
             self.assertIn("needs-review delegations 2 (did-one did-two)", ctx)
@@ -7539,14 +7703,23 @@ class ContractInjectTests(unittest.TestCase):
             block = module._routing_block(root)
             self.assertLessEqual(len(block), 12)
             rendered = "\n".join(block)
-            self.assertIn("main→claude:opus [main-session]", rendered)
-            self.assertIn(
-                "reviewer→gemini:pro [external-runner] — adversarial diff review", rendered)
-            for term in (
-                    "reasoning", "context inheritance", "independent perspective", "bounded scope",
-                    "repetitive tools", "retry cost", "independent verification",
-                    "budget sensitivity"):
-                self.assertIn(term, rendered)
+            for role in delegate.PROFILE_ROLES:
+                self.assertIn(f"  {role}:", rendered)
+            self.assertIn("bindings: see `waystone paths` → profile", rendered)
+            for model in ("claude:opus", "gemini:pro"):
+                self.assertNotIn(model, rendered)
+
+            policy = yaml.safe_load(module.ROUTING_POLICY_PATH.read_text())
+            self.assertEqual(policy["schema"], "waystone-routing-policy-1")
+            self.assertEqual(len(policy["questions"]), 8)
+            self.assertEqual(len({question["id"] for question in policy["questions"]}), 8)
+            for question in policy["questions"]:
+                preference = question["prefer"]
+                self.assertTrue(preference["roles"])
+                self.assertTrue(preference["executions"])
+                self.assertLessEqual(set(preference["roles"]), set(delegate.PROFILE_ROLES))
+                self.assertLessEqual(
+                    set(preference["executions"]), set(delegate.PROFILE_EXECUTIONS))
 
     def test_machine_only_evidence_is_not_reported_as_project_evidence(self):
         module = self._module()
@@ -7565,13 +7738,14 @@ class ContractInjectTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertNotIn("unverified+finding tasks", ctx)
 
-    def test_profile_absence_omits_routing_block_and_constitution_absence_omits_contract(self):
+    def test_profile_absence_marks_bindings_unavailable_and_constitution_absence_omits_contract(self):
         module = self._module()
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(d)
             rc, ctx = self._context(module, root, home)
             self.assertEqual(rc, 0)
-            self.assertNotIn("routing policy", ctx)
+            self.assertIn("routing policy: role guidance", ctx)
+            self.assertIn("bindings: unavailable; see `waystone paths` → profile", ctx)
             self.assertEqual(
                 {path.name for path in (root / ".waystone").iterdir()},
                 {".gitignore", "lock"},
@@ -7695,6 +7869,32 @@ class MigrationV2Phase1Tests(unittest.TestCase):
                 self.assertIn(label, report)
             self.assertTrue((home / ".claude" / "waystone.pre-0.9" / "projects.json").is_file())
             self.assertTrue((codex_home / "waystone.pre-0.9" / "projects.json").is_file())
+
+    def test_registry_migration_union_rejects_canonical_alias_collision(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            home = d / "home"
+            codex_home = d / "codex-home"
+            claude = home / ".claude" / "waystone"
+            codex = codex_home / "waystone"
+            claude.mkdir(parents=True)
+            codex.mkdir(parents=True)
+            first = (d / "first").resolve()
+            collision = (d / "collision").resolve()
+            (claude / "projects.json").write_text(_json.dumps({"projects": [{
+                "name": "first", "path": str(first), "aliases": [str(collision)],
+            }]}))
+            (codex / "projects.json").write_text(_json.dumps({"projects": [{
+                "name": "second", "path": str(collision),
+            }]}))
+
+            with self.assertRaisesRegex(common.WorkflowError, "already belongs to"):
+                self._run(
+                    home, lambda: common.migrate_home_data(home), codex_home=codex_home)
+
+            self.assertFalse((home / ".waystone" / "projects.json").exists())
+            self.assertTrue((claude / "projects.json").is_file())
+            self.assertTrue((codex / "projects.json").is_file())
 
     def test_decisions_concat_is_timestamp_sorted_and_codex_projection_is_preserved(self):
         import contextlib

@@ -289,7 +289,61 @@ def _read_registry(path: Path) -> dict:
     if not isinstance(registry, dict) or not isinstance(registry.get("projects", []), list):
         raise WorkflowError(f"migration registry has wrong shape: {path}")
     registry.setdefault("projects", [])
+    validate_registry_path_uniqueness(registry["projects"], path)
     return registry
+
+
+def _normalized_registry_path(value: str, source: Path, label: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise WorkflowError(f"registry {label} is not absolute: {source} ({value!r})")
+    return path.resolve()
+
+
+def registry_entry_paths(entry: object, source: Path) -> tuple[Path, ...]:
+    """Return one local registry entry's normalized canonical+alias identity set."""
+    if not isinstance(entry, dict):
+        raise WorkflowError(f"registry entry is not an object: {source}")
+    aliases = entry.get("aliases", [])
+    if not isinstance(aliases, list) or not all(
+            isinstance(alias, str) and alias for alias in aliases):
+        raise WorkflowError(f"registry entry aliases must be a list of non-empty paths: {source}")
+    raw_path = entry.get("path")
+    if not isinstance(raw_path, str) or not raw_path:
+        if aliases:
+            raise WorkflowError(f"registry aliases require a canonical path: {source}")
+        return ()
+    canonical = _normalized_registry_path(raw_path, source, "canonical path")
+    normalized_aliases = tuple(
+        _normalized_registry_path(alias, source, "alias path") for alias in aliases)
+    return (canonical, *normalized_aliases)
+
+
+def validate_registry_path_uniqueness(projects: list, source: Path) -> None:
+    """Fail loud unless every normalized canonical or alias path has one registry owner."""
+    owners: dict[Path, str] = {}
+    for index, entry in enumerate(projects):
+        label = (entry.get("name") if isinstance(entry, dict) else None) or f"entry {index}"
+        for position, path in enumerate(registry_entry_paths(entry, source)):
+            kind = "canonical" if position == 0 else "alias"
+            owner = f"{label!r} {kind}"
+            if path in owners:
+                raise WorkflowError(
+                    f"registry path {path} already belongs to {owners[path]}; "
+                    f"cannot also assign it to {owner}")
+            owners[path] = owner
+
+
+def resolve_project_paths(project_root: Path, source: Path | None = None) -> tuple[Path, ...]:
+    """Resolve a logical project's canonical+alias roots; an unregistered root resolves to itself."""
+    path = registry_path() if source is None else source
+    registry = _read_registry(path)
+    wanted = Path(project_root).expanduser().resolve()
+    for entry in registry["projects"]:
+        identities = registry_entry_paths(entry, path)
+        if wanted in identities:
+            return identities
+    return (wanted,)
 
 
 def _registry_key(entry: object, source: Path) -> tuple[str, str]:
@@ -412,6 +466,7 @@ def _merge_registries(sources: list[tuple[str, Path]], destination: Path) -> lis
                 f"({key[0]}={key[1]!r})",
                 file=sys.stderr,
             )
+    validate_registry_path_uniqueness(merged, destination)
     if merged != registry["projects"] or (not destination.exists() and merged):
         registry["projects"] = merged
         write_text_atomic(destination, json.dumps(registry, ensure_ascii=False, indent=2) + "\n")

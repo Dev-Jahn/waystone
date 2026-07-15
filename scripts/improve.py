@@ -80,6 +80,7 @@ from common import (  # noqa: E402
     machine_dir,
     project_state_path,
     registry_path,
+    resolve_project_paths,
 )
 
 HEAD_LEN = 120
@@ -437,7 +438,7 @@ def _self_session_anchor(path: Path) -> tuple[int | None, str | None, int]:
     return None, None, 0
 
 
-def _cwd_belongs_to_project(cwd, project_root: Path) -> bool | None:
+def _cwd_belongs_to_project(cwd, project_roots: tuple[Path, ...]) -> bool | None:
     """Return explicit cwd membership, or None when cwd cannot establish provenance."""
     if not isinstance(cwd, str) or not cwd:
         return None
@@ -445,7 +446,8 @@ def _cwd_belongs_to_project(cwd, project_root: Path) -> bool | None:
     if not path.is_absolute():
         return None
     try:
-        return path.resolve().is_relative_to(project_root)
+        resolved = path.resolve()
+        return any(resolved.is_relative_to(root) for root in project_roots)
     except (OSError, ValueError):
         return None
 
@@ -453,8 +455,9 @@ def _cwd_belongs_to_project(cwd, project_root: Path) -> bool | None:
 def run_trace(sources: list[Path], projects: set[str], out_dir: Path,
               host: str = "claude", project_root: Path | None = None) -> dict:
     canonical_root = project_root.resolve() if project_root is not None else None
+    project_roots = resolve_project_paths(canonical_root) if canonical_root is not None else ()
     if host == "codex":
-        return _run_codex_trace(sources, projects, out_dir, canonical_root)
+        return _run_codex_trace(sources, projects, out_dir, canonical_root, project_roots)
     if host != "claude":
         raise WorkflowError(f"trace host must be claude|codex, got {host!r}")
     # A Claude slug is lossy, so project mode scans every candidate and attributes only by parsed
@@ -512,7 +515,7 @@ def run_trace(sources: list[Path], projects: set[str], out_dir: Path,
             continue
         row, dels = _build_session(path, kind, session_kind, scope, parsed)
         if canonical_root is not None:
-            membership = _cwd_belongs_to_project(row.get("cwd"), canonical_root)
+            membership = _cwd_belongs_to_project(row.get("cwd"), project_roots)
             if membership is not True:
                 reason = "cwd_unknown" if membership is None else "cwd_outside_project"
                 project_exclusions[reason].append(str(path))
@@ -569,7 +572,8 @@ def run_trace(sources: list[Path], projects: set[str], out_dir: Path,
 
 
 def _run_codex_trace(sources: list[Path], projects: set[str], out_dir: Path,
-                     project_root: Path | None = None) -> dict:
+                     project_root: Path | None = None,
+                     project_roots: tuple[Path, ...] = ()) -> dict:
     """Project Codex rollouts through the same session/delegation schema as Claude trace."""
     files = codexlog.discover(sources)
     files_by_kind: Counter = Counter()
@@ -611,7 +615,7 @@ def _run_codex_trace(sources: list[Path], projects: set[str], out_dir: Path,
         kind = f"codex_{session_kind}_transcript"
         row, delegations = _build_session(path, kind, session_kind, scope, parsed)
         if project_root is not None:
-            membership = _cwd_belongs_to_project(row.get("cwd"), project_root)
+            membership = _cwd_belongs_to_project(row.get("cwd"), project_roots)
             if membership is not True:
                 reason = "cwd_unknown" if membership is None else "cwd_outside_project"
                 project_exclusions[reason].append(str(path))

@@ -178,6 +178,12 @@ def classify(markers: list[dict], current_head: str, macro_reviewers: tuple = ()
     the latest findings resolution), so re-freezing to a new cycle/base cannot reuse a stale
     approval. Markers sharing the newest timestamp with conflicting content fail closed.
     Conflicting freeze markers for the latest cycle fail closed."""
+    if any(isinstance(reviewer, str) and reviewer.startswith("role:")
+           for reviewer in macro_reviewers):
+        raise WorkflowError(
+            "role references require the L2 reviewer resolver; "
+            "use a literal reviewer name for now")
+
     def at(m: dict) -> str:
         return m.get("_at") or ""
 
