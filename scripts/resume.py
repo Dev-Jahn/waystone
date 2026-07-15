@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     find_project_root, git, git_branch_info, git_full_sha, load_tasks,
-    next_actionable, resume_path, start_here_path,
+    next_actionable, resume_path, start_here_path, write_text_atomic,
 )
 
 
@@ -56,8 +56,7 @@ def snapshot(root: Path) -> str:
 
 def write(root: Path) -> int:
     p = resume_path(root)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(snapshot(root), encoding="utf-8")
+    write_text_atomic(p, snapshot(root))
     return 0
 
 

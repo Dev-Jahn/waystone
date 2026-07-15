@@ -23,7 +23,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import yaml  # noqa: E402
 
-from common import WorkflowError, git_branch_info, load_tasks, migrate_project_state, registry_path  # noqa: E402
+from common import (  # noqa: E402
+    WorkflowError, git_branch_info, hold_lock, load_tasks, migrate_project_state,
+    project_lock_path, registry_path,
+)
 
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
 BLUE, RED, GREEN, YELLOW = "\033[34m", "\033[31m", "\033[32m", "\033[33m"
@@ -60,7 +63,8 @@ def render_tasks(data: dict) -> None:
 
 
 def show_local(name: str, path: Path) -> None:
-    migrate_project_state(path)
+    with hold_lock(project_lock_path(path)):
+        migrate_project_state(path)
     g = git_branch_info(path)
     dirty = c(YELLOW, f"±{g['dirty']}") if g["dirty"] else c(GREEN, "clean")
     sync = f"↑{g['ahead']}↓{g['behind']}" if g["ahead"] != "?" else c(DIM, "no upstream")
@@ -125,15 +129,16 @@ def main() -> int:
     if not projects:
         print(f"no registered project matches {only!r}" if only else "registry is empty")
         return 0
+    failed = False
     for i, p in enumerate(projects):
         if i:
             print()
         try:
             show_entry(p)
-        except WorkflowError as e:
+        except (WorkflowError, OSError) as e:
             print(f"waystone status: migration failed for {p.get('path', '?')}: {e}", file=sys.stderr)
-            return 1
-    return 0
+            failed = True
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

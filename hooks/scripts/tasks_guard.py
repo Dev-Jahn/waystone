@@ -89,7 +89,7 @@ def main() -> int:
     try:
         with hold_lock(project_lock_path(root), timeout=3):
             return _validate_and_regenerate(p, root)
-    except WorkflowError as e:
+    except (WorkflowError, OSError) as e:
         print(f"[waystone] project lock unavailable ({e}); skipping ROADMAP regeneration",
               file=sys.stderr)
         return 0

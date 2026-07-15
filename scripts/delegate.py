@@ -38,7 +38,7 @@ import yaml  # noqa: E402
 from common import (  # noqa: E402
     WorkflowError, _project_slug, ensure_project_state_dir, find_project_root, git_full_sha,
     hold_lock, load_config, load_tasks, migrate_project_state, project_lock_path,
-    project_state_path, worktrees_cache_dir,
+    project_state_path, worktrees_cache_dir, write_text_atomic,
 )
 
 DELEG_REF_NS = "refs/waystone/delegations"
@@ -561,8 +561,10 @@ def _write_exposure(record_dir, did, root, packet, task_id, head_sha, base_sha, 
         "sandbox": "workspace-write",
         "overlays": overlays, "guards": None, "waivers": [],
     }
-    (record_dir / "exposure.json").write_text(
-        json.dumps(exposure, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path = record_dir / "exposure.json"
+    if path.exists():
+        raise WorkflowError(f"delegation exposure is immutable and already exists: {path}")
+    write_text_atomic(path, json.dumps(exposure, ensure_ascii=False, indent=2) + "\n")
     return exposure
 
 
@@ -582,11 +584,20 @@ def _prepare_run(root: Path, task_id: str, role: str, accept_flags: list[str]) -
     cfg = load_config(root)
     packet, _acceptance = _build_packet(load_tasks(root), task_id, accept_flags, root)
     return {"task_id": task_id, "binding": binding, "model": model, "cfg": cfg,
-            "packet": packet, "fingerprint": fingerprint}
+            "packet": packet, "fingerprint": fingerprint, "accept_flags": list(accept_flags)}
 
 
 def _claim_run(root: Path, plan: dict) -> tuple[str, Path]:
     task_id = plan["task_id"]
+    try:
+        current_packet, _acceptance = _build_packet(
+            load_tasks(root), task_id, plan["accept_flags"], root)
+    except WorkflowError as e:
+        raise WorkflowError(
+            f"task {task_id} changed while preparing delegation — retry from current state: {e}") from e
+    if current_packet != plan["packet"]:
+        raise WorkflowError(
+            f"task {task_id} changed while preparing delegation — retry from current state")
     active = _active_delegation_for_task(root, task_id)
     if active:
         raise WorkflowError(
@@ -1149,9 +1160,10 @@ def _cli_run(rest: list[str]) -> int:
     if not pos:
         raise WorkflowError("run requires a <task-id>")
     root = _resolve_root(opts.get("root"))
-    # Hold only prepare/owner-scan/claim. Snapshot, worktree setup, and the runner stay outside.
+    plan = _prepare_run(root, pos[0], opts.get("role", "implementer"), opts.get("accept", []))
+    # Constant-level lock span: only local task/overlay revalidation, owner scan, and one claim write.
+    # Git preflight, profile/packet preparation, snapshot/worktree setup, and the runner stay outside.
     with hold_lock(project_lock_path(root)):
-        plan = _prepare_run(root, pos[0], opts.get("role", "implementer"), opts.get("accept", []))
         did, record_dir = _claim_run(root, plan)
     return _run_claimed(root, plan, did, record_dir)
 

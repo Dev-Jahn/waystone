@@ -24,6 +24,7 @@ sys.path.insert(0, str(SCRIPTS))
 import cclog  # noqa: E402
 import codexlog  # noqa: E402
 import common  # noqa: E402
+import dashboard  # noqa: E402
 import delegate  # noqa: E402
 import improve  # noqa: E402
 import lanes  # noqa: E402
@@ -763,6 +764,72 @@ class ResumeStartHereTests(unittest.TestCase):
             self.assertEqual(Path(printed), root.resolve() / ".waystone" / "start-here.md")
             self.assertTrue(Path(printed).parent.is_dir())   # parent created so the model can Write to it
 
+    def test_resume_write_is_atomic_and_cleans_temp_on_replace_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "proj"
+            root.mkdir()
+            target = common.resume_path(root)
+            original_snapshot = resume.snapshot
+            original_replace = common.os.replace
+
+            def fail_replace(_source, _target):
+                raise OSError("injected replace failure")
+
+            resume.snapshot = lambda _root: "snapshot\n"
+            common.os.replace = fail_replace
+            try:
+                with self.assertRaises(OSError):
+                    resume.write(root)
+            finally:
+                common.os.replace = original_replace
+                resume.snapshot = original_snapshot
+            self.assertFalse(target.exists())
+            self.assertEqual(list(target.parent.glob(f".{target.name}.*.tmp")), [])
+
+    def test_resume_consume_claim_preserves_concurrent_replacement(self):
+        import contextlib
+        import io
+        sys.path.insert(0, str(SCRIPTS.parent / "hooks" / "scripts"))
+        import session_context
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "proj"
+            root.mkdir()
+            init_repo(root)
+            (root / ".waystone.yml").write_text("version: 1\nproject: demo\n")
+            (root / "tasks.yaml").write_text("version: 1\nproject: demo\ntasks: []\n")
+            home = Path(d) / "home"
+            home.mkdir()
+            rp = common.resume_path(root)
+            rp.parent.mkdir(parents=True)
+            old = "captured_head: old\ncaptured_at: old-at\n"
+            new = "captured_head: new\ncaptured_at: new-at\n"
+            rp.write_text(old)
+            original_rename = session_context.os.rename
+            renamed = []
+
+            def replace_after_claim(source, claim):
+                original_rename(source, claim)
+                renamed.append(Path(claim))
+                common.write_text_atomic(Path(source), new)
+
+            old_argv = sys.argv
+            session_context.os.rename = replace_after_claim
+            sys.argv = ["session_context.py", str(root)]
+            out = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out):
+                    rc = _run_with_home(home, session_context.main)
+            finally:
+                session_context.os.rename = original_rename
+                sys.argv = old_argv
+            ctx = _json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(renamed), 1)
+            self.assertIn("last checkpoint: old-at @ old", ctx)
+            self.assertEqual(rp.read_text(), new)
+            self.assertFalse(renamed[0].exists())
+
     def test_session_context_injects_and_caps_start_here(self):
         import contextlib
         import io
@@ -849,11 +916,23 @@ class StoragePathTests(unittest.TestCase):
             state = common.project_state_path(root)
             self.assertEqual(state, root / ".waystone")
             self.assertFalse(state.exists())
+            self.assertEqual(common.project_lock_path(root), state / "lock")
+            self.assertFalse(state.exists())
             self.assertEqual(common.ensure_project_state_dir(root), state)
             self.assertEqual((state / ".gitignore").read_text(), "*\n")
             (state / ".gitignore").unlink()
             self.assertEqual(common.ensure_project_state_dir(root), state)
             self.assertEqual((state / ".gitignore").read_text(), "*\n")
+
+    def test_project_lock_bootstrap_creates_verified_state_and_self_ignore(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "repo"
+            root.mkdir()
+            lock = common.project_lock_path(root)
+            self.assertFalse(lock.parent.exists())
+            with common.hold_lock(lock, timeout=0.2):
+                self.assertTrue(lock.is_file())
+                self.assertEqual((lock.parent / ".gitignore").read_text(), "*\n")
 
     def test_consumers_use_project_state_and_machine_worktree_cache(self):
         with tempfile.TemporaryDirectory() as d:
@@ -870,6 +949,105 @@ class StoragePathTests(unittest.TestCase):
                 _run_with_home(home, lambda: delegate._worktrees_dir(root)),
                 home / ".waystone" / "cache" / "worktrees" / common._project_slug(root),
             )
+
+
+class DashboardLockingTests(unittest.TestCase):
+    def test_local_migration_waits_for_project_lock_then_runs_exactly_once(self):
+        import contextlib
+        import threading
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "repo"
+            root.mkdir()
+            entered = threading.Event()
+            released = threading.Event()
+            migrated = threading.Event()
+            calls = []
+            failures = []
+            originals = (getattr(dashboard, "hold_lock", None), dashboard.migrate_project_state,
+                         dashboard.git_branch_info, dashboard.load_tasks)
+
+            @contextlib.contextmanager
+            def observed_lock(path, timeout=None):
+                self.assertEqual(Path(path), common.project_lock_path(root))
+                entered.set()
+                with originals[0](path, timeout=timeout):
+                    yield
+
+            def migrate(path):
+                self.assertTrue(released.is_set())
+                calls.append(Path(path))
+                migrated.set()
+
+            def run():
+                try:
+                    dashboard.show_local("demo", root)
+                except BaseException as e:  # capture thread assertion for the main test thread
+                    failures.append(e)
+
+            dashboard.hold_lock = observed_lock
+            dashboard.migrate_project_state = migrate
+            dashboard.git_branch_info = lambda _root: {
+                "branch": "dev", "dirty": 0, "ahead": 0, "behind": 0,
+            }
+            dashboard.load_tasks = lambda _root: {"tasks": []}
+            worker = threading.Thread(target=run)
+            try:
+                with common.hold_lock(common.project_lock_path(root), timeout=0.2):
+                    worker.start()
+                    self.assertTrue(entered.wait(1))
+                    self.assertFalse(migrated.is_set())
+                    released.set()
+                worker.join(1)
+            finally:
+                released.set()
+                worker.join(1)
+                if originals[0] is None:
+                    del dashboard.hold_lock
+                else:
+                    dashboard.hold_lock = originals[0]
+                dashboard.migrate_project_state = originals[1]
+                dashboard.git_branch_info = originals[2]
+                dashboard.load_tasks = originals[3]
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(failures, [])
+            self.assertEqual(calls, [root])
+
+    def test_one_project_migration_failure_does_not_skip_later_projects(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "home"
+            registry = home / ".waystone" / "projects.json"
+            registry.parent.mkdir(parents=True)
+            registry.write_text(_json.dumps({"projects": [
+                {"name": "broken", "path": str(Path(d) / "broken")},
+                {"name": "healthy", "path": str(Path(d) / "healthy")},
+            ]}))
+            (Path(d) / "broken").mkdir()
+            (Path(d) / "healthy").mkdir()
+            seen = []
+            original = dashboard.show_entry
+            old_argv = sys.argv
+
+            def show(entry):
+                seen.append(entry["name"])
+                if entry["name"] == "broken":
+                    raise common.WorkflowError("synthetic migration failure")
+
+            dashboard.show_entry = show
+            sys.argv = ["dashboard.py"]
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(err):
+                    rc = _run_with_home(home, dashboard.main)
+            finally:
+                dashboard.show_entry = original
+                sys.argv = old_argv
+            self.assertEqual(rc, 1)
+            self.assertEqual(seen, ["broken", "healthy"])
+            self.assertIn("synthetic migration failure", err.getvalue())
 
 
 class WaystoneStorageCliTests(unittest.TestCase):
@@ -4231,6 +4409,114 @@ class DelegateRunTests(unittest.TestCase):
             self.assertTrue(git(root, "rev-parse", "--verify",
                                 f"refs/waystone/delegations/{rec.name}-result").returncode == 0)
 
+    def test_cli_prepares_slow_inputs_before_claim_lock_and_revalidates_inside(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            depth = {"value": 0}
+            observed = {"preflight": [], "packet": [], "overlay": []}
+            originals = (delegate.hold_lock, delegate._check_snapshot_preconditions,
+                         delegate._build_packet, delegate._active_overlays,
+                         delegate._run_codex)
+
+            @contextlib.contextmanager
+            def tracked_lock(path, timeout=None):
+                depth["value"] += 1
+                try:
+                    yield
+                finally:
+                    depth["value"] -= 1
+
+            def preflight(project):
+                observed["preflight"].append(depth["value"])
+                return originals[1](project)
+
+            def build_packet(*args, **kwargs):
+                observed["packet"].append(depth["value"])
+                return originals[2](*args, **kwargs)
+
+            def active_overlays(project):
+                observed["overlay"].append(depth["value"])
+                return originals[3](project)
+
+            delegate.hold_lock = tracked_lock
+            delegate._check_snapshot_preconditions = preflight
+            delegate._build_packet = build_packet
+            delegate._active_overlays = active_overlays
+            delegate._run_codex = self._fake_runner({"impl.py": "x\n"})
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = _run_with_home(home, lambda: delegate.main(
+                        ["run", "feat/xyz", "--root", str(root)]))
+            finally:
+                (delegate.hold_lock, delegate._check_snapshot_preconditions,
+                 delegate._build_packet, delegate._active_overlays,
+                 delegate._run_codex) = originals
+            self.assertEqual(rc, 0)
+            self.assertEqual(observed["preflight"], [0])
+            self.assertEqual(observed["packet"], [0, 1])
+            self.assertEqual(observed["overlay"], [1])
+
+    def test_cli_rejects_task_state_changed_after_packet_preparation(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            original_prepare = delegate._prepare_run
+            original_runner = delegate._run_codex
+            runner_calls = []
+
+            def prepare(*args, **kwargs):
+                plan = original_prepare(*args, **kwargs)
+                tasks_path = root / "tasks.yaml"
+                tasks_path.write_text(tasks_path.read_text().replace(
+                    "status: active", "status: done"))
+                return plan
+
+            def runner(*args, **kwargs):
+                runner_calls.append(True)
+                return (0, 0.1)
+
+            delegate._prepare_run = prepare
+            delegate._run_codex = runner
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    rc = _run_with_home(home, lambda: delegate.main(
+                        ["run", "feat/xyz", "--root", str(root)]))
+            finally:
+                delegate._prepare_run = original_prepare
+                delegate._run_codex = original_runner
+            self.assertEqual(rc, 1)
+            self.assertEqual(runner_calls, [])
+            self.assertIn("changed while preparing", err.getvalue())
+            self.assertFalse(delegate._delegations_dir(root).exists())
+
+    def test_exposure_replace_failure_leaves_no_partial_or_temp(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "repo"
+            root.mkdir()
+            record = root / ".waystone" / "delegations" / "did"
+            record.mkdir(parents=True)
+            original_replace = common.os.replace
+
+            def fail_replace(_source, _target):
+                raise OSError("injected exposure replace failure")
+
+            common.os.replace = fail_replace
+            try:
+                with self.assertRaises(OSError):
+                    delegate._write_exposure(
+                        record, "did", root, {"project": {"name": "demo"}}, "feat/xyz",
+                        "head", "base", False, {}, "sha256:test", [])
+            finally:
+                common.os.replace = original_replace
+            self.assertFalse((record / "exposure.json").exists())
+            self.assertEqual(list(record.glob(".exposure.json.*.tmp")), [])
+
     def test_missing_report_marked_absent(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(d)
@@ -4648,28 +4934,44 @@ class DelegateApplyTests(unittest.TestCase):
             _deleg_run(root, home, _deleg_fake({"impl.py": "print('x')\n"}))
             rec = _latest_rec(root, home)
             original_apply = delegate.apply_delegation
+            original_hold_lock = delegate.hold_lock
+            original_resolve_root = delegate._resolve_root
+            acquired = []
 
-            def checked_apply(project, did):
-                with common.project_lock_path(project).open("a+", encoding="utf-8") as stream:
+            @contextlib.contextmanager
+            def recording_lock(path, timeout=None):
+                label = "project" if Path(path) == common.project_lock_path(root) else "record"
+                acquired.append(label)
+                with original_hold_lock(path, timeout=timeout):
+                    yield
+
+            def assert_held(path):
+                with Path(path).open("a+", encoding="utf-8") as stream:
                     try:
                         fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except BlockingIOError:
-                        project_lock_held = True
-                    else:
-                        project_lock_held = False
-                        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-                self.assertTrue(project_lock_held)
-                self.assertTrue((rec / "record.lock").is_file())
+                        return True
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                    return False
+
+            def checked_apply(project, did):
+                self.assertTrue(assert_held(common.project_lock_path(project)))
+                self.assertTrue(assert_held(rec / "record.lock"))
                 return original_apply(project, did)
 
             delegate.apply_delegation = checked_apply
+            delegate.hold_lock = recording_lock
+            delegate._resolve_root = lambda _explicit: root
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
                     rc = _run_with_home(home, lambda: delegate.main(
                         ["apply", rec.name, "--root", str(root)]))
             finally:
                 delegate.apply_delegation = original_apply
+                delegate.hold_lock = original_hold_lock
+                delegate._resolve_root = original_resolve_root
             self.assertEqual(rc, 0)
+            self.assertEqual(acquired, ["project", "record"])
             self.assertTrue((root / "impl.py").is_file())
 
     def test_apply_cli_times_out_when_project_lock_is_preempted(self):
@@ -7280,35 +7582,94 @@ class MigrationV2HookTests(unittest.TestCase):
             self.assertIn("migration exploded", err)
             self.assertIn("migration", err.lower())
 
-    def test_hook_lock_timeout_warns_but_always_emits_json_context(self):
+    def test_hook_acquires_registry_then_project_with_one_three_second_budget(self):
         import contextlib
 
         module = self._module()
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(Path(d))
-            original = getattr(module, "hold_lock", None)
-            seen = {}
+            original_hold = getattr(module, "hold_lock", None)
+            original_time = getattr(module, "time", None)
+            seen = []
+            ticks = iter((100.0, 100.0, 101.25))
 
             @contextlib.contextmanager
-            def blocked(path, timeout=None):
-                seen["path"] = path
-                seen["timeout"] = timeout
-                raise common.WorkflowError("synthetic project lock timeout")
+            def tracked(path, timeout=None):
+                seen.append((Path(path), timeout))
                 yield
 
-            module.hold_lock = blocked
+            class FakeTime:
+                @staticmethod
+                def monotonic():
+                    return next(ticks)
+
+                @staticmethod
+                def time_ns():
+                    return 1
+
+            module.hold_lock = tracked
+            module.time = FakeTime
             try:
                 rc, payload, err = self._run_context(module, root, home)
             finally:
-                if original is None:
+                if original_hold is None:
                     del module.hold_lock
                 else:
-                    module.hold_lock = original
+                    module.hold_lock = original_hold
+                if original_time is None:
+                    del module.time
+                else:
+                    module.time = original_time
             self.assertEqual(rc, 0)
             self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
-            self.assertEqual(seen["timeout"], 3)
-            self.assertEqual(seen["path"].resolve(), common.project_lock_path(root).resolve())
-            self.assertIn("synthetic project lock timeout", err)
+            self.assertEqual(err, "")
+            self.assertEqual([path.resolve() for path, _timeout in seen], [
+                (home / ".waystone" / "registry.lock").resolve(),
+                common.project_lock_path(root).resolve(),
+            ])
+            self.assertEqual([timeout for _path, timeout in seen], [3.0, 1.75])
+
+    def test_hook_registry_lock_failure_warns_without_running_migration(self):
+        import contextlib
+
+        module = self._module()
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(Path(d))
+            original_hold = module.hold_lock
+            original_migrate = module.migrate_project_state
+            migrated = []
+
+            @contextlib.contextmanager
+            def blocked(_path, timeout=None):
+                raise common.WorkflowError("synthetic registry lock timeout")
+                yield
+
+            module.hold_lock = blocked
+            module.migrate_project_state = lambda _root: migrated.append(True)
+            try:
+                rc, payload, err = self._run_context(module, root, home)
+            finally:
+                module.hold_lock = original_hold
+                module.migrate_project_state = original_migrate
+            self.assertEqual(rc, 0)
+            self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
+            self.assertEqual(migrated, [])
+            self.assertIn("synthetic registry lock timeout", err)
+
+    def test_hook_oserror_warns_but_always_emits_json_context(self):
+        module = self._module()
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(Path(d))
+            original = module.migrate_project_state
+            module.migrate_project_state = lambda _root: (_ for _ in ()).throw(
+                OSError("migration filesystem exploded"))
+            try:
+                rc, payload, err = self._run_context(module, root, home)
+            finally:
+                module.migrate_project_state = original
+            self.assertEqual(rc, 0)
+            self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "SessionStart")
+            self.assertIn("migration filesystem exploded", err)
 
 
 class MigrationTests(unittest.TestCase):
@@ -7549,6 +7910,42 @@ class CodexHookTests(unittest.TestCase):
             self.assertEqual((root / "ROADMAP.md").read_bytes(), before)
             self.assertIn("lock", result.stderr.lower())
             self.assertIn("skipping ROADMAP regeneration", result.stderr)
+
+    def test_tasks_guard_oserror_warns_skips_regen_and_exits_zero(self):
+        import contextlib
+        import io
+
+        sys.path.insert(0, str(SCRIPTS.parent / "hooks" / "scripts"))
+        import tasks_guard
+
+        with tempfile.TemporaryDirectory() as d:
+            root = self._project(d)
+            payload = {
+                "tool_name": "Edit", "cwd": str(root),
+                "tool_input": {"file_path": str(root / "tasks.yaml")},
+            }
+            before = (root / "ROADMAP.md").read_bytes()
+            original_hold = tasks_guard.hold_lock
+            old_stdin = sys.stdin
+
+            @contextlib.contextmanager
+            def broken(_path, timeout=None):
+                raise OSError("synthetic lock filesystem failure")
+                yield
+
+            tasks_guard.hold_lock = broken
+            sys.stdin = io.StringIO(_json.dumps(payload))
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(err):
+                    rc = tasks_guard.main()
+            finally:
+                tasks_guard.hold_lock = original_hold
+                sys.stdin = old_stdin
+            self.assertEqual(rc, 0)
+            self.assertEqual((root / "ROADMAP.md").read_bytes(), before)
+            self.assertIn("synthetic lock filesystem failure", err.getvalue())
+            self.assertIn("skipping ROADMAP regeneration", err.getvalue())
 
     def test_session_context_names_host_instruction_file(self):
         import contextlib

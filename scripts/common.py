@@ -115,14 +115,21 @@ def project_state_path(root: Path) -> Path:
     return Path(root) / ".waystone"
 
 
+def _ensure_project_self_ignore(state: Path) -> None:
+    """Create the project-state self-ignore once without racing another bootstrapper."""
+    try:
+        with (state / ".gitignore").open("x", encoding="utf-8") as stream:
+            stream.write("*\n")
+    except FileExistsError:
+        pass
+
+
 def ensure_project_state_dir(root: Path) -> Path:
     """Create the project-local state root and restore its self-ignore file when needed."""
     state = project_state_path(root)
-    if not _real_directory(state, "project state directory"):
-        state.mkdir(parents=True)
-    ignore = state / ".gitignore"
-    if not ignore.is_file() or ignore.read_text(encoding="utf-8") != "*\n":
-        ignore.write_text("*\n", encoding="utf-8")
+    state.mkdir(parents=True, exist_ok=True)
+    _real_directory(state, "project state directory")
+    _ensure_project_self_ignore(state)
     return state
 
 
@@ -145,7 +152,8 @@ def registry_lock_path(home: Path | None = None) -> Path:
 
 
 def project_lock_path(root: Path) -> Path:
-    return ensure_project_state_dir(root) / "lock"
+    """Return the project lock path without touching the filesystem."""
+    return project_state_path(root) / "lock"
 
 
 def _lock_verb() -> str:
@@ -197,6 +205,9 @@ def hold_lock(path: Path, timeout: float | None = None):
     wait = _lock_timeout(timeout)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        _real_directory(path.parent, "lock directory")
+        if path.name == "lock":
+            _ensure_project_self_ignore(path.parent)
         stream = path.open("a+", encoding="utf-8")
     except OSError as e:
         raise WorkflowError(f"waystone: cannot open lock {path}: {e}") from e
