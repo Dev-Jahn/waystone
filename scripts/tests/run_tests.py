@@ -131,6 +131,32 @@ class LockWiringTests(unittest.TestCase):
             self.assertIn("codex, round close", result.stderr)
             self.assertEqual((root / "tasks.yaml").read_bytes(), before)
 
+    def test_project_register_times_out_on_registry_lock(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "repo"
+            home = Path(d) / "home"
+            root.mkdir()
+            home.mkdir()
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
+            (root / "tasks.yaml").write_text("version: 1\nproject: x\ntasks: []\n")
+            lock = home / ".waystone" / "registry.lock"
+            env = os.environ.copy()
+            env.update({
+                "HOME": str(home),
+                "WAYSTONE_HOME": str(home / ".waystone"),
+                "WAYSTONE_LOCK_TIMEOUT": "0.02",
+            })
+            with common.hold_lock(lock, timeout=0.2):
+                result = subprocess.run([
+                    sys.executable, str(SCRIPTS / "waystone.py"),
+                    "project", "register", str(root),
+                ], capture_output=True, text=True, env=env, timeout=5)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("registry.lock is held by pid", result.stderr)
+            self.assertFalse((home / ".waystone" / "projects.json").exists())
+
 
 class MarkerTests(unittest.TestCase):
     def test_emit_parse_roundtrip(self):
@@ -4440,6 +4466,71 @@ class DelegateRunTests(unittest.TestCase):
             self.assertEqual(first_rc, 0)
             self.assertEqual(observed["second_rc"], 1)
             self.assertIn("already has active delegation", observed["second_err"])
+
+    def test_claim_only_crash_remnant_is_discardable(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+
+            def claim():
+                plan = delegate._prepare_run(root, "feat/xyz", "implementer", [])
+                with common.hold_lock(common.project_lock_path(root)):
+                    return delegate._claim_run(root, plan)
+
+            did, rec = _run_with_home(home, claim)
+            self.assertTrue((rec / "claim.json").is_file())
+            self.assertFalse((rec / "exposure.json").exists())
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = _run_with_home(home, lambda: delegate.main(
+                    ["discard", did, "--root", str(root)]))
+            self.assertEqual(rc, 0)
+            self.assertEqual(delegate._read_status(rec)["state"], "discarded")
+            self.assertIsNone(delegate._active_delegation_for_task(root, "feat/xyz"))
+
+    def test_base_ref_creation_uses_cas_and_detects_collision(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            original_snapshot = delegate._snapshot
+            original_runner = delegate._run_codex
+            injected = {"done": False}
+            runner_calls = {"count": 0}
+
+            def snapshot(cwd, message, *, exclude_uv_cache=False):
+                result = original_snapshot(cwd, message, exclude_uv_cache=exclude_uv_cache)
+                if Path(cwd).resolve() == root.resolve() and not injected["done"]:
+                    injected["done"] = True
+                    did = next(delegate._delegations_dir(root).iterdir()).name
+                    self.assertEqual(git(
+                        root, "update-ref", f"refs/waystone/delegations/{did}", result[0]
+                    ).returncode, 0)
+                return result
+
+            def runner(*args, **kwargs):
+                runner_calls["count"] += 1
+                return (0, 0.1)
+
+            delegate._snapshot = snapshot
+            delegate._run_codex = runner
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    rc = _run_with_home(home, lambda: delegate.main(
+                        ["run", "feat/xyz", "--root", str(root)]))
+            finally:
+                delegate._snapshot = original_snapshot
+                delegate._run_codex = original_runner
+            self.assertEqual(rc, 1)
+            self.assertTrue(injected["done"])
+            self.assertEqual(runner_calls["count"], 0)
+            self.assertIn("git update-ref failed", err.getvalue())
+            rec = next(delegate._delegations_dir(root).iterdir())
+            self.assertTrue((rec / "claim.json").is_file())
+            self.assertFalse((rec / "exposure.json").exists())
 
 
 def _deleg_project(d) -> tuple[Path, Path]:
