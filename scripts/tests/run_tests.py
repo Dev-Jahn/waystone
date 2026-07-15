@@ -5827,6 +5827,57 @@ class MigrationV2Phase1Tests(unittest.TestCase):
             self.assertEqual(second.getvalue(), "")
             self.assertEqual(git(old_worktree, "status", "--porcelain").returncode, 0)
 
+    def test_jahns_workflow_chain_keeps_linked_worktree_valid_until_phase2(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            home = d / "home"
+            root = d / "repo"
+            root.mkdir()
+            init_repo(root)
+            slug = common._project_slug(root)
+            legacy = home / ".claude" / "jahns-workflow"
+            record = legacy / "delegations" / slug / "did-chain"
+            record.mkdir(parents=True)
+            (record / "status.json").write_text(_json.dumps({"state": "needs-review"}))
+            old_worktree = legacy / "worktrees" / slug / "did-chain"
+            old_worktree.parent.mkdir(parents=True)
+            self.assertEqual(
+                git(root, "worktree", "add", "--detach", str(old_worktree), "HEAD").returncode, 0)
+
+            self._run(home, lambda: common.migrate_home_data(home))
+
+            self.assertTrue(old_worktree.is_dir())
+            self.assertEqual(git(old_worktree, "rev-parse", "--git-dir").returncode, 0)
+            self.assertEqual([path.name for path in legacy.iterdir()], ["worktrees"])
+
+            self._run(home, lambda: common.migrate_project_state(root))
+            new_worktree = home / ".waystone" / "cache" / "worktrees" / slug / "did-chain"
+            self.assertFalse(old_worktree.exists())
+            self.assertEqual(git(new_worktree, "rev-parse", "--git-dir").returncode, 0)
+            listing = git(root, "worktree", "list", "--porcelain").stdout
+            self.assertIn(str(new_worktree), listing)
+            self.assertNotIn(str(old_worktree), listing)
+
+    def test_symlinked_legacy_root_is_rejected_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            home = d / "home"
+            external = d / "external"
+            external.mkdir()
+            projects = external / "projects.json"
+            projects.write_text(_json.dumps({"projects": [{"repo": "org/external"}]}))
+            legacy = home / ".claude" / "waystone"
+            legacy.parent.mkdir(parents=True)
+            legacy.symlink_to(external, target_is_directory=True)
+
+            with self.assertRaises(common.WorkflowError) as cm:
+                self._run(home, lambda: common.migrate_home_data(home))
+
+            self.assertIn("symlink", str(cm.exception).lower())
+            self.assertTrue(legacy.is_symlink())
+            self.assertEqual(projects.read_text(), _json.dumps({"projects": [{"repo": "org/external"}]}))
+            self.assertFalse((home / ".waystone" / "projects.json").exists())
+
     def test_plain_legacy_root_is_rechecked_for_version_skew(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
@@ -5903,6 +5954,55 @@ class MigrationV2Phase2Tests(unittest.TestCase):
             self.assertIn(str(claude / "profile.yml"), str(cm.exception))
             self.assertIn(str(codex / "profile.yml"), str(cm.exception))
             self.assertFalse((root / ".waystone" / "profile.yml").exists())
+
+    def test_symlinked_project_state_is_rejected_without_external_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(Path(d))
+            slug = common._project_slug(root)
+            source = self._source(home, "claude") / "start_here" / f"{slug}.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("keep")
+            external = Path(d) / "external-state"
+            external.mkdir()
+            (root / ".waystone").symlink_to(external, target_is_directory=True)
+
+            with self.assertRaises(common.WorkflowError) as cm:
+                _run_with_home(home, lambda: common.migrate_project_state(root))
+
+            self.assertIn("symlink", str(cm.exception).lower())
+            self.assertEqual(source.read_text(), "keep")
+            self.assertEqual(list(external.iterdir()), [])
+
+    def test_symlinked_legacy_slug_and_delegation_record_are_rejected(self):
+        for target_kind in ("slug", "record"):
+            with self.subTest(target_kind=target_kind), tempfile.TemporaryDirectory() as d:
+                root, home = self._project(Path(d))
+                slug = common._project_slug(root)
+                external = Path(d) / "external"
+                external.mkdir()
+                sentinel = external / "sentinel.json"
+                sentinel.write_text("keep")
+                source = self._source(home, "claude")
+                if target_kind == "slug":
+                    link = source / "overlay" / slug
+                else:
+                    link = source / "delegations" / slug / "did-link"
+                link.parent.mkdir(parents=True)
+                link.symlink_to(external, target_is_directory=True)
+
+                with self.assertRaises(common.WorkflowError) as cm:
+                    _run_with_home(home, lambda: common.migrate_project_state(root))
+
+                self.assertIn("symlink", str(cm.exception).lower())
+                self.assertTrue(link.is_symlink())
+                self.assertEqual(sentinel.read_text(), "keep")
+                self.assertFalse((root / ".waystone").exists())
+
+    def test_unique_path_treats_dangling_symlink_as_occupied(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "conflict.json"
+            target.symlink_to(Path(d) / "missing.json")
+            self.assertEqual(common._unique_path(target), Path(d) / "conflict.2.json")
 
     def test_same_overlay_rule_across_hosts_fails_before_moving(self):
         with tempfile.TemporaryDirectory() as d:
