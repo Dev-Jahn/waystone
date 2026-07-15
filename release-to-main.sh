@@ -16,7 +16,8 @@ EXCLUDES=(scripts/tests release-to-main.sh)
 # waystone's own project artifacts (this repo dogfoods waystone): tracked on dev, never shipped.
 EXCLUDES+=(
   SSOT.md .waystone.yml tasks.yaml tasks.archive.yaml ROADMAP.md PROGRESS.md AGENTS.md
-  docs/CONVENTIONS.md docs/ssot docs/adr docs/reviews docs/waystone-policy.yaml
+  docs/CONVENTIONS.md docs/ssot docs/adr docs/reviews docs/progress docs/waystone-policy.yaml
+  .claude
 )
 
 cd "$(git rev-parse --show-toplevel)"

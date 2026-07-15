@@ -1,0 +1,17 @@
+version: 1
+project: waystone
+milestones: []
+# Optional task fields:
+#   deps       — task ids this one depends on
+#   milestone  — M<N>
+#   round      — round id the task was worked/closed in
+#   anchor     — §-anchor of the SSOT section the task governs
+#   severity   — blocker | major | minor (review findings)
+#   origin     — where the task came from (e.g. review-<round>)
+#   branch     — working branch
+#   notes      — free-form traceability (old codenames, context)
+#   ruling     — the user's decision on a decision/... task
+#   result     — a recorded measurement/outcome
+#   scope      — repo-relative path-prefix list; maintain with `waystone task set <id> --scope-add`
+#   lane       — {branch, base_sha, depends_on} for parallel worktree lanes (`waystone lanes verify`)
+tasks: []

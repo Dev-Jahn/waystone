@@ -1,0 +1,20 @@
+version: 1
+project: waystone
+ssot: SSOT.md
+progress: PROGRESS.md
+adr_dir: docs/adr
+reviews_dir: docs/reviews
+progress_archive_dir: docs/progress
+generated_dir: docs/ssot
+digest_max_lines: 150
+review:
+  mode: packet
+  reviewers: [role:reviewer]
+  require_ci: false
+policy:
+  start_level: warn-allowed
+delegation:
+  enabled: true
+  env_prep: null
+state:
+  last_round_commit: null
