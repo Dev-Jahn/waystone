@@ -48,7 +48,7 @@ report the mapping instead of asking.
 
 Then ask two separate host-native consent questions:
 
-1. Start level: `observe-only` (default; collect evidence without warning) or `warn-allowed`
+1. Start level: `warn-allowed` (default; preserve warning behavior) or `observe-only`
    (warnings may be promoted only through the existing replay gate).
 2. Delegation worktree/runner: enabled (default) or disabled. This controls
    `delegation.enabled`; disabled means `waystone delegate run` fails loud.
@@ -88,7 +88,7 @@ review:
   # operators: []               # PR mode: extra GitHub logins trusted to post review markers (owner always is)
   # approvers: []               # PR mode: extra GitHub logins trusted to post the final approval
 policy:
-  start_level: observe-only     # observe-only | warn-allowed (use the recorded Step 2 choice)
+  start_level: warn-allowed     # observe-only | warn-allowed (use the recorded Step 2 choice)
 delegation:
   enabled: true                 # use the recorded Step 2 choice
   env_prep: null                # null = lockfile auto-detection

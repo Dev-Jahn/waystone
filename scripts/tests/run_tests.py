@@ -2037,6 +2037,49 @@ class IngestTests(unittest.TestCase):
             self.assertIn(b"reviewer: gpt-5.5-pro", content)
             self.assertFalse(src.exists())                   # drop-file consumed
 
+    def test_packet_feedback_identity_uses_resolved_reviewer_membership(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self._root(d)
+            (root / ".waystone.yml").write_text(
+                "version: 1\nproject: x\nreview:\n  reviewers: [role:reviewer]\n")
+            (common.ensure_project_state_dir(root) / "profile.yml").write_text(
+                "schema: waystone-profile-1\nbindings:\n"
+                "  reviewer: {execution: external-runner, backend: 'claude:review-model'}\n")
+            configured = root / "configured.md"
+            configured.write_bytes(b"configured review")
+            self.assertEqual(review.ingest(
+                root, "r1", src=configured, reviewer="claude:review-model"), 0)
+            ad_hoc = root / "ad-hoc.md"
+            ad_hoc.write_bytes(b"ad-hoc review")
+            self.assertEqual(review.ingest(
+                root, "r2", src=ad_hoc, reviewer="unconfigured:model"), 0)
+
+            events, skipped = overlay.load_review_ingests(root)
+            self.assertEqual(skipped, 0)
+            by_round = {event["round_id"]: event for event in events}
+            self.assertEqual(by_round["r1"]["reviewer"], "claude:review-model")
+            self.assertIs(by_round["r1"]["reviewer_configured"], True)
+            self.assertEqual(by_round["r2"]["reviewer"], "unconfigured:model")
+            self.assertIsNone(by_round["r2"]["reviewer_configured"])
+
+            fixed_events = [
+                {**by_round["r1"], "at": "2026-07-15T01:00:00+00:00"},
+                {**by_round["r2"], "at": "2026-07-15T03:00:00+00:00"},
+            ]
+            rounds = [
+                {"round_id": "r1", "at": "2026-07-15T00:00:00+00:00",
+                 "review_mode": "packet"},
+                {"round_id": "r2", "at": "2026-07-15T02:00:00+00:00",
+                 "review_mode": "packet"},
+                {"round_id": "r3", "at": "2026-07-15T04:00:00+00:00",
+                 "review_mode": "packet"},
+            ]
+            result = overlay.evaluate_review_skipped_closes(
+                rounds, fixed_events, consecutive=2)
+            self.assertEqual(result["fires"], ["r3"])
+            self.assertIsNone(result["by_round"][-1]["feedback_observed"])
+            self.assertEqual(result["unknown_reviewer_feedback"], 1)
+
     def test_missing_inbox_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:
             root = self._root(d)
@@ -3998,6 +4041,65 @@ class ImproveMetricsTests(unittest.TestCase):
                 self.assertEqual(metric["unavailable_reason"], "enforce arc not shipped")
             self.assertIsNone(self._metric(
                 snapshot, "reproducibility_environment", "acceptance_reproducibility")["value"])
+
+    def test_remaining_metrics_snapshot_existing_taxonomy_and_lens_values(self):
+        from datetime import datetime, timezone
+
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d)
+            out.joinpath("facts.json").write_text(_json.dumps({
+                "generated_from": "fixture", "inputs": {}, "skipped_lenses": [], "lenses": [],
+            }))
+            sessions = [
+                {"project": "demo", "kind": "main", "session_id": "main",
+                 "tools": {"by_category": {}}, "retry_loops": {"count": 1},
+                 "context_heavy": {"tool_results_over_100kb": 0, "max_result_bytes": 10},
+                 "usage": {"input": 0}},
+                {"project": "demo", "kind": "subagent", "session_id": "worker-1",
+                 "tools": {"by_category": {}}, "retry_loops": {"count": 2},
+                 "context_heavy": {"tool_results_over_100kb": 3,
+                                   "max_result_bytes": 150000}},
+                {"project": "demo", "kind": "workflow_subagent", "session_id": "worker-2",
+                 "tools": {"by_category": {}}, "retry_loops": {"count": 0},
+                 "context_heavy": {"tool_results_over_100kb": 1,
+                                   "max_result_bytes": 200000}},
+            ]
+            _write_jsonl(out / "sessions.jsonl", sessions)
+            _write_jsonl(out / "reviews.jsonl", [
+                {"project": "demo", "round_id": "r1", "findings": [
+                    {"id": "report-1", "status": "REAL", "type": "reporting"},
+                    {"id": "report-2", "status": "REAL", "type": "reporting"},
+                    {"id": "rejected", "status": "REJECTED", "type": "reporting"},
+                ]},
+                {"project": "demo", "round_id": "r2", "findings": [
+                    {"id": "report-3", "status": "REAL", "type": "reporting"},
+                ]},
+            ])
+            first = improve.run_metrics(
+                out, improve.PROJECT_LENS_SCOPE,
+                now=datetime(2026, 7, 15, tzinfo=timezone.utc))
+            self.assertEqual(self._metric(
+                first, "quality", "report_grounding_finding_trend")["value"],
+                {"first": 2, "last": 1, "delta": -1})
+            self.assertEqual(self._metric(
+                first, "delegation_effectiveness", "worker_duplicate_exploration")["value"], {
+                    "retry_loops": {"sessions_with_retry": 1, "retry_loops_total": 2},
+                    "context_heavy": {"sessions_over_100kb": 2,
+                                      "results_over_100kb_total": 4,
+                                      "max_result_bytes": 200000},
+                })
+            self.assertEqual(self._metric(
+                first, "delegation_effectiveness", "blind_retry_count")["value"], 3)
+
+            sessions[1]["retry_loops"]["count"] = 0
+            _write_jsonl(out / "sessions.jsonl", sessions)
+            second = improve.run_metrics(
+                out, improve.PROJECT_LENS_SCOPE,
+                now=datetime(2026, 7, 16, tzinfo=timezone.utc))
+            self.assertEqual(second["comparison"]["changes"][
+                "delegation_effectiveness.blind_retry_count"], {
+                    "previous": 3, "current": 1, "delta": -2,
+                })
 
     def test_same_inputs_and_clock_are_byte_stable(self):
         from datetime import datetime, timezone
@@ -6948,6 +7050,7 @@ class DelegateCliTests(unittest.TestCase):
 def _overlay_project(d):
     root = Path(d) / "proj"
     root.mkdir()
+    (root / ".waystone.yml").write_text("version: 1\nproject: demo\n")
     home = Path(d) / "home"
     home.mkdir()
     return root, home
@@ -7049,6 +7152,29 @@ class OverlayStoreTests(unittest.TestCase):
             p.write_text(_j.dumps(delta))
             out = _run_with_home(home, lambda: overlay.promote(root, "verification_debt/skip"))
             self.assertEqual(out["status"], "warning")
+
+    def test_promote_observe_only_warns_that_runtime_emission_is_suppressed(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _overlay_project(d)
+            (root / ".waystone.yml").write_text(
+                "version: 1\nproject: demo\npolicy:\n  start_level: observe-only\n")
+            _add_delta(root, home)
+            path = _run_with_home(
+                home, lambda: overlay._delta_path(root, "verification_debt/skip"))
+            delta = _json.loads(path.read_text())
+            delta["replay"] = {"fires": 2, "opportunities": 5,
+                               "replayed_at": "2026-07-14T00:00:00+00:00"}
+            path.write_text(_json.dumps(delta))
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                promoted = _run_with_home(
+                    home, lambda: overlay.promote(root, "verification_debt/skip"))
+            self.assertEqual(promoted["status"], "warning")
+            self.assertIn("start_level", err.getvalue())
+            self.assertIn("suppressed", err.getvalue())
 
     def test_demote_warning_to_observing(self):
         with tempfile.TemporaryDirectory() as d:
@@ -7295,7 +7421,42 @@ class BoundaryWarnTests(unittest.TestCase):
                 events = _run_with_home(home, lambda: overlay.evaluate_boundary(
                     root, "delegate-run", {"delegation_id": did}))
             self.assertIn("waystone warn", err.getvalue())
-            self.assertEqual([e for e in events if e["event"] == "fire"][0]["delta_status"], "warning")
+            fire = [e for e in events if e["event"] == "fire"][0]
+            self.assertEqual(fire["delta_status"], "warning")
+            self.assertIs(fire["suppressed_by_start_level"], False)
+
+    def test_observe_only_suppresses_warning_stderr_but_records_and_projects_it(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            (root / ".waystone.yml").write_text(
+                "version: 1\nproject: demo\npolicy:\n  start_level: observe-only\n")
+            _deleg_run(root, home, _deleg_fake({"impl.py": "x\n"}, report=None))
+            rec = _latest_rec(root, home)
+            delegation_exposure = _json.loads((rec / "exposure.json").read_text())
+            self.assertEqual(delegation_exposure["start_level"], "observe-only")
+            _run_with_home(home, lambda: overlay.add_delta(
+                root, "verification_debt/skip",
+                rule="delegation-verification-evidence-v1", summary="s"))
+            _force_status(root, home, "verification_debt/skip", "warning")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                events = _run_with_home(home, lambda: overlay.evaluate_boundary(
+                    root, "delegate-run", {"delegation_id": rec.name}))
+            self.assertEqual(err.getvalue(), "")
+            fire = next(event for event in events if event["event"] == "fire")
+            self.assertEqual(fire["start_level"], "observe-only")
+            self.assertIs(fire["suppressed_by_start_level"], True)
+            projected, skipped, present = improve._load_warning_rows(root)
+            self.assertEqual((skipped, present), (0, True))
+            projected_fire = next(row for row in projected if row["event"] == "fire")
+            self.assertIs(projected_fire["suppressed_by_start_level"], True)
+
+            _path, round_exposure = _run_with_home(
+                home, lambda: overlay.write_round_exposure(root, "r1", None, None))
+            self.assertEqual(round_exposure["start_level"], "observe-only")
 
     def test_no_fire_when_verification_present(self):
         with tempfile.TemporaryDirectory() as d:
@@ -7874,12 +8035,13 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(task_rows["fix/open"]["delegations"], [
                 {"binding": None, "did": "did-unverified", "env": None,
                  "overlays_active": [],
-                 "scope_drift": {
-                     "changed_files": [], "coverage_reason": "missing-packet",
-                     "declared_scope": [], "evaluable": False, "fired": False,
-                     "outside_scope": [],
-                     "provenance": "unknown", "rule": "packet-declared-scope-v2",
-                 },
+                "scope_drift": {
+                    "changed_files": [], "coverage_reason": "missing-packet",
+                    "declared_scope": [], "evaluable": False, "fired": False,
+                    "outside_scope": [],
+                    "provenance": "unknown", "rule": "packet-declared-scope-v2",
+                },
+                 "start_level": None,
                  "state": "needs-review", "verification_present": False}])
             self.assertTrue(task_rows["feat/deleg-only"]["delegations"][0]["verification_present"])
             for row in task_rows.values():
@@ -10915,6 +11077,7 @@ class L2CGuardTests(unittest.TestCase):
             {"round_id": "r3", "at": "2026-07-15T04:00:00+00:00", "review_mode": "packet"},
         ]
         ingests = [{"event": "review-feedback", "source": "packet-ingest",
+                    "reviewer": "gpt-5.5-pro", "reviewer_configured": True,
                     "round_id": "r1", "at": "2026-07-15T01:00:00+00:00"}]
         out = overlay.evaluate_review_skipped_closes(rounds, ingests, consecutive=2)
         self.assertEqual(out["fires"], ["r3"])
@@ -12193,6 +12356,47 @@ class L3GapClosureAcceptanceTests(unittest.TestCase):
         self.assertIn("external-runner", skill)
         self.assertIn("host-guided", skill)
 
+    def test_routing_note_reaches_prompt_projection_and_opportunity_rebuttal(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".waystone.yml").write_text("version: 1\nproject: demo\n")
+            data = {"project": "demo", "tasks": [{
+                "id": "feat/route", "title": "route", "status": "active",
+                "accept": ["routed"],
+            }]}
+            packet, _acceptance = delegate._build_packet(
+                data, "feat/route", [], root,
+                routing_note="budget favors direct execution")
+            prompt = delegate._render_prompt(packet, "a" * 40)
+            self.assertIn("- routing_note: budget favors direct execution", prompt)
+
+            record = common.project_state_path(root) / "delegations" / "did-route"
+            record.mkdir(parents=True)
+            (record / "claim.json").write_text(_json.dumps({"task_id": "feat/route"}))
+            (record / "exposure.json").write_text(_json.dumps({"task_id": "feat/route"}))
+            (record / "status.json").write_text(_json.dumps({"state": "failed-runner"}))
+            (record / "packet.yaml").write_text(yaml.safe_dump(packet, sort_keys=False))
+            rows, skipped, _verdicts, _verifications = improve._project_delegation_rows(root)
+            self.assertEqual(skipped, 0)
+            self.assertEqual(rows[0]["routing_note"], packet["routing_note"])
+
+            sessions = [{
+                "project": "demo", "kind": "main", "session_id": "main-1",
+                "tools": {"by_category": {"file_write": 4, "shell": 3}},
+                "retry_loops": {"count": 1},
+                "context_heavy": {"max_result_bytes": 150000},
+                "usage": {"input": 120000},
+            }]
+            evidence = [{
+                "project": "demo", "task_id": "feat/route",
+                "task_context": {"session_id": "main-1", "acceptance_criteria": 1,
+                                 "declared_scope_count": 1},
+                "delegations": [{"did": "did-route", "routing_note": packet["routing_note"]}],
+            }]
+            lens = improve._lens_delegation_opportunity(sessions, evidence)
+            self.assertEqual(lens["per_project"]["demo"]["candidates"], 0)
+            self.assertEqual(lens["coverage"]["routing_note_rebuttal"], 1)
+
     def test_host_guided_routes_project_into_join_and_role_lens(self):
         routes = round._parse_route_notes([
             "implementer,forked-subagent,codex:gpt-test",
@@ -12606,7 +12810,7 @@ class L3GapClosureAcceptanceTests(unittest.TestCase):
 
     def test_init_consent_fields_are_validated_and_documented(self):
         cfg = common.normalize_config({"version": 1, "project": "demo"})
-        self.assertEqual(cfg["policy"]["start_level"], "observe-only")
+        self.assertEqual(cfg["policy"]["start_level"], "warn-allowed")
         self.assertIs(cfg["delegation"]["enabled"], True)
         with self.assertRaisesRegex(ValueError, "start_level"):
             common.normalize_config({"policy": {"start_level": "enforce"}})

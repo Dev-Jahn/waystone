@@ -901,7 +901,7 @@ def ingest(root: Path, round_id: str | None, src: Path = INBOX, reviewer: str | 
     # warning itself it is advisory evidence and can never change the completed ingest's exit code.
     try:
         import overlay
-        overlay.record_review_ingest(root, round_id)
+        overlay.record_review_ingest(root, round_id, reviewer=reviewer)
     except Exception as e:  # noqa: BLE001
         print(f"review ingest: overlay ingest observation unavailable ({e}) — ingest still succeeded",
               file=sys.stderr)

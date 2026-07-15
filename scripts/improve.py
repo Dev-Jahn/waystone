@@ -1341,6 +1341,17 @@ def _project_delegation_rows(root: Path) -> tuple[list[dict], int, int, int]:
             skipped += 1
             continue
         report = (contract or {}).get("delegate_report") or {}
+        packet = _load_record_mapping(record / "packet.yaml", "yaml")
+        raw_routing_note = packet.get("routing_note") if packet is not None else None
+        routing_note = None
+        if (isinstance(raw_routing_note, dict)
+                and raw_routing_note.get("provenance") == "main-session"
+                and isinstance(raw_routing_note.get("note"), str)
+                and raw_routing_note["note"] and "\n" not in raw_routing_note["note"]
+                and "\r" not in raw_routing_note["note"]):
+            routing_note = {
+                "provenance": "main-session", "note": raw_routing_note["note"],
+            }
         judgment, verdict_skipped = _latest_verdict_judgment(record)
         verdicts_invalid += verdict_skipped
         verification_runs, verify_skipped = _verification_run_projection(record)
@@ -1353,7 +1364,10 @@ def _project_delegation_rows(root: Path) -> tuple[list[dict], int, int, int]:
             "env": status.get("env") or (contract or {}).get("env"),
             "overlays_active": exposure.get("overlays") if isinstance(exposure.get("overlays"), list) else [],
             "binding": exposure.get("binding") if isinstance(exposure.get("binding"), dict) else None,
+            "start_level": exposure.get("start_level"),
         }
+        if routing_note is not None:
+            row["routing_note"] = routing_note
         if verification_runs:
             row["verification_runs"] = verification_runs
         if judgment is not None:
@@ -1423,6 +1437,8 @@ def _load_warning_rows(root: Path) -> tuple[list[dict], int, bool]:
             "params_fingerprint": row.get("params_fingerprint"),
             "policy_source_kind": row.get("policy_source_kind"),
             "delta_status": row.get("delta_status"),
+            "start_level": row.get("start_level"),
+            "suppressed_by_start_level": row.get("suppressed_by_start_level"),
             "context": row.get("context") if isinstance(row.get("context"), dict) else {},
             "source_pointer": f"{path}:{line_number}",
         })
@@ -2002,7 +2018,8 @@ def _round_exposure_projection(task: dict, exposures: list[dict] | dict[str, dic
     if match is None:
         return None
     return {key: match.get(key) for key in (
-        "round_id", "at", "session_id", "head_sha", "overlays_active", "bindings", "routes")}
+        "round_id", "at", "session_id", "head_sha", "start_level", "overlays_active",
+        "bindings", "routes")}
 
 
 def _task_acceptance(task: dict, delegations: list[dict],
@@ -2454,6 +2471,20 @@ def _lens_delegation_opportunity(sessions: list[dict], evidence_rows: list[dict]
         session = matches[0]
         if session.get("kind") != "main":
             coverage["non_main_session"] += 1
+            continue
+        routing_notes = [
+            delegation["routing_note"]["note"]
+            for delegation in (row.get("delegations") or [])
+            if isinstance(delegation, dict)
+            and isinstance(delegation.get("routing_note"), dict)
+            and delegation["routing_note"].get("provenance") == "main-session"
+            and isinstance(delegation["routing_note"].get("note"), str)
+            and delegation["routing_note"]["note"]
+            and "\n" not in delegation["routing_note"]["note"]
+            and "\r" not in delegation["routing_note"]["note"]
+        ]
+        if routing_notes:
+            coverage["routing_note_rebuttal"] += 1
             continue
         if row.get("delegations"):
             coverage["already_delegated"] += 1
@@ -3119,6 +3150,7 @@ _METRIC_FIRST_MEASURED = {
     "quality.finding_recurrence_rate": "0.8.0",
     "quality.severe_finding_recurrence_rate": "0.8.0",
     "quality.verification_finding_trend": "0.8.0",
+    "quality.report_grounding_finding_trend": "0.8.0",
     "quality.reopen_count": "0.8.0",
     "quality.remediation_round_burden": "0.8.0",
     "quality.post_acceptance_defect_rate": "0.8.0",
@@ -3128,6 +3160,8 @@ _METRIC_FIRST_MEASURED = {
     "delegation_effectiveness.opportunity_adjusted_useful_artifact_rate": "0.8.0",
     "delegation_effectiveness.main_direct_work": "0.7.0",
     "delegation_effectiveness.main_context_inflow": "0.7.0",
+    "delegation_effectiveness.worker_duplicate_exploration": "0.8.0",
+    "delegation_effectiveness.blind_retry_count": "0.8.0",
     "reproducibility_environment.environment_failure_rate": "0.8.0",
     "reproducibility_environment.ad_hoc_manifest_mutation_fire_rate": "0.8.0",
     "reproducibility_environment.acceptance_reproducibility": "0.8.0",
@@ -3242,12 +3276,14 @@ def _quality_metrics(reviews: list[dict] | None,
             name: _unavailable_metric(f"{group}.{name}", "reviews projection unavailable", missing)
             for name in ("finding_recurrence_rate", "reopen_count",
                          "remediation_round_burden", "post_acceptance_defect_rate",
-                         "severe_finding_recurrence_rate", "verification_finding_trend")
+                         "severe_finding_recurrence_rate", "verification_finding_trend",
+                         "report_grounding_finding_trend")
         }
 
     type_rounds: dict[tuple[str, str], set[str]] = {}
     severe_type_rounds: dict[tuple[str, str], set[str]] = {}
     verification_by_round: Counter = Counter()
+    report_grounding_by_round: Counter = Counter()
     total_findings = verified_typed = unknown_type = non_real = 0
     reopen_by_task: dict[tuple[str, str], int] = {}
     remediation_by_task: dict[tuple[str, str], set[str]] = {}
@@ -3260,6 +3296,7 @@ def _quality_metrics(reviews: list[dict] | None,
         round_id = review_row.get("round_id")
         if isinstance(round_id, str):
             verification_by_round[(project, round_id)] += 0
+            report_grounding_by_round[(project, round_id)] += 0
         round_at = parse_iso_timestamp(review_row.get("round_at"))
         if round_at is None:
             review_rounds_without_time += 1
@@ -3280,6 +3317,8 @@ def _quality_metrics(reviews: list[dict] | None,
                     severe_type_rounds.setdefault((project, finding_type), set()).add(round_id)
                 if finding_type == "verification" and isinstance(round_id, str):
                     verification_by_round[(project, round_id)] += 1
+                if finding_type == "reporting" and isinstance(round_id, str):
+                    report_grounding_by_round[(project, round_id)] += 1
             elif finding.get("status") == "REAL":
                 unknown_type += 1
             else:
@@ -3338,6 +3377,27 @@ def _quality_metrics(reviews: list[dict] | None,
             {"first_project": first_key[0], "first_round": first_key[1],
              "last_project": last_key[0], "last_round": last_key[1],
              "rounds_with_verification_findings": len(verification_rounds)},
+            "observed")
+
+    report_rounds = sorted(report_grounding_by_round)
+    if len(report_rounds) < 2:
+        report_grounding_trend = _unavailable_metric(
+            f"{group}.report_grounding_finding_trend",
+            "fewer than two review rounds with reporting taxonomy coverage",
+            {"rounds_with_reporting_taxonomy_coverage": len(report_rounds),
+             "taxonomy_type": "reporting"})
+    else:
+        first_key, last_key = report_rounds[0], report_rounds[-1]
+        first_count = report_grounding_by_round[first_key]
+        last_count = report_grounding_by_round[last_key]
+        report_grounding_trend = _metric_record(
+            f"{group}.report_grounding_finding_trend",
+            {"first": first_count, "last": last_count, "delta": last_count - first_count},
+            last_count, first_count,
+            {"first_project": first_key[0], "first_round": first_key[1],
+             "last_project": last_key[0], "last_round": last_key[1],
+             "rounds_with_reporting_taxonomy_coverage": len(report_rounds),
+             "taxonomy_type": "reporting"},
             "observed")
 
     reopen_denominator = len(reopen_by_task)
@@ -3406,6 +3466,7 @@ def _quality_metrics(reviews: list[dict] | None,
         "finding_recurrence_rate": recurrence,
         "severe_finding_recurrence_rate": severe_recurrence,
         "verification_finding_trend": verification_trend,
+        "report_grounding_finding_trend": report_grounding_trend,
         "reopen_count": reopen,
         "remediation_round_burden": remediation,
         "post_acceptance_defect_rate": post,
@@ -3442,6 +3503,66 @@ def _delegation_metrics(sessions: list[dict] | None, delegations: list[dict] | N
             f"{group}.main_context_inflow", input_tokens, input_tokens, len(main_sessions),
             {"main_sessions": len(main_sessions), "max_result_bytes_total": result_bytes,
              "lens_rule": "context-heavy-v2"}, "observed")
+
+    if sessions is None:
+        worker_duplicate_exploration = _unavailable_metric(
+            f"{group}.worker_duplicate_exploration", "sessions projection unavailable",
+            {"sessions_available": False})
+        blind_retry = _unavailable_metric(
+            f"{group}.blind_retry_count", "sessions projection unavailable",
+            {"sessions_available": False})
+    else:
+        worker_sessions = [
+            row for row in sessions if isinstance(row, dict)
+            and row.get("kind") in ("subagent", "workflow_subagent")
+        ]
+        if not worker_sessions:
+            worker_duplicate_exploration = _unavailable_metric(
+                f"{group}.worker_duplicate_exploration", "no worker sessions observed",
+                {"sessions_available": True, "worker_sessions": 0,
+                 "retry_lens_rule": "retry-loops-v1",
+                 "context_lens_rule": "context-heavy-v2"})
+        else:
+            retry_lens = _lens_retry_loops(worker_sessions)
+            context_lens = _lens_context_heavy(worker_sessions)
+            retry_rows = list(retry_lens["per_project"].values())
+            context_rows = list(context_lens["per_project"].values())
+            worker_value = {
+                "retry_loops": {
+                    "sessions_with_retry": sum(
+                        row["sessions_with_retry"] for row in retry_rows),
+                    "retry_loops_total": sum(row["retry_loops_total"] for row in retry_rows),
+                },
+                "context_heavy": {
+                    "sessions_over_100kb": sum(
+                        row["sessions_over_100kb"] for row in context_rows),
+                    "results_over_100kb_total": sum(
+                        row["results_over_100kb_total"] for row in context_rows),
+                    "max_result_bytes": max(
+                        (row["max_result_bytes"] for row in context_rows), default=0),
+                },
+            }
+            worker_duplicate_exploration = _metric_record(
+                f"{group}.worker_duplicate_exploration", worker_value, worker_value,
+                len(worker_sessions),
+                {"worker_sessions": len(worker_sessions),
+                 "worker_kinds": ["subagent", "workflow_subagent"],
+                 "retry_lens_rule": retry_lens["rule"],
+                 "context_lens_rule": context_lens["rule"]},
+                "inferred")
+        if not sessions:
+            blind_retry = _unavailable_metric(
+                f"{group}.blind_retry_count", "no traced sessions observed",
+                {"sessions_available": True, "sessions": 0,
+                 "lens_rule": "retry-loops-v1", "signal_rule": "same-cmd-refail-v1"})
+        else:
+            retry_lens = _lens_retry_loops(sessions)
+            blind_retries = sum(
+                row["retry_loops_total"] for row in retry_lens["per_project"].values())
+            blind_retry = _metric_record(
+                f"{group}.blind_retry_count", blind_retries, blind_retries, len(sessions),
+                {"sessions": len(sessions), "lens_rule": retry_lens["rule"],
+                 "signal_rule": "same-cmd-refail-v1"}, "inferred")
     if delegations is None:
         completion = _unavailable_metric(
             f"{group}.completion_rate", "delegations projection unavailable",
@@ -3549,6 +3670,8 @@ def _delegation_metrics(sessions: list[dict] | None, delegations: list[dict] | N
     return {
         "main_direct_work": main_direct_work,
         "main_context_inflow": main_context_inflow,
+        "worker_duplicate_exploration": worker_duplicate_exploration,
+        "blind_retry_count": blind_retry,
         "completion_rate": completion,
         "useful_artifact_rate": useful_artifact,
         "adaptive_before_after_trend": adaptive_trend,

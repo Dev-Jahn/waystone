@@ -1518,7 +1518,9 @@ def normalize_config(cfg: dict | None) -> dict:
     policy = cfg.setdefault("policy", {})
     if not isinstance(policy, dict):
         raise ValueError("policy: must be a mapping (start_level)")
-    policy.setdefault("start_level", "observe-only")
+    # Before start_level had a runtime consumer, omitted fields still emitted warning-stage stderr.
+    # Preserve that behavior for existing projects; init writes an explicit user choice for new ones.
+    policy.setdefault("start_level", "warn-allowed")
     if policy["start_level"] not in ("observe-only", "warn-allowed"):
         raise ValueError("policy.start_level must be 'observe-only' or 'warn-allowed'")
     return cfg

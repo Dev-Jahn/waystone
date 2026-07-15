@@ -345,22 +345,33 @@ def evaluate_review_skipped_closes(rounds: list[dict], ingests: list[dict], *,
             if review_events[event_index]["at"] > previous_close_at:
                 interval_events.append(review_events[event_index])
             event_index += 1
+        recognized_events = [
+            event for event in interval_events
+            if event.get("source") == "pr-marker"
+            or event.get("reviewer_configured") is True
+        ]
+        unknown_events = [event for event in interval_events if event not in recognized_events]
+        for event in unknown_events:
+            unknown[event.get("reviewer_coverage_reason")
+                    or "reviewer-identity-unavailable"] += 1
         payload = _round_payload(close)
         review_mode = close.get("review_mode", payload.get("review_mode"))
         reason = None
         if review_mode not in ("packet", "pr"):
             reason = "review-mode-unavailable"
         elif review_mode == "pr" and not any(event.get("source") == "pr-marker"
-                                              for event in interval_events):
+                                              for event in recognized_events):
             reason = "pr-state-unavailable"
         if reason is not None:
             unknown[reason] += 1
             streak = 0
             by_round.append({"round_id": close["round_id"], "streak": None, "fired": False,
-                             "evaluable": False, "coverage_reason": reason})
+                             "evaluable": False, "coverage_reason": reason,
+                             "feedback_observed": None})
             previous_close_at = close["at"]
             continue
-        saw_feedback = bool(interval_events)
+        saw_feedback = bool(recognized_events)
+        feedback_observed = True if saw_feedback else None if unknown_events else False
         streak = 1 if saw_feedback else streak + 1
         changed_files = payload.get("changed_files")
         open_blockers = payload.get("open_blocker_task_ids")
@@ -380,15 +391,26 @@ def evaluate_review_skipped_closes(rounds: list[dict], ingests: list[dict], *,
             fires.append(close["round_id"])
         by_round.append({"round_id": close["round_id"], "streak": streak, "fired": fired,
                          "evaluable": True, "coverage_reason": None,
-                         "risk_reason": risk_reason, "risk_evaluable": risk_known})
+                         "risk_reason": risk_reason, "risk_evaluable": risk_known,
+                         "feedback_observed": feedback_observed})
         previous_close_at = close["at"]
     opportunities = sum(row["evaluable"] for row in by_round)
+    feedback_coverage = {
+        "observed": sum(row.get("feedback_observed") is True for row in by_round),
+        "absent": sum(row.get("feedback_observed") is False for row in by_round),
+        "unknown": sum(row.get("feedback_observed") is None for row in by_round),
+        "unknown_reasons": dict(sorted(
+            (reason, count) for reason, count in unknown.items()
+            if reason.startswith("reviewer-") or reason.startswith("configured-reviewer-"))),
+    }
     return {"evaluable": bool(opportunities), "fired": bool(fires),
             "coverage_reason": None if opportunities else "review-state-unavailable",
             "opportunities": opportunities, "fires": fires, "by_round": by_round,
             "consecutive": consecutive,
             "diff_files_threshold": diff_files_threshold,
             "open_blocker_threshold": open_blocker_threshold,
+            "feedback_coverage": feedback_coverage,
+            "unknown_reviewer_feedback": sum(feedback_coverage["unknown_reasons"].values()),
             "unevaluable_pr_state": unknown["pr-state-unavailable"],
             "unevaluable_review_mode": unknown["review-mode-unavailable"],
             "unevaluable_high_risk": unknown["high-risk-input-unavailable"]}
@@ -458,7 +480,23 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def record_review_feedback(root: Path, round_id: str, *, source: str, event_id: str) -> dict:
+def _configured_reviewer_membership(root: Path, reviewer_id: str | None) -> tuple[bool | None, str | None]:
+    if not isinstance(reviewer_id, str) or not reviewer_id.strip():
+        return None, "reviewer-identity-unavailable"
+    try:
+        import review
+
+        configured = review.resolve_reviewers(
+            root, (load_config(root).get("review") or {}).get("reviewers", []))
+    except (OSError, ValueError, WorkflowError):
+        return None, "configured-reviewer-resolution-unavailable"
+    if reviewer_id not in configured:
+        return None, "reviewer-not-configured"
+    return True, None
+
+
+def record_review_feedback(root: Path, round_id: str, *, source: str, event_id: str,
+                           reviewer: str | None = None) -> dict:
     """Append one canonical review-feedback event shared by packet ingest and completed PR markers."""
     if not isinstance(round_id, str) or not round_id:
         raise WorkflowError("review feedback round_id must be non-empty")
@@ -466,15 +504,22 @@ def record_review_feedback(root: Path, round_id: str, *, source: str, event_id: 
         raise WorkflowError("review feedback source must be packet-ingest|pr-marker")
     if not isinstance(event_id, str) or not event_id:
         raise WorkflowError("review feedback event_id must be non-empty")
+    if reviewer is not None and (not isinstance(reviewer, str) or not reviewer.strip()):
+        raise WorkflowError("review feedback reviewer must be a non-empty string when provided")
+    if source == "pr-marker":
+        reviewer_configured, reviewer_reason = True, None
+    else:
+        reviewer_configured, reviewer_reason = _configured_reviewer_membership(root, reviewer)
     row = {
         "schema": REVIEW_FEEDBACK_SCHEMA, "event": "review-feedback", "at": _now_iso(),
         "round_id": round_id, "source": source, "event_id": event_id,
-        "provenance": "observed",
+        "reviewer": reviewer, "reviewer_configured": reviewer_configured,
+        "reviewer_coverage_reason": reviewer_reason, "provenance": "observed",
     }
     existing, _skipped = load_review_ingests(root)
     prior = next((item for item in existing if item.get("event_id") == event_id), None)
     if prior is not None:
-        return {key: prior[key] for key in row}
+        return {key: prior.get(key) for key in row}
     _ensure_project_state_or_refuse(root)
     path = _review_ingests_path(root)
     _mkdir_or_refuse(path.parent)
@@ -483,10 +528,11 @@ def record_review_feedback(root: Path, round_id: str, *, source: str, event_id: 
     return row
 
 
-def record_review_ingest(root: Path, round_id: str) -> dict:
+def record_review_ingest(root: Path, round_id: str, reviewer: str | None = None) -> dict:
     """Compatibility wrapper: a packet ingest projects to the canonical feedback event."""
     return record_review_feedback(
-        root, round_id, source="packet-ingest", event_id=f"packet:{round_id}")
+        root, round_id, source="packet-ingest",
+        event_id=f"packet:{round_id}:reviewer:{reviewer or 'unknown'}", reviewer=reviewer)
 
 
 def load_review_ingests(root: Path) -> tuple[list[dict], int]:
@@ -512,9 +558,31 @@ def load_review_ingests(root: Path) -> tuple[list[dict], int]:
                 or parse_iso_timestamp(row.get("at")) is None
                 or not isinstance(row.get("round_id"), str)
                 or row.get("source") not in ("packet-ingest", "pr-marker")
-                or not isinstance(row.get("event_id"), str)):
+                or not isinstance(row.get("event_id"), str)
+                or (row.get("reviewer") is not None
+                    and (not isinstance(row.get("reviewer"), str)
+                         or not row["reviewer"].strip()))
+                or (row.get("reviewer_configured") is not None
+                    and row.get("reviewer_configured") is not True)
+                or (row.get("reviewer_coverage_reason") is not None
+                    and not isinstance(row.get("reviewer_coverage_reason"), str))):
             skipped += 1
             continue
+        if (row["source"] == "packet-ingest" and row.get("reviewer_configured") is True
+                and not isinstance(row.get("reviewer"), str)):
+            skipped += 1
+            continue
+        if row["source"] == "pr-marker":
+            row = {**row, "reviewer_configured": True,
+                   "reviewer_coverage_reason": None}
+        elif row.get("reviewer_configured") is not True:
+            row = {
+                **row, "reviewer_configured": None,
+                "reviewer_coverage_reason": (
+                    row.get("reviewer_coverage_reason")
+                    if isinstance(row.get("reviewer_coverage_reason"), str)
+                    else "reviewer-identity-unavailable"),
+            }
         rows.append({**row, "source_pointer": f"{path}:{line_number}"})
     deduped = {row["event_id"]: row for row in rows}
     rows = list(deduped.values())
@@ -553,6 +621,8 @@ def _review_ingests_for_rounds(root: Path, rounds: list[dict]) -> tuple[list[dic
             "schema": REVIEW_FEEDBACK_SCHEMA, "event": "review-feedback",
             "source": "packet-ingest", "event_id": f"legacy-packet:{feedback_round}",
             "provenance": "feedback-file-between-close-approximation",
+            "reviewer": None, "reviewer_configured": None,
+            "reviewer_coverage_reason": "reviewer-identity-unavailable",
             "source_pointer": str(review_dir / f"{feedback_round}-feedback.md"),
         })
         legacy += 1
@@ -1322,7 +1392,15 @@ def _transition(root: Path, delta_id: str, to: str, *, require_from: str | None 
 def promote(root: Path, delta_id: str) -> dict:
     """observing → warning; refused unless a replay result exists (S8/#6 — warn promotion is gated on
     seeing the estimated fire rate first)."""
-    return _transition(root, delta_id, "warning", require_from="observing", replay_gate=True)
+    start_level = load_config(root)["policy"]["start_level"]
+    delta = _transition(root, delta_id, "warning", require_from="observing", replay_gate=True)
+    if start_level == "observe-only":
+        print(
+            f"waystone overlay: promoted {delta_id} to warning, but stderr emission is suppressed "
+            "by policy.start_level observe-only",
+            file=sys.stderr,
+        )
+    return delta
 
 
 def demote(root: Path, delta_id: str) -> dict:
@@ -1602,8 +1680,13 @@ def _emit(root: Path, boundary: str, policy: dict, rule: str, delta_status: str,
           message: str, context: dict) -> dict:
     """Append a warnings row; warning-stage fires and every policy conflict are visible on stderr."""
     identity = policy["identity"]
+    start_level = load_config(root)["policy"]["start_level"]
+    stderr_eligible = ((event == "fire" and delta_status == "warning")
+                       or event == "conflict")
+    suppressed = stderr_eligible and start_level == "observe-only"
     row = {"at": _now_iso(), "boundary": boundary, "policy_identity": identity, "rule": rule,
            "delta_status": delta_status, "event": event, "message": message, "context": context,
+           "start_level": start_level, "suppressed_by_start_level": suppressed,
            "params_fingerprint": _policy_params_fingerprint(
                rule, dict(policy.get("params") or {})),
            "policy_source_kind": policy.get("source_kind")}
@@ -1611,9 +1694,9 @@ def _emit(root: Path, boundary: str, policy: dict, rule: str, delta_status: str,
         row["origin_delta_id"] = policy["origin_delta_id"]
     _append_warning(root, row)
     display = f"{identity['layer']}:{identity['id']}"
-    if event == "fire" and delta_status == "warning":
+    if event == "fire" and delta_status == "warning" and not suppressed:
         print(f"waystone warn [{display}]: {message}", file=sys.stderr)
-    elif event == "conflict":
+    elif event == "conflict" and not suppressed:
         print(f"waystone warn conflict [{display}]: {message}", file=sys.stderr)
     return row
 
@@ -2213,6 +2296,7 @@ def write_round_exposure(root: Path, round_id: str, head_sha: str | None, waterm
         "project": {"pslug": _project_slug(root), "root": str(Path(root).resolve())},
         "head_sha": head_sha, "config_watermark": watermark, "base_sha": base_sha,
         "profile_fingerprint": fp, "bindings": bindings,
+        "start_level": cfg["policy"]["start_level"],
         "routes": list(routes or []),
         "config_fingerprint": config_fingerprint,
         "committed_policy_fingerprint": committed_policy_fingerprint,

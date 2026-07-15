@@ -511,6 +511,13 @@ def _render_prompt(packet: dict, base_sha: str) -> str:
             lines.append(f"- {field}: {task[field]}")
     if task.get("deps"):
         lines.append("- deps: " + ", ".join(f"{d['id']} ({d['status']})" for d in task["deps"]))
+    routing_note = packet.get("routing_note")
+    if (isinstance(routing_note, dict)
+            and routing_note.get("provenance") == "main-session"
+            and isinstance(routing_note.get("note"), str)
+            and routing_note["note"] and "\n" not in routing_note["note"]
+            and "\r" not in routing_note["note"]):
+        lines.append(f"- routing_note: {routing_note['note']}")
     acceptance = "\n".join(f"{i}. {c}" for i, c in enumerate(packet["acceptance"], 1))
     return (_TEMPLATE_PATH.read_text(encoding="utf-8")
             .replace("{{TASK_BLOCK}}", "\n".join(lines))
@@ -827,6 +834,7 @@ def _active_overlays(root: Path, composition: dict | None = None) -> list[dict]:
 def _write_exposure(record_dir, did, root, packet, task_id, head_sha, base_sha, dirty, binding,
                     fingerprint, overlays, runner_override=None, policy_composition=None):
     runner = str(binding.get("backend", "")).partition(":")[0]
+    start_level = load_config(root)["policy"]["start_level"]
     exposure = {
         "schema": "waystone-exposure-1", "delegation_id": did, "at": _now_iso(),
         "project": {"pslug": _project_slug(root), "root": str(root.resolve()), "name": packet["project"]["name"]},
@@ -835,6 +843,7 @@ def _write_exposure(record_dir, did, root, packet, task_id, head_sha, base_sha, 
                  "dirty_state_policy": "snapshot-commit-v1"},
         "binding": binding,
         "profile_fingerprint": fingerprint,
+        "start_level": start_level,
         "sandbox": "workspace-write" if runner == "codex" else "none",
         "overlays": overlays,
         # Adapt & Enforce has not shipped: null/[] are the truthful effective values until that arc
