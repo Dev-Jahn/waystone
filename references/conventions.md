@@ -96,9 +96,10 @@ rather than copying it.
 
 ## 6. Status lifecycle
 
-`pending → active → done`, with `blocked` (unmet deps — list them) and `dropped`
-(abandoned, keep for the record) as side states. `done` requires its gates green; a `gate/...`
-task is `done` only when the bar actually passed, with evidence linked in PROGRESS.
+`pending → active → done`, with `blocked` (unmet deps — list them), `parked`
+(intentionally deferred — record why in `notes`; not actionable and not auto-archived), and
+`dropped` (abandoned, keep for the record) as side states. `done` requires its gates green; a
+`gate/...` task is `done` only when the bar actually passed, with evidence linked in PROGRESS.
 
 ## 7. Review (configured by `review.mode`)
 

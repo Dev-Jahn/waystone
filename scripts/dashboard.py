@@ -57,6 +57,9 @@ def render_tasks(data: dict) -> None:
             unmet = [d for d in t.get("deps", []) if by_id.get(d, {}).get("status") != "done"]
             why = f"  {c(DIM, 'waiting: ' + ', '.join(unmet))}" if unmet else ""
             print(f"    {c(RED, '⛔ blocked')} {c(BOLD, t['id'])} — {t.get('title', '')}{why}")
+    for t in tasks:
+        if t.get("status") == "parked":
+            print(f"    {c(YELLOW, '⏸ parked')} {c(BOLD, t['id'])} — {t.get('title', '')}")
     pend = sum(1 for t in tasks if t.get("status") == "pending")
     if pend:
         print(c(DIM, f"    … {pend} pending"))

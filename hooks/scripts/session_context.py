@@ -213,7 +213,8 @@ def main() -> int:
     done = sum(1 for t in tasks if t.get("status") == "done")
     active = [t for t in tasks if t.get("status") == "active"]
     blocked = [t for t in tasks if t.get("status") == "blocked"]
-    decisions = [t for t in tasks if t.get("id", "").startswith("decision/") and t.get("status") not in ("done", "dropped")]
+    decisions = [t for t in tasks if t.get("id", "").startswith("decision/")
+                 and t.get("status") not in ("done", "dropped", "parked")]
     rounds = sorted({t["round"] for t in active if t.get("round")})
 
     lines = [

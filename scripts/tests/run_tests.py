@@ -33,6 +33,7 @@ import overlay  # noqa: E402
 import merge  # noqa: E402
 import resume  # noqa: E402
 import review  # noqa: E402
+import roadmap  # noqa: E402
 import round  # noqa: E402
 import tasks  # noqa: E402
 import validate  # noqa: E402
@@ -2712,6 +2713,134 @@ class TaskArchiveTests(unittest.TestCase):
             # registry now has 7 tasks (< threshold 10): a second run is a clean no-op
             self.assertEqual(tasks.main(["archive", str(root), "--threshold", "10", "--keep", "5"]), 0)
             self.assertEqual(len(yaml.safe_load((root / "tasks.archive.yaml").read_text())["tasks"]), 15)
+
+
+class ParkedTaskContractTests(unittest.TestCase):
+    def test_registry_and_task_cli_accept_parked(self):
+        parked = {"version": 1, "project": "x", "tasks": [{
+            "id": "feat/parked-one", "title": "an intentionally parked task", "status": "parked",
+        }]}
+        self.assertEqual(validate.validate(parked), [])
+
+        with tempfile.TemporaryDirectory() as d:
+            import contextlib
+            import io
+
+            root = Path(d)
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
+            (root / "tasks.yaml").write_text(TASKS_FIXTURE)
+            self.assertEqual(tasks.main([
+                "add", "feat/parked-two", str(root), "--title", "another parked task",
+                "--status", "parked",
+            ]), 0)
+            self.assertEqual(tasks.main([
+                "set", "feat/alpha", "status", "parked", str(root),
+            ]), 0)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(tasks.main([
+                    "list", str(root), "--status", "parked",
+                ]), 0)
+            self.assertEqual(
+                {line.split()[0] for line in out.getvalue().splitlines()},
+                {"feat/alpha", "feat/parked-two"},
+            )
+
+    def test_parked_is_neither_actionable_nor_dependency_satisfying(self):
+        data = {"tasks": [
+            {"id": "feat/done", "title": "done", "status": "done"},
+            {"id": "feat/parked", "title": "parked", "status": "parked",
+             "deps": ["feat/done"]},
+            {"id": "feat/waiting", "title": "waiting", "status": "pending",
+             "deps": ["feat/parked"]},
+            {"id": "feat/ready", "title": "ready", "status": "pending", "deps": []},
+        ]}
+        self.assertEqual(common.next_actionable(data), [("feat/ready", "ready")])
+
+    def test_archive_selects_only_done_and_dropped(self):
+        data = {"tasks": [
+            {"id": "fix/done-one", "status": "done"},
+            {"id": "fix/dropped-one", "status": "dropped"},
+            {"id": "feat/parked-one", "status": "parked"},
+            {"id": "feat/pending-one", "status": "pending"},
+        ]}
+        self.assertEqual(
+            tasks.select_for_archive(data, threshold=0, keep=0),
+            ["fix/done-one", "fix/dropped-one"],
+        )
+
+    def test_roadmap_and_dashboard_render_parked_distinctly(self):
+        import contextlib
+        import io
+
+        data = {"version": 1, "project": "demo", "tasks": [
+            {"id": "feat/parked-one", "title": "an intentionally parked task", "status": "parked"},
+            {"id": "feat/pending-one", "title": "an ordinary pending task", "status": "pending"},
+            {"id": "feat/blocked-one", "title": "a dependency blocked task", "status": "blocked"},
+        ]}
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            init_repo(root)
+            (root / "tasks.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+            rendered = roadmap.render(root)
+        self.assertIn("classDef parked", rendered)
+        self.assertIn("class feat_parked_one parked", rendered)
+        self.assertIn("⏸ parked", rendered)
+        self.assertIn("1 parked", rendered)
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            dashboard.render_tasks(data)
+        status = out.getvalue()
+        self.assertIn("⏸ parked", status)
+        self.assertIn("⛔ blocked", status)
+        self.assertIn("… 1 pending", status)
+
+    def test_session_context_does_not_inject_parked_tasks(self):
+        import contextlib
+        import io
+        sys.path.insert(0, str(SCRIPTS.parent / "hooks" / "scripts"))
+        import session_context
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "repo"
+            home = Path(d) / "home"
+            root.mkdir()
+            home.mkdir()
+            init_repo(root)
+            (root / ".waystone.yml").write_text("version: 1\nproject: demo\n")
+            (root / "tasks.yaml").write_text(
+                "version: 1\nproject: demo\ntasks:\n"
+                "  - id: decision/parked-one\n    title: an intentionally parked decision\n"
+                "    status: parked\n"
+                "  - id: feat/parked-two\n    title: an intentionally parked feature\n"
+                "    status: parked\n"
+                "  - id: feat/ready-one\n    title: an ordinary ready task\n"
+                "    status: pending\n"
+            )
+            old_argv = sys.argv
+            out = io.StringIO()
+            try:
+                sys.argv = ["session_context.py", str(root)]
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(_run_with_home(home, session_context.main), 0)
+            finally:
+                sys.argv = old_argv
+        context = _json.loads(out.getvalue())["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("decision/parked-one", context)
+        self.assertNotIn("feat/parked-two", context)
+        self.assertIn("feat/ready-one", context)
+
+    def test_public_docs_define_parked_contract(self):
+        root = SCRIPTS.parent
+        conventions = (root / "docs" / "CONVENTIONS.md").read_text()
+        self.assertEqual(conventions, (root / "references" / "conventions.md").read_text())
+        for phrase in ("`parked`", "intentionally deferred", "`notes`", "not actionable",
+                       "not auto-archived"):
+            self.assertIn(phrase, conventions)
+        readme = (root / "README.md").read_text()
+        self.assertIn("parked", readme)
+        self.assertIn("intentionally deferred", readme)
 
 
 class TaskReadNudgeTests(unittest.TestCase):

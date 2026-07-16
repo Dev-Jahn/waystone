@@ -1419,7 +1419,7 @@ class WorkflowError(Exception):
     main() converts it to an exit code. (sys.exit raises SystemExit/BaseException, which slips past
     `except Exception` rollbacks.)"""
 TASK_TYPES = ("feat", "fix", "perf", "gate", "spike", "decision", "docs", "chore")
-TASK_STATUSES = ("pending", "active", "blocked", "done", "dropped")
+TASK_STATUSES = ("pending", "active", "blocked", "parked", "done", "dropped")
 MILESTONE_STATUSES = ("pending", "active", "done")
 SEVERITIES = ("blocker", "major", "minor")
 

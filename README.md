@@ -125,7 +125,7 @@ periodically to analyze past sessions and review results.
 | `/waystone:round` | `$waystone:round` | Closes a bounded work cycle, updates progress, refreshes generated views, and creates a review request. |
 | `/waystone:review` | `$waystone:review` | Preserves a reviewer reply exactly, verifies each issue, and turns confirmed issues into tasks. |
 | `/waystone:delegate` | `$waystone:delegate` | Autonomously runs one task in an isolated worktree, verifies it, and resolves it with a recorded evidence-backed verdict. |
-| `/waystone:status` | `$waystone:status` | Shows active, blocked, and pending work across registered local or remote projects. |
+| `/waystone:status` | `$waystone:status` | Shows active, blocked, parked, and pending work across registered local or remote projects. |
 | `/waystone:improve` | `$waystone:improve` | Analyzes host session history and review evidence, then proposes evidence-backed workflow improvements. |
 
 <details>
@@ -170,6 +170,10 @@ Most validation, rendering, bookkeeping, log parsing, and policy checks are plai
 </details>
 
 <br>
+
+Task status follows `pending → active → done`, with `blocked`, `parked`, and `dropped` side
+states. `parked` means intentionally deferred: record the reason in `notes`; it is neither
+actionable nor auto-archived.
 
 ## Rounds and independent review
 
