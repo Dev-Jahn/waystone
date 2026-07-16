@@ -543,6 +543,7 @@ def _run_env_prep(worktree: Path, commands: list[str]) -> tuple[int, str]:
     """Run each prep command in the worktree cwd (no shell, shlex.split, 600s each). Returns (rc,
     stderr_tail<=20 lines); rc 0 means every command succeeded."""
     env = {**os.environ, "UV_CACHE_DIR": str(worktree / ".waystone-uv-cache")}
+    env.pop(_VERIFIER_SESSION_ENV, None)  # prep belongs to writable implementer RUN scope
     for cmd in commands:
         try:
             p = subprocess.run(shlex.split(cmd), cwd=str(worktree),
@@ -558,7 +559,10 @@ def _run_env_prep(worktree: Path, commands: list[str]) -> tuple[int, str]:
 def _run_codex(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
                *, effort: str | None = None) -> tuple[int, float]:
     """Invoke `codex exec` in the worktree (workspace-write sandbox hardcoded, S8). Returns (rc,
-    duration_s). The full --json stream and last message are preserved as local evidence."""
+    duration_s). The full --json stream and last message are preserved as local evidence.
+
+    RUN is an implementer session, not a verifier session: lifecycle hooks may seed ignored
+    `.waystone` project state here. Result capture still includes only Git material."""
     cmd = ["codex", "exec", "-C", str(worktree), "-m", model, "-s", "workspace-write"]
     if effort is not None:
         cmd.extend(["-c", f'model_reasoning_effort="{effort}"'])
@@ -566,6 +570,7 @@ def _run_codex(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
                 str(record_dir / "last_message.md"), "--json"])
     start = time.monotonic()
     env = {**os.environ, "UV_CACHE_DIR": str(worktree / ".waystone-uv-cache")}
+    env.pop(_VERIFIER_SESSION_ENV, None)
     try:
         with open(prompt_path, encoding="utf-8") as pin, \
              open(record_dir / "runner.jsonl", "w", encoding="utf-8") as jout, \
@@ -582,7 +587,10 @@ def _run_codex(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
 
 def _run_claude(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
                 *, effort: str | None = None, runner=None) -> tuple[int, float]:
-    """Invoke the explicitly overridden unsandboxed Claude implementer transport."""
+    """Invoke the explicitly overridden unsandboxed Claude implementer transport.
+
+    Like Codex RUN, this intentionally does not set the verifier-session guard; ignored `.waystone`
+    state seeded by implementer lifecycle hooks is outside the captured Git result."""
     cmd = ["claude", "-p", "--model", model, *_CLAUDE_COMMON_ARGS]
     if effort is not None:
         cmd.extend(["--effort", effort])
@@ -595,13 +603,15 @@ def _run_claude(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
     start = time.monotonic()
     invoke = runner or subprocess.run
     stream_path = record_dir / "runner.jsonl"
+    env = dict(os.environ)
+    env.pop(_VERIFIER_SESSION_ENV, None)
     try:
         with open(prompt_path, encoding="utf-8") as pin, \
              open(stream_path, "w", encoding="utf-8") as jout, \
              open(record_dir / "runner.stderr", "w", encoding="utf-8") as jerr:
             proc = invoke(
                 cmd, cwd=str(worktree), stdin=pin, stdout=jout, stderr=jerr,
-                timeout=3600, env=dict(os.environ), text=True,
+                timeout=3600, env=env, text=True,
             )
         rc = proc.returncode
     except subprocess.TimeoutExpired:
@@ -1096,11 +1106,14 @@ def _companion_script() -> Path:
     return script
 
 
-def _verifier_env(worktree: Path) -> dict[str, str]:
-    """Mark verifier subprocesses so project lifecycle hooks stay out of the review worktree."""
+def _verifier_env(record_dir: Path) -> dict[str, str]:
+    """Hermetic verifier env inherited by the transport and any broker it starts.
+
+    Runtime cache belongs to the durable record, never to the review worktree.
+    """
     return {
         **os.environ,
-        "UV_CACHE_DIR": str(worktree / ".waystone-uv-cache"),
+        "UV_CACHE_DIR": str(record_dir / "runtime" / "uv-cache"),
         _VERIFIER_SESSION_ENV: "1",
     }
 
@@ -1111,7 +1124,7 @@ def _run_companion(worktree: Path, args: list[str], record_dir: Path) -> tuple[i
     try:
         p = subprocess.run(
             args, cwd=str(worktree), capture_output=True, text=True, timeout=1800,
-            env=_verifier_env(worktree),
+            env=_verifier_env(record_dir),
         )
     except subprocess.TimeoutExpired:
         return 124, ""
@@ -1133,7 +1146,7 @@ def _run_codex_verifier(worktree: Path, model: str, focus: str,
         "--ephemeral", "--output-schema", str(_VERIFY_SCHEMA_PATH),
         "--output-last-message", str(output), "--color", "never", "--json", "-",
     ]
-    env = _verifier_env(worktree)
+    env = _verifier_env(record_dir)
     try:
         with open(record_dir / "verify-codex.jsonl", "w", encoding="utf-8") as jout, \
              open(record_dir / "verify.stderr", "w", encoding="utf-8") as jerr:
@@ -1173,7 +1186,7 @@ def _run_claude_verifier(worktree: Path, model: str, focus: str,
     try:
         proc = invoke(
             cmd, cwd=str(worktree), input=focus, capture_output=True, text=True,
-            timeout=1800, env=_verifier_env(worktree),
+            timeout=1800, env=_verifier_env(record_dir),
         )
     except subprocess.TimeoutExpired:
         return 124, ""
@@ -2032,6 +2045,9 @@ def verify_delegation(root: Path, did: str) -> int:
         if binding["execution"] == "codex-companion":
             args = ["node", str(script), "adversarial-review", "--json", "--wait", "--scope",
                     "working-tree", "-C", str(worktree), "-m", model, focus]
+            # A broker inherits its environment only when it starts. End any exact-worktree broker
+            # left by RUN before verification so the verifier guard covers the broker's full life.
+            print(_cleanup_companion_broker(worktree))
             try:
                 rc, stdout = _run_companion(worktree, args, rec)
             finally:

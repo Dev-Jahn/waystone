@@ -2,7 +2,8 @@
 # PreCompact / SessionEnd fast-path: snapshot a re-entry pointer only in initialized projects.
 set -uo pipefail
 
-[ "${WAYSTONE_VERIFIER_SESSION:-}" = "1" ] && exit 0
+. "$(cd "$(dirname "$0")" && pwd)/verifier_guard.sh"
+waystone_verifier_hook_guard && exit 0
 
 if [ -n "${PLUGIN_ROOT:-}" ]; then
   export WAYSTONE_HOST=codex

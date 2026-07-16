@@ -5601,6 +5601,7 @@ class DelegateRunTests(unittest.TestCase):
                 self.assertIn(flag, cmd)
             self.assertIn("WebFetch", cmd[cmd.index("--disallowedTools") + 1])
             self.assertEqual(Path(kwargs["cwd"]), root)
+            self.assertNotIn("WAYSTONE_VERIFIER_SESSION", kwargs["env"])
             self.assertEqual((root / "last_message.md").read_text(), "done")
 
     def test_run_claude_rejects_non_object_stream_event_as_transport_failure(self):
@@ -8947,6 +8948,10 @@ class DelegateVerifyTests(unittest.TestCase):
     def test_run_claude_verifier_transport_is_injectable_and_read_only(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
+            worktree = root / "review-worktree"
+            record = root / "record"
+            worktree.mkdir()
+            record.mkdir()
             calls = []
             payload = {"summary": "ok", "findings": [], "limitations": []}
 
@@ -8957,7 +8962,7 @@ class DelegateVerifyTests(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, 0, stdout=_json.dumps(wrapped), stderr="")
 
             rc, output = delegate._run_claude_verifier(
-                root, "sonnet", "review", root, runner=transport)
+                worktree, "sonnet", "review", record, runner=transport)
             self.assertEqual(rc, 0)
             self.assertEqual(_json.loads(output), payload)
             cmd, kwargs = calls[0]
@@ -8970,9 +8975,39 @@ class DelegateVerifyTests(unittest.TestCase):
             allowed = cmd[cmd.index("--allowedTools") + 1]
             self.assertNotIn("Bash", allowed)
             self.assertNotIn("Bash", cmd[cmd.index("--tools") + 1])
-            self.assertEqual(Path(kwargs["cwd"]), root)
+            self.assertEqual(Path(kwargs["cwd"]), worktree)
             self.assertEqual(kwargs["env"]["WAYSTONE_VERIFIER_SESSION"], "1")
-            self.assertEqual(kwargs["env"]["UV_CACHE_DIR"], str(root / ".waystone-uv-cache"))
+            cache = Path(kwargs["env"]["UV_CACHE_DIR"])
+            self.assertEqual(cache, record / "runtime" / "uv-cache")
+            self.assertFalse(cache.resolve().is_relative_to(worktree.resolve()))
+
+    def test_companion_transport_inherits_guard_and_record_local_cache(self):
+        import types
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            worktree = root / "review-worktree"
+            record = root / "record"
+            worktree.mkdir()
+            record.mkdir()
+            calls = []
+            original = delegate.subprocess.run
+
+            def fake(*args, **kwargs):
+                calls.append((args, kwargs))
+                return types.SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+            delegate.subprocess.run = fake
+            try:
+                rc, output = delegate._run_companion(worktree, ["node", "companion"], record)
+            finally:
+                delegate.subprocess.run = original
+            self.assertEqual((rc, output), (0, "{}"))
+            env = calls[0][1]["env"]
+            self.assertEqual(env["WAYSTONE_VERIFIER_SESSION"], "1")
+            cache = Path(env["UV_CACHE_DIR"])
+            self.assertEqual(cache, record / "runtime" / "uv-cache")
+            self.assertFalse(cache.resolve().is_relative_to(worktree.resolve()))
 
     def test_claude_verifier_requires_success_structured_output(self):
         with tempfile.TemporaryDirectory() as d:
@@ -9077,6 +9112,63 @@ class DelegateVerifyTests(unittest.TestCase):
             self.assertEqual(legacy.stat().st_mtime_ns, legacy_mtime)
             self.assertTrue((rec / "artifact" / "verify-1.json").is_file())
 
+    def test_verifier_session_all_manifest_hooks_are_hermetic(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "review-worktree"
+            record = Path(d) / "record"
+            root.mkdir()
+            record.mkdir()
+            init_repo(root)
+            (root / ".gitignore").write_text(".waystone/\n")
+            (root / ".waystone.yml").write_text("version: 1\nproject: demo\n")
+            (root / "tasks.yaml").write_text("version: 1\nproject: demo\ntasks: []\n")
+            (root / "ROADMAP.md").write_text("unchanged\n")
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "verifier hook fixture")
+            marker = root / ".waystone" / "boundary-hooks-enabled"
+            marker.parent.mkdir()
+            marker.touch()
+
+            manifest = _json.loads(
+                (SCRIPTS.parent / "hooks" / "hooks.json").read_text())["hooks"]
+            payloads = {
+                "PreToolUse": {
+                    "hook_event_name": "PreToolUse", "tool_name": "Read", "cwd": str(root),
+                    "tool_input": {"file_path": str(root / "tasks.yaml")},
+                },
+                "SessionStart": {"hook_event_name": "SessionStart", "cwd": str(root)},
+                "PreCompact": {"hook_event_name": "PreCompact", "cwd": str(root)},
+                "SessionEnd": {"hook_event_name": "SessionEnd", "cwd": str(root)},
+                "PostToolUse": {
+                    "hook_event_name": "PostToolUse", "tool_name": "Edit", "cwd": str(root),
+                    "tool_input": {"file_path": str(root / "tasks.yaml")},
+                },
+                "Stop": {"hook_event_name": "Stop", "cwd": str(root)},
+            }
+            env = {
+                **os.environ,
+                "CLAUDE_PLUGIN_ROOT": str(SCRIPTS.parent),
+                "UV_CACHE_DIR": str(record / "runtime" / "uv-cache"),
+                "UV_OFFLINE": "1",
+                "WAYSTONE_VERIFIER_SESSION": "1",
+            }
+            before = delegate._verify_worktree_state(root)
+            for event, groups in manifest.items():
+                for group in groups:
+                    for hook in group["hooks"]:
+                        with self.subTest(event=event, command=hook["command"]):
+                            result = subprocess.run(
+                                ["bash", "-c", hook["command"]],
+                                input=_json.dumps(payloads[event]), cwd=root,
+                                capture_output=True, text=True, env=env,
+                            )
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            self.assertEqual(result.stdout, "")
+                            self.assertEqual(result.stderr, "")
+            self.assertEqual(delegate._verify_worktree_state(root), before)
+
     def test_verifier_worktree_mutation_is_fail_loud_and_records_no_artifact(self):
         with tempfile.TemporaryDirectory() as d:
             root, home, rec, worktree, _plugin = self._setup(d, committed=False)
@@ -9090,6 +9182,35 @@ class DelegateVerifyTests(unittest.TestCase):
                 _run_with_home(home, lambda: self._with_companion(
                     fake, lambda: delegate.verify_delegation(root, rec.name)))
             self.assertEqual(list((rec / "artifact").glob("verify-*.json")), [])
+
+    def test_companion_broker_lifetime_is_bounded_by_verifier_cleanup(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home, rec, worktree, _plugin = self._setup(d, committed=False)
+            events = []
+            original_run = delegate._run_companion
+            original_cleanup = delegate._cleanup_companion_broker
+
+            def cleanup(wt):
+                self.assertEqual(wt, worktree)
+                events.append("cleanup")
+                return "broker cleanup: fixture"
+
+            def run(wt, _args, record_dir):
+                self.assertEqual(wt, worktree)
+                self.assertEqual(record_dir, rec)
+                events.append("run")
+                return (0, _json.dumps({
+                    "summary": "checked", "findings": [], "limitations": [],
+                }))
+
+            delegate._run_companion = run
+            delegate._cleanup_companion_broker = cleanup
+            try:
+                _run_with_home(home, lambda: delegate.verify_delegation(root, rec.name))
+            finally:
+                delegate._run_companion = original_run
+                delegate._cleanup_companion_broker = original_cleanup
+            self.assertEqual(events, ["cleanup", "run", "cleanup"])
 
     def test_verifier_detects_content_change_to_existing_ignored_untracked_file(self):
         with tempfile.TemporaryDirectory() as d:
@@ -9418,6 +9539,7 @@ class UvCacheTests(unittest.TestCase):
                 delegate.subprocess.run = orig
             expected = str(worktree / ".waystone-uv-cache")
             self.assertEqual([env["UV_CACHE_DIR"] for env in seen], [expected, expected])
+            self.assertTrue(all("WAYSTONE_VERIFIER_SESSION" not in env for env in seen))
             self.assertEqual(os.environ.get("UV_CACHE_DIR"), before)
 
     def test_cache_is_excluded_but_other_untracked_result_is_kept(self):

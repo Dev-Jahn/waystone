@@ -1,5 +1,5 @@
 {
-  "description": "waystone: inject project digest+active tasks+next-actionable at session start/compaction; snapshot a re-entry pointer before compaction/session end; validate tasks.yaml and regenerate ROADMAP.md on edit; run consent-enabled non-blocking boundary checks at Stop. All hooks no-op fast in projects without .waystone.yml, and Stop also requires the project enable marker.",
+  "description": "waystone: inject project digest+active tasks+next-actionable at session start/compaction; snapshot a re-entry pointer before compaction/session end; validate tasks.yaml and regenerate ROADMAP.md on edit; run consent-enabled non-blocking boundary checks at Stop. All hooks no-op in independent verifier sessions and no-op fast in projects without .waystone.yml; Stop also requires the project enable marker.",
   "hooks": {
     "PreToolUse": [
       {

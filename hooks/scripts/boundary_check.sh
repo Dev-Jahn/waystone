@@ -2,6 +2,9 @@
 # Stop fast-path: run the non-blocking boundary check only for explicitly enabled projects.
 set -uo pipefail
 
+. "$(cd "$(dirname "$0")" && pwd)/verifier_guard.sh"
+waystone_verifier_hook_guard && exit 0
+
 if [ -n "${PLUGIN_ROOT:-}" ]; then
   export WAYSTONE_HOST=codex
 fi
