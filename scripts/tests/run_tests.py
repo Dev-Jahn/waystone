@@ -2245,6 +2245,64 @@ class LaneTests(unittest.TestCase):
                 "    lane:\n      branch: deleted/gone\n      base_sha: deadbeef\n")
             self.assertEqual(lanes.verify(root), 0)  # done lane skipped, not a permanent failure
 
+    def _four_lane_registry(self, root: Path) -> None:
+        (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
+        (root / "tasks.yaml").write_text(
+            "version: 1\nproject: x\ntasks:\n"
+            "  - id: feat/current-lane\n    title: current round lane task\n    status: active\n"
+            "    round: 2026-07-17-current\n"
+            "    lane: {branch: missing/current, base_sha: deadbeef}\n"
+            "  - id: feat/unstamped-lane\n    title: unstamped current lane task\n    status: pending\n"
+            "    lane: {branch: missing/unstamped, base_sha: deadbeef}\n"
+            "  - id: feat/prior-round-lane\n    title: reopened lane keeping a prior round stamp\n"
+            "    status: active\n"
+            "    round: 2026-07-16-other\n"
+            "    lane: {branch: missing/prior, base_sha: deadbeef}\n"
+            "  - id: feat/parked-lane\n    title: parked historical lane task\n    status: parked\n"
+            "    round: 2026-07-17-current\n"
+            "    lane: {branch: missing/parked, base_sha: deadbeef}\n")
+
+    def test_cli_verifies_every_nonterminal_lane_regardless_of_round_stamp(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            init_repo(root)
+            self._four_lane_registry(root)
+            home = root / "home"
+            env = os.environ.copy()
+            env.update({"HOME": str(home), "WAYSTONE_HOME": str(home / ".waystone")})
+            result = subprocess.run(
+                [sys.executable, str(SCRIPTS / "waystone.py"), "lanes", "verify", str(root)],
+                env=env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 3, result.stderr)
+            self.assertIn("feat/current-lane", result.stderr)
+            self.assertIn("feat/unstamped-lane", result.stderr)
+            self.assertIn("feat/prior-round-lane", result.stderr)
+            self.assertNotIn("feat/parked-lane", result.stderr)
+
+    def test_round_flag_is_rejected_loudly(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            init_repo(root)
+            self._four_lane_registry(root)
+            home = root / "home"
+            env = os.environ.copy()
+            env.update({"HOME": str(home), "WAYSTONE_HOME": str(home / ".waystone")})
+            result = subprocess.run(
+                [sys.executable, str(SCRIPTS / "waystone.py"), "lanes", "verify", str(root),
+                 "--round", "2026-07-17-current"],
+                env=env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("round scoping was removed", result.stderr)
+
+    def test_round_skill_runs_unscoped_lane_verification(self):
+        text = (SCRIPTS.parent / "skills" / "round" / "SKILL.md").read_text()
+        self.assertIn("`waystone lanes verify .`", text)
+        self.assertNotIn("lanes verify . --round", text)
+
 
 class RoundCloseTests(unittest.TestCase):
     def test_close_integration(self):
@@ -5847,6 +5905,27 @@ class AcceptFieldTests(unittest.TestCase):
                 {"criterion": "one-off criterion", "source": "delegate run --accept"},
             ])
 
+    def test_claim_rejects_dependency_drift_after_prepare(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
+            (root / "tasks.yaml").write_text(
+                "version: 1\nproject: x\ntasks:\n"
+                "  - id: feat/dep\n    title: dep\n    status: done\n"
+                "  - id: feat/child\n    title: child\n    status: pending\n"
+                "    deps: [feat/dep]\n"
+                "    accept: [does the thing]\n")
+            data = yaml.safe_load((root / "tasks.yaml").read_text())
+            packet, _ = delegate._build_packet(data, "feat/child", [], root)
+            plan = {"task_id": "feat/child", "accept_flags": [], "retry_note": None,
+                    "routing_note": None, "packet": packet, "runner_override": None}
+            (root / "tasks.yaml").write_text(
+                (root / "tasks.yaml").read_text().replace("status: done", "status: pending"))
+            with self.assertRaises(delegate.WorkflowError) as ctx:
+                delegate._claim_run(root, plan)
+            self.assertIn("changed while preparing delegation", str(ctx.exception))
+            self.assertIn("unmet dependencies", str(ctx.exception))
+
 
 class DelegateSnapshotTests(unittest.TestCase):
     """0.8.0 M1 §3 — snapshot primitive (temp-index read-tree-HEAD seeding). Real temp git repos."""
@@ -6311,6 +6390,25 @@ class DelegatePacketTests(unittest.TestCase):
     def test_unknown_task_rejected(self):
         with self.assertRaises(delegate.WorkflowError):
             delegate._build_packet(_packet_registry(), "feat/nope", ["c"], Path("/x"))
+
+    def test_all_unsatisfied_dependencies_are_rejected_with_effective_statuses(self):
+        data = {"project": "demo", "tasks": [
+            {"id": "feat/child", "title": "a dependent child task", "status": "active",
+             "deps": ["feat/parked", "feat/blocked", "feat/pending", "feat/default",
+                      "feat/missing"], "accept": ["all dependencies are done"]},
+            {"id": "feat/parked", "title": "a parked dependency task", "status": "parked"},
+            {"id": "feat/blocked", "title": "a blocked dependency task", "status": "blocked"},
+            {"id": "feat/pending", "title": "a pending dependency task", "status": "pending"},
+            {"id": "feat/default", "title": "a default pending dependency task"},
+        ]}
+        with self.assertRaises(delegate.WorkflowError) as cm:
+            delegate._build_packet(data, "feat/child", [], Path("/x"))
+        message = str(cm.exception)
+        for diagnostic in (
+                "feat/parked (parked)", "feat/blocked (blocked)", "feat/pending (pending)",
+                "feat/default (pending)", "feat/missing (unknown)"):
+            with self.subTest(diagnostic=diagnostic):
+                self.assertIn(diagnostic, message)
 
 
 class DelegateRunTests(unittest.TestCase):
@@ -8051,6 +8149,42 @@ class DelegateCorruptRecordTests(unittest.TestCase):
 
 class DelegateCliTests(unittest.TestCase):
     """0.8.0 M1 §2 — arg parsing, exit codes, status/show surfaces (incl. R11 no-artifact refusal)."""
+
+    def test_run_subprocess_rejects_unsatisfied_dependency_before_runner_claim(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            (root / "tasks.yaml").write_text(
+                "version: 1\nproject: demo\ntasks:\n"
+                "  - id: feat/xyz\n    title: implement xyz feature\n    status: active\n"
+                "    deps: [feat/parent]\n"
+                "    accept:\n      - criterion alpha here\n"
+                "  - id: feat/parent\n    title: intentionally parked parent task\n"
+                "    status: parked\n")
+            fake_bin = Path(d) / "fake-bin"
+            fake_bin.mkdir()
+            runner_called = Path(d) / "runner-called"
+            fake_codex = fake_bin / "codex"
+            fake_codex.write_text(
+                f"#!/bin/sh\ntouch {runner_called}\nexit 99\n", encoding="utf-8")
+            fake_codex.chmod(0o755)
+            (home / ".codex").mkdir(parents=True)
+            env = os.environ.copy()
+            env.update({
+                "HOME": str(home),
+                "CODEX_HOME": str(home / ".codex"),
+                "WAYSTONE_HOME": str(home / ".waystone"),
+                "PATH": str(fake_bin) + os.pathsep + env["PATH"],
+            })
+            result = subprocess.run(
+                [sys.executable, str(SCRIPTS / "waystone.py"), "delegate", "run", "feat/xyz",
+                 "--root", str(root)],
+                env=env, capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("feat/parent (parked)", result.stderr)
+            self.assertFalse(runner_called.exists())
+            self.assertFalse(delegate._delegations_dir(root).exists())
 
     def test_run_via_main_and_status_list(self):
         with tempfile.TemporaryDirectory() as d:

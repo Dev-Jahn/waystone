@@ -487,8 +487,8 @@ def _runner_model(backend: str) -> str:
 def _build_packet(data: dict, task_id: str, accept_flags: list[str], root: Path,
                   retry_note: str | None = None,
                   routing_note: str | None = None) -> tuple[dict, list[str]]:
-    """Assemble packet.yaml from the registry + --accept flags. Fail loud on non-delegable status or an
-    empty acceptance set (#3 — the harness never invents criteria)."""
+    """Assemble packet.yaml from the registry + --accept flags. Fail loud on non-delegable status,
+    unmet dependencies, or an empty acceptance set (#3 — the harness never invents criteria)."""
     tasks = [t for t in (data.get("tasks") or []) if isinstance(t, dict)]
     by_id = {t.get("id"): t for t in tasks}
     task = by_id.get(task_id)
@@ -499,6 +499,17 @@ def _build_packet(data: dict, task_id: str, accept_flags: list[str], root: Path,
         raise WorkflowError(f"task {task_id} is blocked — if its deps are now satisfied, set it active and retry")
     if status not in ("pending", "active"):
         raise WorkflowError(f"task {task_id} is {status} — only pending/active tasks can be delegated")
+    deps = []
+    for dep_id in task.get("deps") or []:
+        dep = by_id.get(dep_id)
+        dep_status = dep.get("status", "pending") if dep is not None else "unknown"
+        deps.append({"id": dep_id, "status": dep_status})
+    unmet_deps = [dep for dep in deps if dep["status"] != "done"]
+    if unmet_deps:
+        diagnostics = ", ".join(f"{dep['id']} ({dep['status']})" for dep in unmet_deps)
+        raise WorkflowError(
+            f"task {task_id} has unmet dependencies — every dependency must exist with status "
+            f"done: {diagnostics}")
     acceptance: list[str] = []
     accept_provenance: list[dict] = []
     for source, values in (("task --accept-add", list(task.get("accept") or [])),
@@ -510,7 +521,6 @@ def _build_packet(data: dict, task_id: str, accept_flags: list[str], root: Path,
     if not acceptance:
         raise WorkflowError(
             f"task {task_id} has no acceptance criteria — add `accept:` (YAML list) to the task or pass --accept")
-    deps = [{"id": d, "status": by_id.get(d, {}).get("status", "unknown")} for d in (task.get("deps") or [])]
     declared_scope = canonical_scope_prefixes(task.get("scope", []))
     packet = {
         "schema": "waystone-packet-1",
