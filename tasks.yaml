@@ -24,11 +24,12 @@ tasks:
     status: "done"
     severity: "major"
   - id: fix/verify-worktree-self-contamination
+    result: "2차 위임 apply — WAYSTONE_VERIFIER_SESSION guard + RED-first 재현 fixture, 562 tests OK. 라이브 verify 복원은 다음 릴리스+plugin update 후. 기록: .waystone/delegations/20260716T074509Z-fix-verify-worktree-self-contamination"
     accept: ["delegate verify는 리뷰 worktree 안에 .waystone 프로젝트 상태(디렉터리 생성, profile 시딩, lock 파일)를 생성하거나 수정하지 않는다", ".waystone.yml이 커밋된 프로젝트와 레거시 시드가 존재하는 머신 조건을 재현한 fixture에서 verify가 tree-mutation postcondition을 통과하고 verify 아티팩트를 기록한다 (RED-first 재현 테스트)", "verifier가 실제로 worktree 파일을 생성·수정하는 진짜 오염은 여전히 postcondition이 거부한다 (기존 회귀 테스트 유지)", "어느 호출 경로가 worktree를 project root로 취급했는지 원인이 구현 보고에 명시된다 (증상 패치 금지)", "전체 테스트 스위트와 ruff F401,F841 검사가 통과한다"]
     scope: ["scripts"]
     notes: "두 번째 dogfooding finding (2026-07-16, 첫 위임 fix/boundary-hook-cli-resolution의 verify 2회 연속 실패). 증거: 1차 실패 사유 ignored_untracked+untracked_manifest, 2차 untracked_manifest; worktree/.waystone/{.gitignore,profile.yml(시딩, mtime 보존),lock(2차 시각)} 생성 확인. 원인 후보: verify 경로의 load_config/ensure_project_state_dir/migrate/hold_lock가 worktree를 project root로 취급. 수정 방향 후보: verify가 worktree를 프로젝트로 취급하지 않도록 root 고정, 또는 postcondition이 하네스 자신의 상태 디렉터리를 제외(단 verifier 오염과 구별 필요 — 안이한 예외는 금물). 검증: .waystone.yml 커밋된 fixture + 시드 존재 조건 재현 테스트."
     title: "delegate verify가 리뷰 worktree 안에 .waystone 프로젝트 상태(profile 시딩·lock)를 생성해 자신의 tree-mutation postcondition에 걸림 — .waystone.yml이 커밋된 프로젝트 + 레거시 시드 존재 머신 조합에서 verify가 결정론적으로 실패"
-    status: "pending"
+    status: "done"
     severity: "major"
   - id: chore/verifier-session-guard-hardening
     scope: ["scripts", "hooks"]
