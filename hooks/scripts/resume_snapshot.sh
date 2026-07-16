@@ -2,6 +2,8 @@
 # PreCompact / SessionEnd fast-path: snapshot a re-entry pointer only in initialized projects.
 set -uo pipefail
 
+[ "${WAYSTONE_VERIFIER_SESSION:-}" = "1" ] && exit 0
+
 if [ -n "${PLUGIN_ROOT:-}" ]; then
   export WAYSTONE_HOST=codex
 fi

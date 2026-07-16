@@ -85,6 +85,7 @@ _BACKEND_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*:[^\s:]+$")
 _LEGACY_VERIFIER_EXECUTIONS = ("codex-cli", "codex-companion")
 _EXTERNAL_RUNNERS = ("codex", "claude")
 _CLAUDE_EFFORT_VALUES = ("low", "medium", "high", "xhigh")
+_VERIFIER_SESSION_ENV = "WAYSTONE_VERIFIER_SESSION"
 # Claude implementer execution is intentionally refused unless the user records an explicit
 # unsandboxed-runner override. These flags reduce surfaces after that override, but are not described
 # as confinement: bare Bash can cross filesystem, process, repository, and network boundaries.
@@ -1095,11 +1096,23 @@ def _companion_script() -> Path:
     return script
 
 
+def _verifier_env(worktree: Path) -> dict[str, str]:
+    """Mark verifier subprocesses so project lifecycle hooks stay out of the review worktree."""
+    return {
+        **os.environ,
+        "UV_CACHE_DIR": str(worktree / ".waystone-uv-cache"),
+        _VERIFIER_SESSION_ENV: "1",
+    }
+
+
 def _run_companion(worktree: Path, args: list[str], record_dir: Path) -> tuple[int, str]:
     """Single codex-companion invocation, isolated for tests. The command already contains the
     dynamically resolved plugin script. stderr is retained as local diagnostic evidence."""
     try:
-        p = subprocess.run(args, cwd=str(worktree), capture_output=True, text=True, timeout=1800)
+        p = subprocess.run(
+            args, cwd=str(worktree), capture_output=True, text=True, timeout=1800,
+            env=_verifier_env(worktree),
+        )
     except subprocess.TimeoutExpired:
         return 124, ""
     except OSError as e:
@@ -1120,7 +1133,7 @@ def _run_codex_verifier(worktree: Path, model: str, focus: str,
         "--ephemeral", "--output-schema", str(_VERIFY_SCHEMA_PATH),
         "--output-last-message", str(output), "--color", "never", "--json", "-",
     ]
-    env = {**os.environ, "UV_CACHE_DIR": str(worktree / ".waystone-uv-cache")}
+    env = _verifier_env(worktree)
     try:
         with open(record_dir / "verify-codex.jsonl", "w", encoding="utf-8") as jout, \
              open(record_dir / "verify.stderr", "w", encoding="utf-8") as jerr:
@@ -1160,7 +1173,7 @@ def _run_claude_verifier(worktree: Path, model: str, focus: str,
     try:
         proc = invoke(
             cmd, cwd=str(worktree), input=focus, capture_output=True, text=True,
-            timeout=1800, env=dict(os.environ),
+            timeout=1800, env=_verifier_env(worktree),
         )
     except subprocess.TimeoutExpired:
         return 124, ""

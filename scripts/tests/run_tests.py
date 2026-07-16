@@ -8971,6 +8971,8 @@ class DelegateVerifyTests(unittest.TestCase):
             self.assertNotIn("Bash", allowed)
             self.assertNotIn("Bash", cmd[cmd.index("--tools") + 1])
             self.assertEqual(Path(kwargs["cwd"]), root)
+            self.assertEqual(kwargs["env"]["WAYSTONE_VERIFIER_SESSION"], "1")
+            self.assertEqual(kwargs["env"]["UV_CACHE_DIR"], str(root / ".waystone-uv-cache"))
 
     def test_claude_verifier_requires_success_structured_output(self):
         with tempfile.TemporaryDirectory() as d:
@@ -9026,6 +9028,54 @@ class DelegateVerifyTests(unittest.TestCase):
             self.assertEqual(artifact["backend"], "codex:gpt-5.6-sol")
             self.assertEqual(artifact["provenance"], "independent-verifier")
             self.assertEqual(artifact["payload"]["summary"], "challenged")
+
+    def test_verify_session_hook_does_not_seed_state_in_review_worktree(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home, rec, worktree, plugin = self._setup(d, committed=False)
+            legacy = home / ".codex" / "waystone.pre-0.9" / "profile.yml"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text(self._PROFILE)
+            legacy_mtime = legacy.stat().st_mtime_ns
+            hooks = [
+                SCRIPTS.parent / "hooks" / "scripts" / "session_context.sh",
+                SCRIPTS.parent / "hooks" / "scripts" / "resume_snapshot.sh",
+            ]
+            companion = plugin / "scripts" / "codex-companion.mjs"
+            companion.write_text(
+                "import { spawnSync } from 'node:child_process';\n"
+                f"const hooks = {_json.dumps([str(hook) for hook in hooks])};\n"
+                f"const cwd = {_json.dumps(str(worktree))};\n"
+                "for (const hook of hooks) {\n"
+                "  const run = spawnSync('bash', [hook], {\n"
+                "    input: JSON.stringify({cwd}), encoding: 'utf8', env: process.env,\n"
+                "  });\n"
+                "  if (run.status !== 0) {\n"
+                "    process.stderr.write(run.stderr || 'verifier lifecycle hook failed');\n"
+                "    process.exit(run.status ?? 1);\n"
+                "  }\n"
+                "}\n"
+                "process.stdout.write(JSON.stringify({\n"
+                "  summary: 'checked', findings: [], limitations: [],\n"
+                "}));\n",
+                encoding="utf-8",
+            )
+            self.assertFalse((worktree / ".waystone").exists())
+
+            old_host = os.environ.pop("WAYSTONE_HOST", None)
+            try:
+                rc = _run_with_home(
+                    home, lambda: delegate.verify_delegation(root, rec.name))
+            finally:
+                if old_host is not None:
+                    os.environ["WAYSTONE_HOST"] = old_host
+
+            self.assertEqual(rc, 0)
+            self.assertFalse((worktree / ".waystone").exists())
+            self.assertEqual(legacy.read_text(), self._PROFILE)
+            self.assertEqual(legacy.stat().st_mtime_ns, legacy_mtime)
+            self.assertTrue((rec / "artifact" / "verify-1.json").is_file())
 
     def test_verifier_worktree_mutation_is_fail_loud_and_records_no_artifact(self):
         with tempfile.TemporaryDirectory() as d:
