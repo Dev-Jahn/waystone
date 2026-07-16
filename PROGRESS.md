@@ -2,6 +2,25 @@
 
 round 단위 작업 이력이 이 파일에 축적된다. 활성 task와 의존성은 `tasks.yaml`(CLI: `waystone task`)과 생성 파일 `ROADMAP.md` 참조.
 
+## 2026-07-16-fix-wave
+
+- **Goal**: 첫 라운드 리뷰 지적 2건 + 현장 dogfooding 보고 3건(사용자·bw2·spark1) + 회신 프로토콜 재설계를 최대 병렬 위임으로 해소.
+- **Shipped** (전부 implementer=external-runner/codex:gpt-5.6-sol, 각 건 raw codex 적대 리뷰 + main-session agent_checks로 인수):
+  - fix/release-staging-isolation — 릴리스를 temp-index 투영 + positive SHIP manifest로 재작성 (ignored 로컬 파일 보존, 실패 원상; 리뷰어 지적)
+  - fix/verifier-hook-hermeticity — verifier 세션에서 전 hook hermetic (ruling: 전 hook no-op)
+  - fix/round-packet-remote-visibility — packet publication 게이트(push된 HEAD에 request+binding 실존), 엄격 Reviewing 파서 (2차, waiver 1건)
+  - feat/effort-pro-ultra → fix/effort-drop-pro — ultra 추가 후 pro는 실측(자기선언 응답)으로 제거
+  - feat/task-status-parked — 6번째 상태 parked (newton 요구)
+  - fix/runner-env-failure-detection — 빈-성공 오분류 fail-loud + 프리플라이트 프로브 (spark1 AppArmor 사고)
+  - feat/review-reply-structured-header — 회신 머리 key:value 블록(model/effort/review-target), robust 파싱, 회신-내장 결속 증거 (2차 + prefix 12+ 상향 84ad6a7)
+  - decision/verifier-hook-isolation-contract (ruling: hermetic), decision/release-ship-manifest (ruling: positive manifest)
+- **Gates**: 전체 테스트 558→600, 모든 apply 후 dev 게이트 green + ruff clean. 위임 2회 기각 후 재계약 재시도 2건(packet, header), 사용자 escalation 2건 기록.
+- **SSOT**: unchanged.
+- **Decisions pending**: none.
+- **Review**: requested (docs/reviews/2026-07-16-fix-wave-request.md).
+- **Adaptive rules**: unevaluable (활성 overlay 규칙 0개).
+- **Next**: 대기 큐 10건(major 5: publication 우회, companion effort, 의존 게이팅, 프로브 격리, 헤더 잔여 + feat 3: 결정론 packet, pending ledger, statusline + chore 2). 릴리스(0.11)는 사용자 지시 대기 — 릴리스 스크립트는 이제 로컬 파일 안전.
+
 ## 2026-07-16-adopt-dogfooding
 
 - **Goal**: waystone이 자기 자신의 개발 하네스가 되는 첫 사이클 — 채택 bootstrap + 첫 dogfooding finding 2건의 위임 수정.
