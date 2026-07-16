@@ -49,7 +49,7 @@ _VERIFY_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "templates" / "ve
 _VERDICT_INPUT_SCHEMA_PATH = (
     Path(__file__).resolve().parent.parent / "templates" / "verdict-input-schema.json")
 _VERDICT_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "templates" / "verdict-schema.json"
-_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh", "pro", "ultra")
+_EFFORT_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh", "ultra")
 PROFILE_ROLES = ("main", "orchestrator", "implementer", "clerk", "verifier", "reviewer")
 PROFILE_EXECUTIONS = (
     "main-session", "clean-subagent", "forked-subagent",
@@ -343,10 +343,6 @@ def _load_profile(root: Path) -> tuple[dict, str]:
 
 def _validate_external_runner_effort(runner: str, transport: str,
                                      effort: str | None) -> None:
-    if effort == "pro":
-        raise WorkflowError(
-            "effort 'pro' is reserved for the web ChatGPT route and cannot be used with "
-            "an external-runner; no substitute effort will be selected")
     if runner == "claude" and effort is not None and effort not in _CLAUDE_EFFORT_VALUES:
         raise WorkflowError(
             f"claude external-runner effort must be one of {', '.join(_CLAUDE_EFFORT_VALUES)}, "

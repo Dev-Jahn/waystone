@@ -5619,42 +5619,27 @@ class DelegateProfileTests(unittest.TestCase):
         self.assertEqual(binding["backend"], "claude:sonnet")
 
     def test_invalid_effort_field_is_rejected(self):
-        profile = {"bindings": {"implementer": {
-            "execution": "external-runner", "backend": "codex:x", "effort": "extreme"}}}
-        with self.assertRaises(delegate.WorkflowError) as cm:
-            delegate._resolve_binding(profile, "implementer", Path("/project"))
-        self.assertIn("effort", str(cm.exception))
+        for effort in ("extreme", "pro"):
+            with self.subTest(effort=effort):
+                profile = {"bindings": {"implementer": {
+                    "execution": "external-runner", "backend": "codex:x", "effort": effort}}}
+                with self.assertRaises(delegate.WorkflowError) as cm:
+                    delegate._resolve_binding(profile, "implementer", Path("/project"))
+                self.assertIn("effort", str(cm.exception))
 
     def test_effort_vocabulary_matches_profile_schema(self):
         schema = _json.loads(
             (SCRIPTS.parent / "templates" / "profile-schema.json").read_text())
         schema_values = schema["$defs"]["binding"]["properties"]["effort"]["enum"]
-        expected = ["none", "minimal", "low", "medium", "high", "xhigh", "pro", "ultra"]
+        expected = ["none", "minimal", "low", "medium", "high", "xhigh", "ultra"]
         self.assertEqual(schema_values, expected)
         self.assertEqual(list(delegate._EFFORT_VALUES), expected)
-
-    def test_pro_effort_is_rejected_for_each_external_runner(self):
-        for backend in ("codex:gpt-test", "claude:sonnet"):
-            with self.subTest(backend=backend):
-                profile = {"bindings": {"implementer": {
-                    "execution": "external-runner", "backend": backend, "effort": "pro"}}}
-                with self.assertRaisesRegex(
-                        delegate.WorkflowError, "pro.*web ChatGPT.*external-runner"):
-                    delegate._resolve_binding(profile, "implementer", Path("/project"))
 
     def test_ultra_effort_is_rejected_by_claude_external_runner(self):
         profile = {"bindings": {"implementer": {
             "execution": "external-runner", "backend": "claude:sonnet", "effort": "ultra"}}}
         with self.assertRaisesRegex(delegate.WorkflowError, "claude external-runner effort"):
             delegate._resolve_binding(profile, "implementer", Path("/project"))
-
-    def test_pro_effort_is_rejected_for_verifier_external_runner(self):
-        profile = {"bindings": {"verifier": {
-            "execution": "external-runner", "backend": "codex:gpt-test", "effort": "pro",
-            "entry": "adversarial-review"}}}
-        with self.assertRaisesRegex(
-                delegate.WorkflowError, "pro.*web ChatGPT.*external-runner"):
-            delegate._resolve_verifier_binding(profile, Path("/project"))
 
     def test_ultra_verifier_effort_requires_codex_cli_transport(self):
         import os
@@ -6584,8 +6569,8 @@ class DelegateEffortTests(unittest.TestCase):
         project_conventions = (
             SCRIPTS.parent / "docs" / "CONVENTIONS.md").read_text()
         for text in (readme, conventions, project_conventions):
-            self.assertIn("`pro`", text)
-            self.assertIn("web ChatGPT", text)
+            self.assertNotIn("`pro`", text)
+            self.assertNotIn("web ChatGPT", text)
             self.assertIn("`ultra`", text)
             self.assertIn("model_reasoning_effort", text)
             self.assertIn("external-runner", text)

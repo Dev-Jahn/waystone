@@ -237,11 +237,10 @@ through the host and attributed to the round. Bindings live in the project's unc
 The external implementer supports Codex and Claude backends. Because the Claude backend has no
 structural filesystem/process/network sandbox, it is refused by default and can run only after
 explicit user consent with `--allow-unsandboxed-runner --reason` recorded in the exposure.
-Profile `effort` accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `pro`, and `ultra`.
-`pro` is reserved for the web ChatGPT route and is rejected on every executable `external-runner`;
-Waystone never substitutes another effort. `ultra` is Codex CLI-only and is passed unchanged as
-`model_reasoning_effort`; the Claude external runner rejects it. Omitting `effort` leaves the
-runner's configured default untouched.
+Profile `effort` accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `ultra`. `ultra` is
+Codex CLI-only and is passed unchanged as `model_reasoning_effort`; the Claude external runner
+rejects it without substituting another effort. Omitting `effort` leaves the runner's configured
+default untouched.
 
 <br>
 

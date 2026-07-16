@@ -55,7 +55,7 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*:[^\\s:]+$"
         },
         "use_for": {"type": "string", "minLength": 1, "pattern": "^[^\\r\\n]+$"},
-        "effort": {"enum": ["none", "minimal", "low", "medium", "high", "xhigh", "pro", "ultra"]},
+        "effort": {"enum": ["none", "minimal", "low", "medium", "high", "xhigh", "ultra"]},
         "entry": {"type": "string"}
       }
     },

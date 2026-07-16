@@ -203,11 +203,10 @@ under `~/.waystone/cache/worktrees/…`; neither is committed. The runner backen
 per role in `{project_root}/.waystone/profile.yml`; a missing binding fails loud rather than
 guessing a default. A verifier binding should normally omit `execution` so Waystone derives the
 transport from the current host. A binding may set `effort` to `none`, `minimal`, `low`, `medium`,
-`high`, `xhigh`, `pro`, or `ultra`. `pro` is reserved for the web ChatGPT route and is rejected on
-every executable `external-runner`; Waystone never substitutes another effort. `ultra` is Codex
-CLI-only and is passed unchanged as `model_reasoning_effort`; the Claude external runner rejects it.
-When `effort` is omitted, the runner's configured default is left untouched. Use `waystone paths` to
-inspect every resolved residence.
+`high`, `xhigh`, or `ultra`. `ultra` is Codex CLI-only and is passed unchanged as
+`model_reasoning_effort`; the Claude external runner rejects it without substituting another effort.
+When `effort` is omitted, the runner's configured default is left untouched. Use `waystone paths`
+to inspect every resolved residence.
 
 The role key, `execution`, and `backend` are all routing inputs. `waystone delegate run` starts only
 an `implementer` bound to `external-runner`; `main-session`, `clean-subagent`, `forked-subagent`, and
