@@ -95,6 +95,18 @@ _CLAUDE_COMMON_ARGS = (
     "--permission-mode", "dontAsk", "--no-session-persistence",
 )
 _CLAUDE_NETWORK_DENY = "WebFetch,WebSearch"
+_SANDBOX_WRITE_FAILURE_RE = re.compile(
+    r"(?:"
+    r"loopback:\s*failed\s+RTM_NEWADDR[^\n]*(?:operation not permitted|permission denied)|"
+    r"(?:bwrap|bubblewrap|landlock|userns|user namespace|unprivileged_userns|apparmor)"
+    r"[^\n]*(?:failed|denied|not permitted|permission denied)|"
+    r"(?:failed|unable|cannot|could not)\s+to\s+(?:write|create|modify|patch)"
+    r"[^\n]*(?:operation not permitted|permission denied|read-only file system)|"
+    r"(?:write|mkdir|touch|apply_patch|create (?:file|directory))"
+    r"[^\n]*(?:operation not permitted|permission denied|read-only file system)"
+    r")",
+    re.IGNORECASE,
+)
 CLAUDE_CONFINEMENT_WARN = (
     "waystone warn: UNSANDBOXED claude implementer — allowed Bash can read/write filesystem "
     "paths outside the worktree, operate on other repositories, spawn or affect processes, and "
@@ -129,6 +141,14 @@ def _profile_example() -> str:
 
 class _RefusedWrite(WorkflowError):
     """A plugin-local directory could not be created — maps to exit 2 (refused write, §2)."""
+
+
+class _RunnerSandboxUnusable(WorkflowError):
+    """The configured runner sandbox could not perform its preflight worktree write."""
+
+
+class _RunnerEnvironmentFailure(WorkflowError):
+    """A nominal runner success contains evidence that its environment prevented the work."""
 
 
 # ---- git plumbing (private; common.git_rc has no env/cwd-index support) ----
@@ -574,6 +594,59 @@ def _run_env_prep(worktree: Path, commands: list[str]) -> tuple[int, str]:
 
 
 # ---- runners (§6 — isolated and transport-injectable for tests) ---------------
+def _codex_exec_command(worktree: Path, model: str, effort: str | None) -> list[str]:
+    """Build the shared Codex command prefix so probe and task use the same sandbox policy."""
+    cmd = ["codex", "exec", "-C", str(worktree), "-m", model, "-s", "workspace-write"]
+    if effort is not None:
+        cmd.extend(["-c", f'model_reasoning_effort="{effort}"'])
+    return cmd
+
+
+def _run_codex_sandbox_probe(worktree: Path, model: str, record_dir: Path,
+                             *, effort: str | None = None) -> None:
+    """Require one real write through the same Codex workspace-write sandbox before task launch."""
+    probe_name = f".waystone-sandbox-write-probe-{record_dir.name}"
+    probe_path = worktree / probe_name
+    expected = b"waystone-sandbox-write-probe\n"
+    stderr_path = record_dir / "sandbox-probe.stderr"
+    if probe_path.exists():
+        raise _RunnerSandboxUnusable(
+            f"runner sandbox unusable: reserved probe path already exists: {probe_path}")
+    cmd = _codex_exec_command(worktree, model, effort)
+    cmd.extend([
+        "--ephemeral", "--color", "never", "--output-last-message",
+        str(record_dir / "sandbox-probe-last-message.md"), "--json",
+        f"Use the shell tool to run exactly: printf 'waystone-sandbox-write-probe\\n' > {probe_name}",
+    ])
+    env = {**os.environ, "UV_CACHE_DIR": str(worktree / ".waystone-uv-cache")}
+    env.pop(_VERIFIER_SESSION_ENV, None)
+    try:
+        with open(record_dir / "sandbox-probe.jsonl", "w", encoding="utf-8") as jout, \
+             open(stderr_path, "w", encoding="utf-8") as jerr:
+            try:
+                proc = subprocess.run(
+                    cmd, stdout=jout, stderr=jerr, timeout=180, env=env)
+                rc = proc.returncode
+            except subprocess.TimeoutExpired:
+                rc = 124
+            except OSError as e:
+                jerr.write(str(e))
+                rc = 127
+        stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+        actual = probe_path.read_bytes() if probe_path.is_file() else None
+    finally:
+        try:
+            probe_path.unlink(missing_ok=True)
+        except OSError as e:
+            raise _RunnerSandboxUnusable(
+                f"runner sandbox unusable: could not remove sandbox probe {probe_path}: {e}") from e
+    if rc != 0 or actual != expected:
+        detail = stderr or (
+            f"sandbox probe exited rc {rc}" if rc != 0
+            else "sandbox probe did not create the expected worktree file")
+        raise _RunnerSandboxUnusable(f"runner sandbox unusable: {detail}")
+
+
 def _run_codex(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
                *, effort: str | None = None) -> tuple[int, float]:
     """Invoke `codex exec` in the worktree (workspace-write sandbox hardcoded, S8). Returns (rc,
@@ -581,9 +654,8 @@ def _run_codex(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
 
     RUN is an implementer session, not a verifier session: lifecycle hooks may seed ignored
     `.waystone` project state here. Result capture still includes only Git material."""
-    cmd = ["codex", "exec", "-C", str(worktree), "-m", model, "-s", "workspace-write"]
-    if effort is not None:
-        cmd.extend(["-c", f'model_reasoning_effort="{effort}"'])
+    _run_codex_sandbox_probe(worktree, model, record_dir, effort=effort)
+    cmd = _codex_exec_command(worktree, model, effort)
     cmd.extend(["--color", "never", "--output-last-message",
                 str(record_dir / "last_message.md"), "--json"])
     start = time.monotonic()
@@ -601,6 +673,40 @@ def _run_codex(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
         (record_dir / "runner.stderr").write_text(str(e), encoding="utf-8")
         rc = 127
     return rc, round(time.monotonic() - start, 3)
+
+
+def _runner_environment_failure_reason(record_dir: Path, empty: bool, report: dict) -> str | None:
+    """Classify only the rc0 empty/missing-report contract with concrete stderr failure evidence."""
+    if not empty or report.get("present") is not False:
+        return None
+    stderr_path = record_dir / "runner.stderr"
+    try:
+        stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise WorkflowError(f"cannot read runner stderr {stderr_path}: {e}") from e
+    match = _SANDBOX_WRITE_FAILURE_RE.search(stderr)
+    if match is None:
+        return None
+    return (
+        "runner environment failure despite rc 0: empty patch and missing delegate report; "
+        f"runner.stderr indicates sandbox/tool write failure: {match.group(0)}")
+
+
+def _runner_sandbox_diagnostic_hint(text: str) -> str | None:
+    lower = text.lower()
+    if "landlock" in lower:
+        return (
+            "Landlock sandbox initialization failed; check kernel Landlock support and "
+            "the host sandbox denial logs")
+    if any(token in lower for token in (
+            "bwrap", "bubblewrap", "userns", "user namespace",
+            "unprivileged_userns", "rtm_newaddr")):
+        return (
+            "AppArmor may be blocking bwrap user namespaces; check "
+            "kernel.apparmor_restrict_unprivileged_userns and /etc/apparmor.d/bwrap")
+    return None
 
 
 def _run_claude(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
@@ -1022,6 +1128,11 @@ def _run_claimed(root: Path, plan: dict, did: str, record_dir: Path) -> int:
     try:
         runner_rc, duration = run_external(
             worktree_path, model, record_dir / "prompt.txt", record_dir, **runner_kwargs)
+    except _RunnerSandboxUnusable as e:
+        _set_state(record_dir, "failed-env", env=env_rec, error=str(e))
+        raise WorkflowError(
+            f"{e} — implementation runner was not started; worktree preserved at "
+            f"{worktree_path}") from e
     except Exception as e:  # noqa: BLE001 — every runner transport failure releases running state
         _set_state(record_dir, "failed-runner", env=env_rec,
                    error=f"runner transport exception: {e}")
@@ -1040,10 +1151,13 @@ def _run_claimed(root: Path, plan: dict, did: str, record_dir: Path) -> int:
         report = _read_report(worktree_path)
         result_sha, _ = _snapshot(
             worktree_path, f"waystone delegation result: {task_id} {did}", exclude_uv_cache=True)
-        _git_out(root, "update-ref", f"{DELEG_REF_NS}/{did}-result", result_sha)
         changed = _changed_files(root, base_sha, result_sha)
         patch = _diff_patch(root, base_sha, result_sha)
         empty = patch.strip() == b""
+        environment_failure = _runner_environment_failure_reason(record_dir, empty, report)
+        if environment_failure is not None:
+            raise _RunnerEnvironmentFailure(environment_failure)
+        _git_out(root, "update-ref", f"{DELEG_REF_NS}/{did}-result", result_sha)
         if not empty:
             (artifact_dir / "changes.patch").write_bytes(patch)
         contract = {
@@ -1061,6 +1175,10 @@ def _run_claimed(root: Path, plan: dict, did: str, record_dir: Path) -> int:
         }
         (artifact_dir / "contract.yaml").write_text(
             yaml.safe_dump(contract, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    except _RunnerEnvironmentFailure as e:
+        _set_state(record_dir, "failed-env", env=env_rec, error=str(e))
+        raise WorkflowError(
+            f"{e} — worktree preserved at {worktree_path}") from e
     except Exception as e:
         _set_state(record_dir, "failed-artifact", env=env_rec, error=str(e))
         raise WorkflowError(
@@ -2305,16 +2423,23 @@ def show(root: Path, did: str, opt: str | None) -> int:
     if opt == "failure":
         error = _read_status(rec).get("error")
         print(f"error: {error if error is not None else '(none recorded)'}")
-        stderr_path = rec / "runner.stderr"
-        try:
-            lines = stderr_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except FileNotFoundError:
-            lines = []
-        except OSError as e:
-            raise WorkflowError(f"cannot read runner stderr {stderr_path}: {e}") from e
-        if lines:
-            print("runner.stderr tail:")
-            print("\n".join(lines[-50:]))
+        diagnostic_parts = [str(error)] if error is not None else []
+        for filename in ("sandbox-probe.stderr", "runner.stderr"):
+            stderr_path = rec / filename
+            try:
+                stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+            except FileNotFoundError:
+                continue
+            except OSError as e:
+                raise WorkflowError(f"cannot read runner stderr {stderr_path}: {e}") from e
+            diagnostic_parts.append(stderr)
+            lines = stderr.splitlines()
+            if lines:
+                print(f"{filename} tail:")
+                print("\n".join(lines[-50:]))
+        hint = _runner_sandbox_diagnostic_hint("\n".join(diagnostic_parts))
+        if hint is not None:
+            print(f"diagnostic hint: {hint}")
         return 0
     if opt in ("patch", "report"):
         contract_p = rec / "artifact" / "contract.yaml"

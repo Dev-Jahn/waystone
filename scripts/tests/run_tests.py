@@ -6172,7 +6172,14 @@ class DelegateRunTests(unittest.TestCase):
     def test_empty_diff_marks_empty(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(d)
-            fake = self._fake_runner({}, report=None)  # no changes
+
+            def fake(worktree, model, prompt_path, record_dir):
+                (record_dir / "last_message.md").write_text("no changes", encoding="utf-8")
+                (record_dir / "runner.stderr").write_text(
+                    "WARNING: could not create PATH aliases: Operation not permitted\n",
+                    encoding="utf-8")
+                return (0, 0.42)
+
             import contextlib
             import io
             with contextlib.redirect_stdout(io.StringIO()):
@@ -6182,6 +6189,114 @@ class DelegateRunTests(unittest.TestCase):
             self.assertTrue(contract["empty"])
             self.assertFalse((rec / "artifact" / "changes.patch").exists())
             self.assertEqual(delegate._read_status(rec)["state"], "needs-review")
+
+    def test_rc_zero_empty_missing_report_with_sandbox_write_failure_is_failed_env(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            stderr = "loopback: Failed RTM_NEWADDR: Operation not permitted\n"
+
+            def fake(worktree, model, prompt_path, record_dir):
+                (record_dir / "last_message.md").write_text("could not write", encoding="utf-8")
+                (record_dir / "runner.stderr").write_text(stderr, encoding="utf-8")
+                return (0, 0.42)
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(
+                        delegate.WorkflowError, "runner environment failure despite rc 0"):
+                    self._run(root, home, fake)
+            rec = self._record_dir(root, home)
+            status = delegate._read_status(rec)
+            self.assertEqual(status["state"], "failed-env")
+            self.assertIn(stderr.strip(), status["error"])
+            self.assertFalse((rec / "artifact" / "contract.yaml").exists())
+
+    def test_empty_diff_with_report_is_not_misclassified_by_sandbox_stderr(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            report = "verification: []\nlimitations: []\nrisks: []\nescalations: []\n"
+
+            def fake(worktree, model, prompt_path, record_dir):
+                (record_dir / "last_message.md").write_text("no change needed", encoding="utf-8")
+                (record_dir / "runner.stderr").write_text(
+                    "loopback: Failed RTM_NEWADDR: Operation not permitted\n", encoding="utf-8")
+                (worktree / "JW_REPORT.yaml").write_text(report, encoding="utf-8")
+                return (0, 0.42)
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(self._run(root, home, fake), 0)
+            rec = self._record_dir(root, home)
+            self.assertEqual(delegate._read_status(rec)["state"], "needs-review")
+            contract = yaml.safe_load((rec / "artifact" / "contract.yaml").read_text())
+            self.assertTrue(contract["empty"])
+            self.assertIs(contract["delegate_report"]["present"], True)
+
+    def test_codex_sandbox_probe_uses_workspace_write_and_preserves_raw_stderr(self):
+        import types
+
+        with tempfile.TemporaryDirectory() as d:
+            worktree = Path(d) / "wt"
+            record = Path(d) / "record"
+            worktree.mkdir()
+            record.mkdir()
+            calls = []
+            stderr = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n"
+            original = delegate.subprocess.run
+
+            def fake(cmd, **kwargs):
+                calls.append((cmd, kwargs))
+                kwargs["stderr"].write(stderr)
+                return types.SimpleNamespace(returncode=0)
+
+            delegate.subprocess.run = fake
+            try:
+                with self.assertRaises(delegate._RunnerSandboxUnusable) as cm:
+                    delegate._run_codex_sandbox_probe(
+                        worktree, "gpt-test", record, effort="xhigh")
+            finally:
+                delegate.subprocess.run = original
+            self.assertEqual(len(calls), 1)
+            command = calls[0][0]
+            self.assertEqual(command[:2], ["codex", "exec"])
+            self.assertEqual(command[command.index("-C") + 1], str(worktree))
+            self.assertEqual(command[command.index("-s") + 1], "workspace-write")
+            self.assertIn(stderr, str(cm.exception))
+            self.assertFalse(any(worktree.glob(".waystone-sandbox-write-probe-*")))
+
+    def test_codex_sandbox_probe_failure_records_failed_env_without_main_runner(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            stderr = "landlock sandbox: failed to write: Permission denied\n"
+            original = delegate._run_codex_sandbox_probe
+
+            def fail_probe(worktree, model, record_dir, *, effort=None):
+                (record_dir / "sandbox-probe.stderr").write_text(stderr, encoding="utf-8")
+                raise delegate._RunnerSandboxUnusable(
+                    f"runner sandbox unusable: {stderr}")
+
+            delegate._run_codex_sandbox_probe = fail_probe
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(
+                            delegate.WorkflowError, "runner sandbox unusable") as cm:
+                        _run_with_home(home, lambda: delegate.run_delegation(
+                            root, "feat/xyz", "implementer", []))
+            finally:
+                delegate._run_codex_sandbox_probe = original
+            self.assertIn(stderr, str(cm.exception))
+            rec = self._record_dir(root, home)
+            status = delegate._read_status(rec)
+            self.assertEqual(status["state"], "failed-env")
+            self.assertIn(stderr, status["error"])
+            self.assertFalse((rec / "runner.jsonl").exists())
 
     def test_binary_change_preserved_in_patch(self):
         with tempfile.TemporaryDirectory() as d:
@@ -7470,6 +7585,31 @@ class DelegateCliTests(unittest.TestCase):
             self.assertIn("stderr line 60", text)
             self.assertNotIn("stderr line 10\n", text)
             self.assertNotIn("RUNNER-JSONL-SECRET", text)
+
+    def test_show_failure_diagnoses_runner_sandbox_mechanisms(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _deleg_project(d)
+            with self.assertRaises(delegate.WorkflowError):
+                _deleg_run(root, home, _deleg_fake({}, rc=7))
+            rec = _latest_rec(root, home)
+            cases = (
+                ("bwrap: Creating new namespace failed: Operation not permitted", "/etc/apparmor.d/bwrap"),
+                ("AppArmor denied unprivileged userns creation", "/etc/apparmor.d/bwrap"),
+                ("failed to apply Landlock sandbox rules", "Landlock"),
+            )
+            for stderr, hint in cases:
+                with self.subTest(stderr=stderr):
+                    (rec / "runner.stderr").write_text(stderr + "\n", encoding="utf-8")
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        rc = _run_with_home(home, lambda: delegate.main([
+                            "show", rec.name, "--failure", "--root", str(root)]))
+                    self.assertEqual(rc, 0)
+                    self.assertIn("diagnostic hint:", out.getvalue())
+                    self.assertIn(hint, out.getvalue())
 
     def test_unknown_subcommand(self):
         import contextlib
@@ -9965,6 +10105,10 @@ class UvCacheTests(unittest.TestCase):
 
             def fake(*args, **kwargs):
                 seen.append(kwargs.get("env"))
+                command = args[0]
+                if command[:2] == ["codex", "exec"] and "--ephemeral" in command:
+                    (worktree / f".waystone-sandbox-write-probe-{record.name}").write_text(
+                        "waystone-sandbox-write-probe\n")
                 return types.SimpleNamespace(returncode=0, stderr="")
 
             before = os.environ.get("UV_CACHE_DIR")
@@ -9976,7 +10120,8 @@ class UvCacheTests(unittest.TestCase):
             finally:
                 delegate.subprocess.run = orig
             expected = str(worktree / ".waystone-uv-cache")
-            self.assertEqual([env["UV_CACHE_DIR"] for env in seen], [expected, expected])
+            self.assertEqual(
+                [env["UV_CACHE_DIR"] for env in seen], [expected, expected, expected])
             self.assertTrue(all("WAYSTONE_VERIFIER_SESSION" not in env for env in seen))
             self.assertEqual(os.environ.get("UV_CACHE_DIR"), before)
 
@@ -10020,6 +10165,9 @@ class UvCacheTests(unittest.TestCase):
 
             def fake(cmd, **kwargs):
                 commands.append(cmd)
+                if "--ephemeral" in cmd:
+                    (worktree / f".waystone-sandbox-write-probe-{record.name}").write_text(
+                        "waystone-sandbox-write-probe\n")
                 return types.SimpleNamespace(returncode=0)
 
             delegate.subprocess.run = fake
@@ -10029,10 +10177,14 @@ class UvCacheTests(unittest.TestCase):
                 delegate._run_codex(worktree, "gpt-test", prompt, record)
             finally:
                 delegate.subprocess.run = orig
-            self.assertIn("-c", commands[0])
-            self.assertIn('model_reasoning_effort="ultra"', commands[0])
-            self.assertNotIn("-c", commands[1])
-            self.assertFalse(any(arg.startswith("model_reasoning_effort=") for arg in commands[1]))
+            self.assertEqual(len(commands), 4)  # probe + task for each invocation
+            for command in commands[:2]:
+                self.assertIn("-c", command)
+                self.assertIn('model_reasoning_effort="ultra"', command)
+            for command in commands[2:]:
+                self.assertNotIn("-c", command)
+                self.assertFalse(any(
+                    arg.startswith("model_reasoning_effort=") for arg in command))
 
     def test_codex_verifier_ultra_effort_flag_is_exact(self):
         import types
