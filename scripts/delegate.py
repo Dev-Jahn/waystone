@@ -100,18 +100,40 @@ _CLAUDE_COMMON_ARGS = (
     "--permission-mode", "dontAsk", "--no-session-persistence",
 )
 _CLAUDE_NETWORK_DENY = "WebFetch,WebSearch"
-_SANDBOX_WRITE_FAILURE_RE = re.compile(
+# HEURISTIC HINT ONLY (ruling 2026-07-17): these stderr patterns feed diagnostics and failure
+# hints, never a gate — the authoritative env-failure decision is the conjunctive check
+# (rc + empty patch + missing report + write-proof). Free-text classification cannot be made
+# exact; imperfect matches on mixed lines are accepted, not chased.
+_SANDBOX_MECHANISM_RE = re.compile(
+    r"(?:bwrap|bubblewrap|landlock|userns|user namespace|unprivileged_userns|apparmor|"
+    r"seatbelt|sandbox-exec|sandbox_apply|RTM_NEWADDR)", re.IGNORECASE)
+_SANDBOX_FAILURE_TERM_RE = re.compile(
+    r"(?:failed|failure|error|unable|cannot|could not|denied|not permitted|permission denied|"
+    r"read-only file system)", re.IGNORECASE)
+_SANDBOX_STRONG_FAILURE_TERM_RE = re.compile(
+    r"(?:failed|failure|error|unable|cannot|could not|not permitted|permission denied|"
+    r"read-only file system)", re.IGNORECASE)
+_SANDBOX_SUCCESS_NARRATIVE_RE = re.compile(
+    r"(?:correctly|successfully|expectedly)\s+denied|(?:all\s+)?(?:sandbox\s+)?tests?\s+passed",
+    re.IGNORECASE)
+_SANDBOX_WRITE_OPERATION_FAILURE_RE = re.compile(
     r"(?:"
-    r"loopback:\s*failed\s+RTM_NEWADDR[^\n]*(?:operation not permitted|permission denied)|"
-    r"(?:bwrap|bubblewrap|landlock|userns|user namespace|unprivileged_userns|apparmor)"
-    r"[^\n]*(?:failed|denied|not permitted|permission denied)|"
-    r"(?:failed|unable|cannot|could not)\s+to\s+(?:write|create|modify|patch)"
-    r"[^\n]*(?:operation not permitted|permission denied|read-only file system)|"
-    r"(?:write|mkdir|touch|apply_patch|create (?:file|directory))"
-    r"[^\n]*(?:operation not permitted|permission denied|read-only file system)"
-    r")",
-    re.IGNORECASE,
-)
+    r"(?:failed|unable|cannot|could not)(?:\s+to)?\s+"
+    r"(?:write|modify|patch|mkdir|touch|apply_patch|create (?:file|directory))[^\n]*"
+    r"(?:operation not permitted|permission denied|read-only file system)|"
+    r"(?:write|mkdir|touch|apply_patch|create (?:file|directory))[^\n]*"
+    r"(?:operation not permitted|permission denied|read-only file system)"
+    r")", re.IGNORECASE)
+_PROBE_AUTH_FAILURE_RE = re.compile(
+    r"(?:401\s+unauthorized|403\s+forbidden|unauthorized|authentication\s+failed|"
+    r"failed\s+to\s+authenticate|invalid\s+(?:api\s+)?key|api\s+key|token\s+expired|"
+    r"login\s+required|please\s+log\s+in)", re.IGNORECASE)
+_PROBE_NETWORK_FAILURE_RE = re.compile(
+    r"(?:network\s+(?:request\s+)?failed|"
+    r"network\s+is\s+unreachable|connection\s+(?:refused|reset)|"
+    r"(?:failed|unable|could not)\s+to\s+(?:connect|resolve)|"
+    r"name or service not known|temporary failure in name resolution|dns\s+error|"
+    r"tls\s+error|proxy\s+error)", re.IGNORECASE)
 CLAUDE_CONFINEMENT_WARN = (
     "waystone warn: UNSANDBOXED claude implementer — allowed Bash can read/write filesystem "
     "paths outside the worktree, operate on other repositories, spawn or affect processes, and "
@@ -147,8 +169,28 @@ class _RefusedWrite(WorkflowError):
     """A plugin-local directory could not be created — maps to exit 2 (refused write, §2)."""
 
 
-class _RunnerSandboxUnusable(WorkflowError):
-    """The configured runner sandbox could not perform its preflight worktree write."""
+class _RunnerProbeFailure(WorkflowError):
+    """A structured preflight failure; probe_result remains recordable on every exit path."""
+
+    def __init__(self, message: str, probe_result: dict | None = None):
+        super().__init__(message)
+        self.probe_result = probe_result
+
+
+class _RunnerSandboxUnusable(_RunnerProbeFailure):
+    """Concrete sandbox evidence shows that the preflight write was denied."""
+
+
+class _RunnerProbeTransportFailure(_RunnerProbeFailure):
+    """The runner transport failed before the probe could establish sandbox behavior."""
+
+
+class _RunnerProbeEvidenceFailure(_RunnerProbeFailure):
+    """The harness could not collect or persist the evidence needed to decide the probe."""
+
+
+class _RunnerProbeLifecycleFailure(_RunnerProbeFailure):
+    """The disposable probe worktree could not be created or proven cleaned."""
 
 
 class _RunnerEnvironmentFailure(WorkflowError):
@@ -654,49 +696,275 @@ def _codex_exec_command(worktree: Path, model: str, effort: str | None) -> list[
     return cmd
 
 
+def _sandbox_failure_line(text: str) -> str | None:
+    """Return one concrete sandbox/write failure line, independent of token order."""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        success_narrative = _SANDBOX_SUCCESS_NARRATIVE_RE.search(line) is not None
+        strong_failure = _SANDBOX_STRONG_FAILURE_TERM_RE.search(line) is not None
+        if success_narrative and not strong_failure:
+            continue
+        if (_SANDBOX_MECHANISM_RE.search(line)
+                and _SANDBOX_FAILURE_TERM_RE.search(line)):
+            return line
+        if _SANDBOX_WRITE_OPERATION_FAILURE_RE.search(line):
+            return line
+    return None
+
+
+def _sandbox_probe_worktree_path(worktree: Path, record_dir: Path) -> Path:
+    """A deterministic, owned sibling path on the same cache filesystem as the task worktree."""
+    suffix = hashlib.sha256(str(record_dir.resolve()).encode()).hexdigest()[:12]
+    return worktree.resolve().parent / f".{worktree.name}-sandbox-probe-{suffix}"
+
+
+def _probe_worktree_registered(worktree: Path, probe_worktree: Path) -> bool:
+    rc, listed, err = _git(worktree, "worktree", "list", "--porcelain")
+    if rc != 0:
+        raise WorkflowError(
+            f"cannot inspect sandbox probe worktree registration: {err or listed or f'rc {rc}'}")
+    target = os.path.realpath(probe_worktree)
+    paths = [line.removeprefix("worktree ") for line in listed.splitlines()
+             if line.startswith("worktree ")]
+    return any(os.path.realpath(path) == target for path in paths)
+
+
+def _cleanup_sandbox_probe_worktree(worktree: Path, probe_worktree: Path) -> None:
+    """Remove an owned probe sibling, including partial or stale Git registrations, then prove it."""
+    if _probe_worktree_registered(worktree, probe_worktree):
+        rc, out, err = _git(
+            worktree, "worktree", "remove", "--force", str(probe_worktree), timeout=30)
+        if rc != 0 and (_probe_worktree_registered(worktree, probe_worktree)
+                        or os.path.lexists(probe_worktree)):
+            raise WorkflowError(
+                "sandbox probe cleanup failed at git worktree remove: "
+                f"{err or out or f'rc {rc}'}")
+    if os.path.lexists(probe_worktree):
+        try:
+            if probe_worktree.is_symlink() or not probe_worktree.is_dir():
+                probe_worktree.unlink()
+            else:
+                shutil.rmtree(probe_worktree)
+        except OSError as e:
+            raise WorkflowError(
+                f"sandbox probe cleanup could not remove partial path {probe_worktree}: {e}") from e
+    rc, out, err = _git(worktree, "worktree", "prune", timeout=30)
+    if rc != 0:
+        raise WorkflowError(
+            f"sandbox probe cleanup failed at git worktree prune: {err or out or f'rc {rc}'}")
+    if os.path.lexists(probe_worktree) or _probe_worktree_registered(worktree, probe_worktree):
+        raise WorkflowError(
+            f"sandbox probe cleanup postcondition failed: sibling remains at {probe_worktree}")
+
+
+def _write_sandbox_probe_result(record_dir: Path, result: dict) -> str | None:
+    """Best-effort atomic persistence; return an error string instead of leaking an OSError."""
+    try:
+        write_text_atomic(
+            record_dir / "sandbox-probe-result.json",
+            json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+    except OSError as e:
+        return str(e)
+    return None
+
+
+def _read_sandbox_probe_result(record_dir: Path) -> dict | None:
+    path = record_dir / "sandbox-probe-result.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as e:
+        raise WorkflowError(f"cannot read sandbox probe result {path}: {e}") from e
+    if not isinstance(value, dict):
+        raise WorkflowError(f"invalid sandbox probe result {path}: expected object")
+    return value
+
+
+def _probe_failure_exception(classification: str):
+    return {
+        "sandbox": _RunnerSandboxUnusable,
+        "transport": _RunnerProbeTransportFailure,
+        "evidence": _RunnerProbeEvidenceFailure,
+        "lifecycle": _RunnerProbeLifecycleFailure,
+    }.get(classification, _RunnerProbeFailure)
+
+
+def _probe_transport_kind(rc: int | None, stderr: str) -> str:
+    if _PROBE_AUTH_FAILURE_RE.search(stderr):
+        return "authentication"
+    if _PROBE_NETWORK_FAILURE_RE.search(stderr):
+        return "network"
+    if rc == 124:
+        return "timeout"
+    if rc == 127:
+        return "launch"
+    return "runner-exit"
+
+
 def _run_codex_sandbox_probe(worktree: Path, model: str, record_dir: Path,
-                             *, effort: str | None = None) -> None:
-    """Require one real write through the same Codex workspace-write sandbox before task launch."""
+                             *, effort: str | None = None) -> dict:
+    """Prove one sandboxed write in a disposable sibling and record every failure path."""
+    start = time.monotonic()
+    probe_worktree = _sandbox_probe_worktree_path(worktree, record_dir)
     probe_name = f".waystone-sandbox-write-probe-{record_dir.name}"
-    probe_path = worktree / probe_name
+    probe_path = probe_worktree / probe_name
     expected = b"waystone-sandbox-write-probe\n"
     stderr_path = record_dir / "sandbox-probe.stderr"
-    if probe_path.exists():
-        raise _RunnerSandboxUnusable(
-            f"runner sandbox unusable: reserved probe path already exists: {probe_path}")
-    cmd = _codex_exec_command(worktree, model, effort)
-    cmd.extend([
-        "--ephemeral", "--color", "never", "--output-last-message",
-        str(record_dir / "sandbox-probe-last-message.md"), "--json",
-        f"Use the shell tool to run exactly: printf 'waystone-sandbox-write-probe\\n' > {probe_name}",
-    ])
-    env = {**os.environ, "UV_CACHE_DIR": str(worktree / ".waystone-uv-cache")}
-    env.pop(_VERIFIER_SESSION_ENV, None)
+    result = {
+        "schema": "waystone-sandbox-probe-1",
+        "worktree": str(probe_worktree),
+        "outcome": "running",
+        "classification": None,
+        "transport_kind": None,
+        "detail": None,
+        "rc": None,
+        "duration_s": 0.0,
+        "stale_detected": False,
+        "stale_cleanup_state": "not-needed",
+        "creation_state": "not-attempted",
+        "cleanup_state": "not-needed",
+    }
+    failure: tuple[str, str] | None = None
+
+    def persist_before_mutation() -> bool:
+        nonlocal failure
+        error = _write_sandbox_probe_result(record_dir, result)
+        if error is None:
+            return True
+        failure = ("evidence", f"cannot record sandbox probe lifecycle: {error}")
+        return False
+
     try:
-        with open(record_dir / "sandbox-probe.jsonl", "w", encoding="utf-8") as jout, \
-             open(stderr_path, "w", encoding="utf-8") as jerr:
-            try:
-                proc = subprocess.run(
-                    cmd, stdout=jout, stderr=jerr, timeout=180, env=env)
-                rc = proc.returncode
-            except subprocess.TimeoutExpired:
-                rc = 124
-            except OSError as e:
-                jerr.write(str(e))
-                rc = 127
-        stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
-        actual = probe_path.read_bytes() if probe_path.is_file() else None
-    finally:
         try:
-            probe_path.unlink(missing_ok=True)
-        except OSError as e:
-            raise _RunnerSandboxUnusable(
-                f"runner sandbox unusable: could not remove sandbox probe {probe_path}: {e}") from e
-    if rc != 0 or actual != expected:
-        detail = stderr or (
-            f"sandbox probe exited rc {rc}" if rc != 0
-            else "sandbox probe did not create the expected worktree file")
-        raise _RunnerSandboxUnusable(f"runner sandbox unusable: {detail}")
+            stale = (os.path.lexists(probe_worktree)
+                     or _probe_worktree_registered(worktree, probe_worktree))
+        except WorkflowError as e:
+            failure = ("lifecycle", str(e))
+            stale = False
+        if stale and failure is None:
+            result["stale_detected"] = True
+            result["stale_cleanup_state"] = "attempted"
+            if persist_before_mutation():
+                try:
+                    _cleanup_sandbox_probe_worktree(worktree, probe_worktree)
+                    result["stale_cleanup_state"] = "cleaned"
+                except WorkflowError as e:
+                    result["stale_cleanup_state"] = "failed"
+                    failure = ("lifecycle", f"stale sandbox probe worktree: {e}")
+
+        if failure is None:
+            result["creation_state"] = "attempted"
+            persist_before_mutation()
+        if failure is None:
+            try:
+                base_sha = _git_out(worktree, "rev-parse", "HEAD")
+            except WorkflowError as e:
+                failure = ("lifecycle", f"sandbox probe base resolution failed: {e}")
+        if failure is None:
+            rc, out, err = _git(
+                worktree, "worktree", "add", "--detach", str(probe_worktree), base_sha,
+                timeout=30)
+            if rc != 0:
+                result["creation_state"] = "partial-or-failed"
+                failure = (
+                    "lifecycle",
+                    f"sandbox probe sibling creation failed: {err or out or f'rc {rc}'}")
+            else:
+                result["creation_state"] = "created"
+
+        if failure is None:
+            cmd = _codex_exec_command(probe_worktree, model, effort)
+            cmd.extend([
+                "--ephemeral", "--color", "never", "--output-last-message",
+                str(record_dir / "sandbox-probe-last-message.md"), "--json",
+                f"Use the shell tool to run exactly: "
+                f"printf 'waystone-sandbox-write-probe\\n' > {probe_name}",
+            ])
+            env = {**os.environ, "UV_CACHE_DIR": str(probe_worktree / ".waystone-uv-cache")}
+            env.pop(_VERIFIER_SESSION_ENV, None)
+            try:
+                with open(record_dir / "sandbox-probe.jsonl", "w", encoding="utf-8") as jout, \
+                     open(stderr_path, "w", encoding="utf-8") as jerr:
+                    try:
+                        proc = subprocess.run(
+                            cmd, stdout=jout, stderr=jerr, timeout=180, env=env)
+                        result["rc"] = proc.returncode
+                    except subprocess.TimeoutExpired:
+                        result["rc"] = 124
+                    except OSError as e:
+                        jerr.write(str(e))
+                        result["rc"] = 127
+            except OSError as e:
+                failure = ("evidence", f"cannot collect sandbox probe process output: {e}")
+
+        stderr = ""
+        actual = None
+        if failure is None:
+            try:
+                stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                failure = ("evidence", f"cannot read sandbox probe stderr {stderr_path}: {e}")
+        if failure is None:
+            try:
+                actual = probe_path.read_bytes() if probe_path.is_file() else None
+            except OSError as e:
+                failure = ("evidence", f"cannot read sandbox probe file {probe_path}: {e}")
+        if failure is None:
+            sandbox_line = _sandbox_failure_line(stderr)
+            if result["rc"] != 0:
+                if sandbox_line is not None:
+                    failure = ("sandbox", sandbox_line)
+                else:
+                    detail = stderr.strip() or f"sandbox probe exited rc {result['rc']}"
+                    failure = ("transport", detail)
+            elif actual != expected:
+                if sandbox_line is not None:
+                    failure = ("sandbox", sandbox_line)
+                elif (_PROBE_AUTH_FAILURE_RE.search(stderr)
+                      or _PROBE_NETWORK_FAILURE_RE.search(stderr)):
+                    failure = ("transport", stderr.strip())
+                else:
+                    failure = (
+                        "write-proof", "sandbox probe did not create the expected worktree file")
+    finally:
+        result["cleanup_state"] = "attempted"
+        _write_sandbox_probe_result(record_dir, result)
+        try:
+            _cleanup_sandbox_probe_worktree(worktree, probe_worktree)
+            result["cleanup_state"] = "cleaned"
+        except WorkflowError as e:
+            result["cleanup_state"] = "failed"
+            prior = f"; prior failure: {failure[1]}" if failure is not None else ""
+            failure = ("lifecycle", f"sandbox probe sibling cleanup failed: {e}{prior}")
+        result["duration_s"] = round(time.monotonic() - start, 3)
+
+    if failure is None:
+        result["outcome"] = "passed"
+    else:
+        result["outcome"] = "failed"
+        result["classification"], result["detail"] = failure
+        if result["classification"] == "transport":
+            result["transport_kind"] = _probe_transport_kind(result["rc"], stderr)
+    record_error = _write_sandbox_probe_result(record_dir, result)
+    if record_error is not None and failure is None:
+        failure = ("evidence", f"cannot record final sandbox probe result: {record_error}")
+        result["outcome"] = "failed"
+        result["classification"], result["detail"] = failure
+        _write_sandbox_probe_result(record_dir, result)
+    if failure is not None:
+        classification, detail = failure
+        prefix = {
+            "sandbox": "runner sandbox unusable",
+            "transport": "runner preflight transport failed",
+            "evidence": "runner preflight evidence failed",
+            "lifecycle": "runner preflight lifecycle failed",
+            "write-proof": "runner sandbox write proof failed",
+        }.get(classification, "runner preflight failed")
+        raise _probe_failure_exception(classification)(f"{prefix}: {detail}", result)
+    return result
 
 
 def _run_codex(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
@@ -706,11 +974,27 @@ def _run_codex(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
 
     RUN is an implementer session, not a verifier session: lifecycle hooks may seed ignored
     `.waystone` project state here. Result capture still includes only Git material."""
-    _run_codex_sandbox_probe(worktree, model, record_dir, effort=effort)
+    start = time.monotonic()
+    try:
+        _run_codex_sandbox_probe(worktree, model, record_dir, effort=effort)
+    except _RunnerProbeFailure:
+        raise
+    except Exception as e:  # noqa: BLE001 — a harness defect must not masquerade as transport
+        prior = None
+        try:
+            prior = _read_sandbox_probe_result(record_dir)
+        except WorkflowError:
+            pass
+        result = prior if isinstance(prior, dict) else {"schema": "waystone-sandbox-probe-1"}
+        result.update({"outcome": "failed", "classification": "internal",
+                       "detail": f"{type(e).__name__}: {e}"})
+        _write_sandbox_probe_result(record_dir, result)
+        raise _RunnerProbeFailure(
+            f"runner preflight internal error (harness defect, not transport): "
+            f"{type(e).__name__}: {e}", result) from e
     cmd = _codex_exec_command(worktree, model, effort)
     cmd.extend(["--color", "never", "--output-last-message",
                 str(record_dir / "last_message.md"), "--json"])
-    start = time.monotonic()
     env = {**os.environ, "UV_CACHE_DIR": str(worktree / ".waystone-uv-cache")}
     env.pop(_VERIFIER_SESSION_ENV, None)
     try:
@@ -738,16 +1022,19 @@ def _runner_environment_failure_reason(record_dir: Path, empty: bool, report: di
         return None
     except OSError as e:
         raise WorkflowError(f"cannot read runner stderr {stderr_path}: {e}") from e
-    match = _SANDBOX_WRITE_FAILURE_RE.search(stderr)
-    if match is None:
+    failure_line = _sandbox_failure_line(stderr)
+    if failure_line is None:
         return None
     return (
         "runner environment failure despite rc 0: empty patch and missing delegate report; "
-        f"runner.stderr indicates sandbox/tool write failure: {match.group(0)}")
+        f"runner.stderr indicates sandbox/tool write failure: {failure_line}")
 
 
 def _runner_sandbox_diagnostic_hint(text: str) -> str | None:
-    lower = text.lower()
+    failure_line = _sandbox_failure_line(text)
+    if failure_line is None:
+        return None
+    lower = failure_line.lower()
     if "landlock" in lower:
         return (
             "Landlock sandbox initialization failed; check kernel Landlock support and "
@@ -758,6 +1045,10 @@ def _runner_sandbox_diagnostic_hint(text: str) -> str | None:
         return (
             "AppArmor may be blocking bwrap user namespaces; check "
             "kernel.apparmor_restrict_unprivileged_userns and /etc/apparmor.d/bwrap")
+    if any(token in lower for token in ("seatbelt", "sandbox-exec", "sandbox_apply")):
+        return (
+            "macOS seatbelt (sandbox-exec) denied the operation; check the Codex sandbox "
+            "profile and host sandbox denial logs")
     return None
 
 
@@ -849,7 +1140,8 @@ def _read_status(record_dir: Path) -> dict:
 
 def _set_state(record_dir: Path, state: str, *, env: dict | None = None, error: str | None = None,
                reason: str | None = None, overrides: list[str] | None = None,
-               verification_required: bool | None = None) -> dict:
+               verification_required: bool | None = None,
+               probe: dict | None = None) -> dict:
     st = _read_status_raw(record_dir) or {}  # a corrupt file is superseded — discard IS the recovery path
     transition = {"state": state, "at": _now_iso()}
     if reason is not None:
@@ -864,6 +1156,8 @@ def _set_state(record_dir: Path, state: str, *, env: dict | None = None, error: 
         st["env"] = env
     if error is not None:
         st["error"] = error
+    if probe is not None:
+        st["probe"] = probe
     if verification_required is not None:
         st["verification_required"] = verification_required
     tmp = record_dir / "status.json.tmp"  # atomic replace: a crash mid-write must not corrupt the record
@@ -1237,8 +1531,11 @@ def _run_claimed_body(root: Path, plan: dict, did: str, record_dir: Path, human)
     try:
         runner_rc, duration = run_external(
             worktree_path, model, record_dir / "prompt.txt", record_dir, **runner_kwargs)
-    except _RunnerSandboxUnusable as e:
-        _set_state(record_dir, "failed-env", env=env_rec, error=str(e))
+    except _RunnerProbeFailure as e:
+        probe = e.probe_result
+        classification = probe.get("classification") if isinstance(probe, dict) else None
+        state = "failed-runner" if classification in ("transport", "internal") else "failed-env"
+        _set_state(record_dir, state, env=env_rec, error=str(e), probe=probe)
         raise WorkflowError(
             f"{e} — implementation runner was not started; worktree preserved at "
             f"{worktree_path}") from e
@@ -1269,6 +1566,11 @@ def _run_claimed_body(root: Path, plan: dict, did: str, record_dir: Path, human)
         _git_out(root, "update-ref", f"{DELEG_REF_NS}/{did}-result", result_sha)
         if not empty:
             (artifact_dir / "changes.patch").write_bytes(patch)
+        probe = _read_sandbox_probe_result(record_dir) if runner_name == "codex" else None
+        runner_record = {"backend": binding["backend"], "rc": runner_rc,
+                         "duration_s": duration, "last_message": "last_message.md"}
+        if probe is not None:
+            runner_record["probe"] = probe
         contract = {
             "schema": "waystone-artifact-1",
             "delegation_id": did, "task_id": task_id,
@@ -1279,8 +1581,7 @@ def _run_claimed_body(root: Path, plan: dict, did: str, record_dir: Path, human)
             "empty": empty,
             "delegate_report": report,
             "env": env_rec,
-            "runner": {"backend": binding["backend"], "rc": runner_rc,
-                       "duration_s": duration, "last_message": "last_message.md"},
+            "runner": runner_record,
         }
         (artifact_dir / "contract.yaml").write_text(
             yaml.safe_dump(contract, sort_keys=False, allow_unicode=True), encoding="utf-8")

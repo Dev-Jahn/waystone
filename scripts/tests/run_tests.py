@@ -6872,15 +6872,18 @@ class DelegateRunTests(unittest.TestCase):
         import types
 
         with tempfile.TemporaryDirectory() as d:
-            worktree = Path(d) / "wt"
+            worktree = Path(d) / "repo"
             record = Path(d) / "record"
             worktree.mkdir()
+            init_repo(worktree)
             record.mkdir()
             calls = []
             stderr = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n"
             original = delegate.subprocess.run
 
             def fake(cmd, **kwargs):
+                if cmd[:2] != ["codex", "exec"]:
+                    return original(cmd, **kwargs)
                 calls.append((cmd, kwargs))
                 kwargs["stderr"].write(stderr)
                 return types.SimpleNamespace(returncode=0)
@@ -6895,10 +6898,14 @@ class DelegateRunTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             command = calls[0][0]
             self.assertEqual(command[:2], ["codex", "exec"])
-            self.assertEqual(command[command.index("-C") + 1], str(worktree))
+            probe_worktree = Path(command[command.index("-C") + 1])
+            self.assertNotEqual(probe_worktree, worktree)
+            self.assertEqual(
+                os.path.realpath(probe_worktree.parent), os.path.realpath(worktree.parent))
             self.assertEqual(command[command.index("-s") + 1], "workspace-write")
-            self.assertIn(stderr, str(cm.exception))
-            self.assertFalse(any(worktree.glob(".waystone-sandbox-write-probe-*")))
+            self.assertIn(stderr.strip(), str(cm.exception))
+            self.assertEqual((record / "sandbox-probe.stderr").read_text(), stderr)
+            self.assertFalse(os.path.lexists(probe_worktree))
 
     def test_codex_sandbox_probe_failure_records_failed_env_without_main_runner(self):
         import contextlib
@@ -6929,6 +6936,341 @@ class DelegateRunTests(unittest.TestCase):
             self.assertEqual(status["state"], "failed-env")
             self.assertIn(stderr, status["error"])
             self.assertFalse((rec / "runner.jsonl").exists())
+
+    def test_codex_probe_transport_failure_records_failed_runner_probe_result(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            probe = {
+                "schema": "waystone-sandbox-probe-1",
+                "outcome": "failed",
+                "classification": "transport",
+                "transport_kind": "authentication",
+                "duration_s": 1.25,
+            }
+            original = delegate._run_codex_sandbox_probe
+
+            def fail_probe(worktree, model, record_dir, *, effort=None):
+                raise delegate._RunnerProbeTransportFailure(
+                    "runner preflight transport failed: invalid API key", probe)
+
+            delegate._run_codex_sandbox_probe = fail_probe
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(
+                            delegate.WorkflowError, "preflight transport failed"):
+                        _run_with_home(home, lambda: delegate.run_delegation(
+                            root, "feat/xyz", "implementer", []))
+            finally:
+                delegate._run_codex_sandbox_probe = original
+            rec = self._record_dir(root, home)
+            status = delegate._read_status(rec)
+            self.assertEqual(status["state"], "failed-runner")
+            self.assertEqual(status["probe"], probe)
+            self.assertFalse((rec / "runner.jsonl").exists())
+
+    def test_contract_records_probe_breakdown_inside_total_runner_duration(self):
+        import contextlib
+        import io
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            probe = {
+                "schema": "waystone-sandbox-probe-1",
+                "outcome": "passed",
+                "classification": None,
+                "duration_s": 0.25,
+            }
+
+            def fake(worktree, model, prompt_path, record_dir):
+                (record_dir / "last_message.md").write_text("done", encoding="utf-8")
+                (record_dir / "sandbox-probe-result.json").write_text(
+                    _json.dumps(probe), encoding="utf-8")
+                return 0, 0.75
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(self._run(root, home, fake), 0)
+            rec = self._record_dir(root, home)
+            contract = yaml.safe_load((rec / "artifact" / "contract.yaml").read_text())
+            self.assertEqual(contract["runner"]["duration_s"], 0.75)
+            self.assertEqual(contract["runner"]["probe"], probe)
+
+    def test_codex_sandbox_probe_isolates_all_probe_edits_in_disposable_sibling(self):
+        import json as _json
+        import types
+
+        with tempfile.TemporaryDirectory() as d:
+            root, _home = self._project(d)
+            record = Path(d) / "record"
+            record.mkdir()
+            original = delegate.subprocess.run
+            observed = {}
+
+            def fake(cmd, **kwargs):
+                if cmd[:2] != ["codex", "exec"]:
+                    return original(cmd, **kwargs)
+                probe_worktree = Path(cmd[cmd.index("-C") + 1])
+                observed["worktree"] = probe_worktree
+                probe_name = f".waystone-sandbox-write-probe-{record.name}"
+                (probe_worktree / probe_name).write_text(
+                    "waystone-sandbox-write-probe\n", encoding="utf-8")
+                (probe_worktree / "UNRELATED_PROBE_EDIT.txt").write_text(
+                    "must be discarded\n", encoding="utf-8")
+                (probe_worktree / "f.txt").write_text("probe changed tracked content\n")
+                return types.SimpleNamespace(returncode=0)
+
+            delegate.subprocess.run = fake
+            try:
+                result = delegate._run_codex_sandbox_probe(root, "gpt-test", record)
+            finally:
+                delegate.subprocess.run = original
+
+            self.assertNotEqual(observed["worktree"], root)
+            self.assertEqual(
+                os.path.realpath(observed["worktree"].parent), os.path.realpath(root.parent))
+            self.assertFalse(os.path.lexists(observed["worktree"]))
+            self.assertEqual((root / "f.txt").read_text(), "0")
+            self.assertFalse((root / "UNRELATED_PROBE_EDIT.txt").exists())
+            self.assertEqual(result["outcome"], "passed")
+            self.assertGreaterEqual(result["duration_s"], 0)
+            recorded = _json.loads((record / "sandbox-probe-result.json").read_text())
+            self.assertEqual(recorded, result)
+            self.assertEqual(recorded["cleanup_state"], "cleaned")
+            listed = git(root, "worktree", "list", "--porcelain").stdout
+            self.assertNotIn(str(observed["worktree"]), listed)
+
+    def test_codex_sandbox_probe_distinguishes_sandbox_and_transport_failures(self):
+        import json as _json
+        import types
+
+        cases = (
+            ("Landlock setup failed: permission denied\n", "sandbox", None,
+             delegate._RunnerSandboxUnusable),
+            ("bwrap: network namespace setup failed: Operation not permitted\n", "sandbox", None,
+             delegate._RunnerSandboxUnusable),
+            ("401 Unauthorized: invalid API key\n", "transport", "authentication",
+             delegate._RunnerProbeTransportFailure),
+            ("network request failed: connection refused\n", "transport", "network",
+             delegate._RunnerProbeTransportFailure),
+        )
+        with tempfile.TemporaryDirectory() as d:
+            root, _home = self._project(d)
+            original = delegate.subprocess.run
+            for index, (stderr, classification, transport_kind, exception_type) in enumerate(cases):
+                with self.subTest(stderr=stderr):
+                    record = Path(d) / f"record-{index}"
+                    record.mkdir()
+
+                    def fake(cmd, **kwargs):
+                        if cmd[:2] != ["codex", "exec"]:
+                            return original(cmd, **kwargs)
+                        kwargs["stderr"].write(stderr)
+                        return types.SimpleNamespace(returncode=1)
+
+                    delegate.subprocess.run = fake
+                    try:
+                        with self.assertRaises(exception_type) as cm:
+                            delegate._run_codex_sandbox_probe(root, "gpt-test", record)
+                    finally:
+                        delegate.subprocess.run = original
+                    self.assertEqual(cm.exception.probe_result["classification"], classification)
+                    recorded = _json.loads((record / "sandbox-probe-result.json").read_text())
+                    self.assertEqual(recorded["classification"], classification)
+                    self.assertEqual(recorded["transport_kind"], transport_kind)
+                    self.assertGreaterEqual(recorded["duration_s"], 0)
+
+    def test_sandbox_failure_matching_is_order_independent_and_ignores_success_narrative(self):
+        with tempfile.TemporaryDirectory() as d:
+            record = Path(d)
+            runner_stderr = record / "runner.stderr"
+            report = {"present": False}
+            sandbox_cases = (
+                "Landlock setup failed: permission denied",
+                "failed to apply Landlock sandbox rules",
+                "bwrap: network namespace setup failed: Operation not permitted",
+                "sandbox-exec: sandbox_apply failed: Operation not permitted",
+            )
+            for stderr in sandbox_cases:
+                with self.subTest(stderr=stderr):
+                    runner_stderr.write_text(stderr + "\n", encoding="utf-8")
+                    self.assertIsNotNone(
+                        delegate._runner_environment_failure_reason(record, True, report))
+                    self.assertIsNotNone(delegate._runner_sandbox_diagnostic_hint(stderr))
+
+            non_failures = (
+                "cache cleanup skipped: permission denied",
+                "correctly denied invalid access; all Landlock tests passed",
+            )
+            for stderr in non_failures:
+                with self.subTest(stderr=stderr):
+                    runner_stderr.write_text(stderr + "\n", encoding="utf-8")
+                    self.assertIsNone(
+                        delegate._runner_environment_failure_reason(record, True, report))
+                    self.assertIsNone(delegate._runner_sandbox_diagnostic_hint(stderr))
+
+    def test_codex_sandbox_probe_records_stderr_read_failure_and_duration(self):
+        import json as _json
+        import types
+
+        with tempfile.TemporaryDirectory() as d:
+            root, _home = self._project(d)
+            record = Path(d) / "record"
+            record.mkdir()
+            original_run = delegate.subprocess.run
+            original_read_text = Path.read_text
+
+            def fake_run(cmd, **kwargs):
+                if cmd[:2] != ["codex", "exec"]:
+                    return original_run(cmd, **kwargs)
+                probe_worktree = Path(cmd[cmd.index("-C") + 1])
+                (probe_worktree / f".waystone-sandbox-write-probe-{record.name}").write_text(
+                    "waystone-sandbox-write-probe\n", encoding="utf-8")
+                return types.SimpleNamespace(returncode=0)
+
+            def fail_probe_stderr_read(path, *args, **kwargs):
+                if path == record / "sandbox-probe.stderr":
+                    raise PermissionError("injected unreadable probe stderr")
+                return original_read_text(path, *args, **kwargs)
+
+            delegate.subprocess.run = fake_run
+            Path.read_text = fail_probe_stderr_read
+            try:
+                with self.assertRaises(delegate._RunnerProbeEvidenceFailure) as cm:
+                    delegate._run_codex_sandbox_probe(root, "gpt-test", record)
+            finally:
+                Path.read_text = original_read_text
+                delegate.subprocess.run = original_run
+            self.assertIn("injected unreadable probe stderr", str(cm.exception))
+            self.assertEqual(cm.exception.probe_result["classification"], "evidence")
+            self.assertGreaterEqual(cm.exception.probe_result["duration_s"], 0)
+            recorded = _json.loads((record / "sandbox-probe-result.json").read_text())
+            self.assertEqual(recorded["classification"], "evidence")
+            self.assertEqual(recorded["cleanup_state"], "cleaned")
+
+    def test_codex_probe_internal_defect_is_labeled_honestly_not_transport(self):
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as d:
+            root, _home = self._project(d)
+            record = Path(d) / "record"
+            record.mkdir()
+            original = delegate._run_codex_sandbox_probe
+
+            def broken_probe(*args, **kwargs):
+                raise TypeError("injected harness defect")
+
+            delegate._run_codex_sandbox_probe = broken_probe
+            try:
+                with self.assertRaises(delegate._RunnerProbeFailure) as cm:
+                    delegate._run_codex(root, "gpt-test", record / "prompt.txt", record)
+            finally:
+                delegate._run_codex_sandbox_probe = original
+            self.assertIn("harness defect, not transport", str(cm.exception))
+            self.assertEqual(cm.exception.probe_result["classification"], "internal")
+            recorded = _json.loads((record / "sandbox-probe-result.json").read_text())
+            self.assertEqual(recorded["classification"], "internal")
+            self.assertEqual(recorded["detail"], "TypeError: injected harness defect")
+
+    def test_codex_sandbox_probe_cleans_partially_created_worktree_after_timeout(self):
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as d:
+            root, _home = self._project(d)
+            record = Path(d) / "record"
+            record.mkdir()
+            original_git = delegate._git
+            observed = {}
+
+            def timeout_after_create(cwd, *args, **kwargs):
+                if args[:3] == ("worktree", "add", "--detach"):
+                    recorded = _json.loads((record / "sandbox-probe-result.json").read_text())
+                    observed["creation_state_at_attempt"] = recorded["creation_state"]
+                    result = original_git(cwd, *args, **kwargs)
+                    observed["path"] = Path(args[3])
+                    self.assertEqual(result[0], 0)
+                    return 127, "", "injected worktree add timeout"
+                return original_git(cwd, *args, **kwargs)
+
+            delegate._git = timeout_after_create
+            try:
+                with self.assertRaises(delegate._RunnerProbeLifecycleFailure) as cm:
+                    delegate._run_codex_sandbox_probe(root, "gpt-test", record)
+            finally:
+                delegate._git = original_git
+            self.assertEqual(observed["creation_state_at_attempt"], "attempted")
+            self.assertFalse(os.path.lexists(observed["path"]))
+            self.assertNotIn(
+                str(observed["path"]), git(root, "worktree", "list", "--porcelain").stdout)
+            self.assertEqual(cm.exception.probe_result["classification"], "lifecycle")
+            self.assertEqual(cm.exception.probe_result["cleanup_state"], "cleaned")
+
+    def test_codex_sandbox_probe_auto_cleans_stale_sibling_before_next_attempt(self):
+        import types
+
+        with tempfile.TemporaryDirectory() as d:
+            root, _home = self._project(d)
+            record = Path(d) / "record"
+            record.mkdir()
+            stale = delegate._sandbox_probe_worktree_path(root, record)
+            self.assertEqual(git(root, "worktree", "add", "--detach", str(stale), "HEAD").returncode, 0)
+            (stale / "stale.txt").write_text("stale\n", encoding="utf-8")
+            original = delegate.subprocess.run
+
+            def fake(cmd, **kwargs):
+                if cmd[:2] != ["codex", "exec"]:
+                    return original(cmd, **kwargs)
+                probe_worktree = Path(cmd[cmd.index("-C") + 1])
+                self.assertFalse((probe_worktree / "stale.txt").exists())
+                (probe_worktree / f".waystone-sandbox-write-probe-{record.name}").write_text(
+                    "waystone-sandbox-write-probe\n", encoding="utf-8")
+                return types.SimpleNamespace(returncode=0)
+
+            delegate.subprocess.run = fake
+            try:
+                result = delegate._run_codex_sandbox_probe(root, "gpt-test", record)
+            finally:
+                delegate.subprocess.run = original
+            self.assertTrue(result["stale_detected"])
+            self.assertEqual(result["stale_cleanup_state"], "cleaned")
+            self.assertFalse(os.path.lexists(stale))
+
+    def test_codex_runner_total_duration_includes_recorded_probe_duration(self):
+        import json as _json
+        import types
+
+        with tempfile.TemporaryDirectory() as d:
+            root, _home = self._project(d)
+            record = Path(d) / "record"
+            record.mkdir()
+            prompt = Path(d) / "prompt.txt"
+            prompt.write_text("implement", encoding="utf-8")
+            original_run = delegate.subprocess.run
+            original_monotonic = delegate.time.monotonic
+            ticks = iter((10.0, 11.0, 13.0, 16.0))
+
+            def fake(cmd, **kwargs):
+                if cmd[:2] != ["codex", "exec"]:
+                    return original_run(cmd, **kwargs)
+                if "--ephemeral" in cmd:
+                    probe_worktree = Path(cmd[cmd.index("-C") + 1])
+                    (probe_worktree / f".waystone-sandbox-write-probe-{record.name}").write_text(
+                        "waystone-sandbox-write-probe\n", encoding="utf-8")
+                return types.SimpleNamespace(returncode=0)
+
+            delegate.subprocess.run = fake
+            delegate.time.monotonic = lambda: next(ticks)
+            try:
+                rc, duration = delegate._run_codex(root, "gpt-test", prompt, record)
+            finally:
+                delegate.time.monotonic = original_monotonic
+                delegate.subprocess.run = original_run
+            self.assertEqual(rc, 0)
+            self.assertEqual(duration, 6.0)
+            probe = _json.loads((record / "sandbox-probe-result.json").read_text())
+            self.assertEqual(probe["duration_s"], 2.0)
 
     def test_binary_change_preserved_in_patch(self):
         with tempfile.TemporaryDirectory() as d:
@@ -11213,9 +11555,10 @@ class UvCacheTests(unittest.TestCase):
         import os
         import types
         with tempfile.TemporaryDirectory() as d:
-            worktree = Path(d) / "wt"
+            worktree = Path(d) / "repo"
             record = Path(d) / "record"
             worktree.mkdir()
+            init_repo(worktree)
             record.mkdir()
             prompt = Path(d) / "prompt.txt"
             prompt.write_text("prompt")
@@ -11223,10 +11566,13 @@ class UvCacheTests(unittest.TestCase):
             orig = delegate.subprocess.run
 
             def fake(*args, **kwargs):
-                seen.append(kwargs.get("env"))
                 command = args[0]
+                if command[0] == "git":
+                    return orig(*args, **kwargs)
+                seen.append(kwargs.get("env"))
                 if command[:2] == ["codex", "exec"] and "--ephemeral" in command:
-                    (worktree / f".waystone-sandbox-write-probe-{record.name}").write_text(
+                    probe_worktree = Path(command[command.index("-C") + 1])
+                    (probe_worktree / f".waystone-sandbox-write-probe-{record.name}").write_text(
                         "waystone-sandbox-write-probe\n")
                 return types.SimpleNamespace(returncode=0, stderr="")
 
@@ -11239,8 +11585,11 @@ class UvCacheTests(unittest.TestCase):
             finally:
                 delegate.subprocess.run = orig
             expected = str(worktree / ".waystone-uv-cache")
+            self.assertEqual(seen[0]["UV_CACHE_DIR"], expected)
+            self.assertEqual(seen[2]["UV_CACHE_DIR"], expected)
             self.assertEqual(
-                [env["UV_CACHE_DIR"] for env in seen], [expected, expected, expected])
+                os.path.realpath(Path(seen[1]["UV_CACHE_DIR"]).parent.parent),
+                os.path.realpath(worktree.parent))
             self.assertTrue(all("WAYSTONE_VERIFIER_SESSION" not in env for env in seen))
             self.assertEqual(os.environ.get("UV_CACHE_DIR"), before)
 
@@ -11273,9 +11622,10 @@ class UvCacheTests(unittest.TestCase):
     def test_codex_effort_flag_is_exact_and_absent_when_unset(self):
         import types
         with tempfile.TemporaryDirectory() as d:
-            worktree = Path(d) / "wt"
+            worktree = Path(d) / "repo"
             record = Path(d) / "record"
             worktree.mkdir()
+            init_repo(worktree)
             record.mkdir()
             prompt = Path(d) / "prompt.txt"
             prompt.write_text("prompt")
@@ -11283,9 +11633,12 @@ class UvCacheTests(unittest.TestCase):
             orig = delegate.subprocess.run
 
             def fake(cmd, **kwargs):
+                if cmd[0] == "git":
+                    return orig(cmd, **kwargs)
                 commands.append(cmd)
                 if "--ephemeral" in cmd:
-                    (worktree / f".waystone-sandbox-write-probe-{record.name}").write_text(
+                    probe_worktree = Path(cmd[cmd.index("-C") + 1])
+                    (probe_worktree / f".waystone-sandbox-write-probe-{record.name}").write_text(
                         "waystone-sandbox-write-probe\n")
                 return types.SimpleNamespace(returncode=0)
 
