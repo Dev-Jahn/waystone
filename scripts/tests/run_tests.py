@@ -3794,6 +3794,121 @@ class PendingReviewTests(unittest.TestCase):
             self.assertIn("pending review", err.getvalue())
 
 
+class StatuslineTests(unittest.TestCase):
+    def _run(self, cwd: Path, home: Path) -> tuple[int, str, str, float]:
+        import contextlib
+        import io
+        import time
+        import waystone
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        previous = Path.cwd()
+        try:
+            os.chdir(cwd)
+            started = time.monotonic()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = _run_with_home(home, lambda: waystone.main(["statusline"]))
+            elapsed = time.monotonic() - started
+        finally:
+            os.chdir(previous)
+        return rc, stdout.getvalue(), stderr.getvalue(), elapsed
+
+    def test_unreadable_reviews_dir_renders_honest_token_not_zero(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self._project(d)
+            reviews = root / "docs" / "reviews"
+            reviews.mkdir(parents=True, exist_ok=True)
+            reviews.chmod(0o000)
+            try:
+                rc, out, err, _elapsed = self._run(root, Path(d) / "home")
+            finally:
+                reviews.chmod(0o755)
+            self.assertEqual(rc, 0)
+            self.assertEqual(err, "")
+            self.assertIn("reviews unreadable", out)
+            self.assertNotIn("reviews 0", out)
+
+    def _project(self, directory: str) -> Path:
+        root = Path(directory) / "repo"
+        root.mkdir()
+        (root / ".waystone.yml").write_text(
+            "version: 1\nproject: demo\nreviews_dir: docs/reviews\n")
+        (root / "tasks.yaml").write_text(
+            "version: 1\nproject: demo\ntasks:\n"
+            "  - {id: feat/done-a, title: completed task a, status: done}\n"
+            "  - {id: feat/done-b, title: completed task b, status: done}\n"
+            "  - id: feat/live\n    title: active task now\n    status: active\n"
+            "    round: 2026-07-17-live\n"
+            "  - {id: fix/stuck, title: blocked task now, status: blocked}\n")
+        reviews = root / "docs" / "reviews"
+        reviews.mkdir(parents=True)
+        (reviews / "2026-07-16-review-request.md").write_text("request\n")
+        return root
+
+    def test_statusline_renders_derived_one_line_fast_with_ansi_and_pending_helper(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            root = self._project(d)
+            nested = root / "nested"
+            nested.mkdir()
+            with mock.patch.object(review, "pending_reviews", wraps=review.pending_reviews) as pending:
+                rc, stdout, stderr, elapsed = self._run(nested, Path(d) / "home")
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(stderr, "")
+            self.assertEqual(len(stdout.splitlines()), 1)
+            self.assertIn("\033[", stdout)
+            self.assertIn("2/4", stdout)
+            self.assertIn("2026-07-17-live", stdout)
+            self.assertRegex(stdout, r"reviews[^0-9]*1")
+            self.assertRegex(stdout, r"blockers[^0-9]*1")
+            self.assertLess(elapsed, 0.5)
+            pending.assert_called_once_with(root.resolve())
+
+    def test_statusline_is_empty_and_read_only_for_legacy_only_project_and_bad_registry(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "legacy"
+            nested = root / "nested"
+            nested.mkdir(parents=True)
+            legacy = root / ".jahns-workflow.yml"
+            legacy.write_bytes(b"version: 1\nproject: legacy\n")
+            home = Path(d) / "home"
+            machine = home / ".waystone"
+            machine.mkdir(parents=True)
+            registry = machine / "projects.json"
+            registry.write_bytes(b"{not json")
+            before_legacy = legacy.read_bytes()
+            before_registry = registry.read_bytes()
+
+            rc, stdout, stderr, _elapsed = self._run(nested, home)
+
+            self.assertEqual((rc, stdout, stderr), (0, "", ""))
+            self.assertEqual(legacy.read_bytes(), before_legacy)
+            self.assertEqual(registry.read_bytes(), before_registry)
+            self.assertFalse((root / ".waystone.yml").exists())
+
+    def test_statusline_degrades_corrupt_config_or_task_registry_to_stdout(self):
+        for damaged, expected in (("config", "config unreadable"),
+                                  ("tasks", "registry unreadable")):
+            with self.subTest(damaged=damaged), tempfile.TemporaryDirectory() as d:
+                root = Path(d) / "repo"
+                root.mkdir()
+                (root / ".waystone.yml").write_text(
+                    "review: [\n" if damaged == "config" else "version: 1\nproject: demo\n")
+                (root / "tasks.yaml").write_text(
+                    "tasks: [\n" if damaged == "tasks" else
+                    "version: 1\nproject: demo\ntasks: []\n")
+
+                rc, stdout, stderr, _elapsed = self._run(root, Path(d) / "home")
+
+                self.assertEqual(rc, 0)
+                self.assertEqual(stderr, "")
+                self.assertEqual(len(stdout.splitlines()), 1)
+                self.assertIn(expected, stdout)
+
+
 class FrozenAcceptanceTests(unittest.TestCase):
     """The frozen v0.2 acceptance boundaries (GPT 6th review) — A: PR reducer, B: YAML mutation,
     C: closeout/views. Each test directly reproduces a defect that must stay closed."""
@@ -15333,6 +15448,74 @@ class L2DPolicyMachineTests(unittest.TestCase):
             self.assertIn("remove", stdout.getvalue().lower())
             self.assertEqual(settings.read_bytes(), before)
             self.assertTrue((root / ".waystone" / "boundary-hooks-enabled").is_file())
+
+    def test_statusline_install_records_consent_and_preserves_other_settings(self):
+        import contextlib
+        import io
+        import waystone
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            settings = home / ".claude" / "settings.json"
+            settings.parent.mkdir()
+            settings.write_text(_json.dumps({"permissions": {"allow": ["Read"]}}))
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+                consent_rc = _run_with_home(home, lambda: waystone.main([
+                    "consent", "record", "install.statusline", "accept",
+                    "--context", "kind=statusline", "--root", str(root)]))
+                install_rc = _run_with_home(home, lambda: waystone.main([
+                    "install", "statusline", "--root", str(root)]))
+
+            self.assertEqual((consent_rc, install_rc), (0, 0))
+            document = _json.loads(settings.read_text())
+            self.assertEqual(document["permissions"], {"allow": ["Read"]})
+            self.assertEqual(document["statusLine"], {
+                "type": "command", "command": "waystone statusline 2>/dev/null || true",
+            })
+            rows = [_json.loads(line) for line in (root / ".waystone" / "consents.jsonl")
+                    .read_text().splitlines()]
+            self.assertEqual(rows[-1]["surface"], "install.statusline")
+            self.assertEqual(rows[-1]["choice"], "accept")
+            self.assertEqual(rows[-1]["context"]["kind"], "statusline")
+            self.assertIn(str(settings), stdout.getvalue())
+            self.assertFalse((root / ".claude" / "settings.json").exists())
+
+    def test_statusline_install_never_overwrites_existing_setting_and_prints_embed_guide(self):
+        import contextlib
+        import io
+        import waystone
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            settings = home / ".claude" / "settings.json"
+            settings.parent.mkdir()
+            settings.write_text(_json.dumps({
+                "statusLine": {"type": "command", "command": "bash my-status.sh"},
+                "keep": True,
+            }, indent=2) + "\n")
+            before = settings.read_bytes()
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+                rc = _run_with_home(home, lambda: waystone.main([
+                    "install", "statusline", "--consent-recorded", "--root", str(root)]))
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(settings.read_bytes(), before)
+            message = stdout.getvalue()
+            self.assertIn("embed", message.lower())
+            self.assertIn("waystone statusline", message)
+            self.assertIn('cd "$cwd"', message)
+            self.assertIn(str(settings), message)
+
+    def test_init_skill_offers_statusline_as_an_independent_optional_install(self):
+        skill = (SCRIPTS.parent / "skills" / "init" / "SKILL.md").read_text()
+        step = skill.split("## Step 8.5", 1)[1].split("## Step 9", 1)[0]
+        for phrase in (
+            "statusline", "~/.claude/settings.json", "waystone consent record install.statusline",
+            "waystone install statusline", "embed", "declined",
+        ):
+            self.assertIn(phrase, step.lower())
 
     def test_round_and_delegate_exposures_capture_composed_policy(self):
         import contextlib

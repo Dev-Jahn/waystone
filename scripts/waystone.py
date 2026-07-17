@@ -19,7 +19,8 @@ Groups:
   delegate run|status|show|verify|verdict|apply|discard ...  worktree runner + evidence-gated verdict
   overlay  add|...|promote-user|override|materialize|compose ...  four-layer adaptive policy
   consent  record <surface> <choice> ...  append a standard project-local consent event
-  install  agents|hooks [--consent-recorded] ...  consent-gated agent install / hook enable marker
+  install  agents|hooks|statusline [--consent-recorded] ...  consent-gated managed surfaces
+  statusline                            one-line current-project status (read-only, no model)
   check    [--root DIR]               evaluate active overlay deltas at an explicit boundary (never blocks)
   paths    [--root DIR] [--json]      show resolved machine and project storage paths
   project  register|unregister|alias|list ...  manage the cross-project registry
@@ -41,6 +42,100 @@ import yaml
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import common  # noqa: E402
+
+_STATUS_RESET = "\033[0m"
+_STATUS_BOLD_CYAN = "\033[1;38;5;81m"
+_STATUS_GREEN = "\033[38;5;114m"
+_STATUS_YELLOW = "\033[38;5;221m"
+_STATUS_MAGENTA = "\033[38;5;176m"
+_STATUS_RED = "\033[38;5;210m"
+_STATUS_DIM = "\033[38;5;245m"
+
+
+def _statusline_project_root(start: Path) -> Path | None:
+    """Find only the current config; legacy discovery would trigger rename migration on load."""
+    current = start.resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / common.CONFIG_NAME).is_file():
+            return candidate
+    return None
+
+
+def _statusline_error(message: str) -> str:
+    return (f"{_STATUS_BOLD_CYAN}◆ waystone{_STATUS_RESET} "
+            f"{_STATUS_DIM}│{_STATUS_RESET} {_STATUS_RED}⚠ {message}{_STATUS_RESET}")
+
+
+def _statusline_render(data: dict, pending_count: int) -> str:
+    tasks = data["tasks"]
+    done = sum(task.get("status") == "done" for task in tasks)
+    blocked = sum(task.get("status") == "blocked" for task in tasks)
+    active_rounds = sorted({
+        task["round"] for task in tasks
+        if task.get("status") == "active" and task.get("round")
+    })
+    current_round = (active_rounds[-1] if active_rounds else
+                     max((task.get("round") or "" for task in tasks), default="") or "—")
+    separator = f" {_STATUS_DIM}│{_STATUS_RESET} "
+    return separator.join((
+        f"{_STATUS_BOLD_CYAN}◆ waystone{_STATUS_RESET}",
+        f"{_STATUS_GREEN}✓ tasks {done}/{len(tasks)}{_STATUS_RESET}",
+        f"{_STATUS_YELLOW}◷ round {current_round}{_STATUS_RESET}",
+        f"{_STATUS_MAGENTA}◇ reviews {pending_count}{_STATUS_RESET}",
+        f"{_STATUS_RED}⛔ blockers {blocked}{_STATUS_RESET}",
+    ))
+
+
+def _statusline_main(argv: list[str]) -> int:
+    """Render without migrations, locks, state writes, subprocesses, or model calls."""
+    try:
+        root = _statusline_project_root(Path.cwd())
+    except (OSError, RuntimeError):
+        return 0
+    if root is None:
+        return 0
+    if argv:
+        print(_statusline_error("invalid statusline arguments"))
+        return 0
+
+    try:
+        cfg = common.load_yaml(root / common.CONFIG_NAME)
+        if not isinstance(cfg, dict):
+            raise ValueError("config must be a mapping")
+        common.normalize_config(cfg)
+    except Exception:  # noqa: BLE001 — a prompt status line must degrade to one honest line
+        print(_statusline_error("config unreadable"))
+        return 0
+    try:
+        # Display surface: parse and count only — the full registry validation pass is a
+        # deliberate NON-feature here (per-render validate was explicitly rejected; real
+        # commands validate loudly).
+        data = common.load_yaml(root / common.TASKS_NAME)
+        if not isinstance(data, dict) or not isinstance(data.get("tasks"), list):
+            raise ValueError("task registry is invalid")
+    except Exception:  # noqa: BLE001 — a prompt status line must degrade to one honest line
+        print(_statusline_error("registry unreadable"))
+        return 0
+    try:
+        import contextlib
+        import io
+        import review
+
+        # Path.glob swallows scandir permission errors, which would silently render an
+        # unreadable reviews directory as "reviews 0" — probe readability explicitly first.
+        reviews_dir = root / cfg["reviews_dir"]
+        if reviews_dir.exists():
+            next(iter(reviews_dir.iterdir()), None)
+        # Reuse the single pending-review derivation. Diagnostics are suppressed because this
+        # display owns stdout and must never damage the surrounding prompt line.
+        with contextlib.redirect_stderr(io.StringIO()):
+            pending_count = len(review.pending_reviews(root))
+    except Exception:  # noqa: BLE001 — damaged review artifacts remain visible, but non-fatal
+        print(_statusline_error("reviews unreadable"))
+        return 0
+
+    print(_statusline_render(data, pending_count))
+    return 0
 
 
 def _run_module_main(modname: str, argv: list[str]) -> int:
@@ -153,7 +248,7 @@ def _consent_main(argv: list[str]) -> int:
                     raise common.WorkflowError(
                         "materialize consent requires --context origin_delta_id=<delta-id>")
                 context = overlay.materialize_consent_context(root, delta_id)
-            elif surface in ("install.agents", "install.hooks"):
+            elif surface in ("install.agents", "install.hooks", "install.statusline"):
                 kind = surface.partition(".")[2]
                 if context and context != {"kind": kind}:
                     raise common.WorkflowError(
@@ -174,9 +269,24 @@ _INSTALL_TARGETS = {
     "agents": ("waystone-operator-agent.md", Path(".claude/agents/waystone-operator.md")),
     "hooks": (None, Path(".waystone/boundary-hooks-enabled")),
 }
+_STATUSLINE_KIND = "statusline"
+# The installed command guards the launcher boundary itself: if `uv run` cannot even start
+# (cold cache, read-only env), the prompt gets an empty line instead of rc!=0 + stderr noise.
+# The honest degradation tokens are printed by the Python dispatcher once it runs.
+_STATUSLINE_VALUE = {"type": "command", "command": "waystone statusline 2>/dev/null || true"}
 
 
 def _install_candidate(root: Path, kind: str) -> tuple[dict, Path | None, Path, bytes]:
+    if kind == _STATUSLINE_KIND:
+        target = Path.home() / ".claude" / "settings.json"
+        candidate = {
+            "kind": kind,
+            "target_path": str(target.resolve()),
+            "stage": "install",
+            "command": _STATUSLINE_VALUE["command"],
+        }
+        context = {**candidate, "candidate_hash": common.canonical_payload_hash(candidate)}
+        return context, None, target, b""
     template_name, relative_target = _INSTALL_TARGETS[kind]
     target = root / relative_target
     if os.path.lexists(target):
@@ -222,9 +332,38 @@ def _legacy_boundary_hook_settings(root: Path) -> Path | None:
     return None
 
 
+def _install_statusline(target: Path) -> str:
+    if target.exists():
+        try:
+            document = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise common.WorkflowError(
+                f"cannot read Claude settings {target}: {type(e).__name__}") from e
+        if not isinstance(document, dict):
+            raise common.WorkflowError(f"Claude settings must be a JSON object: {target}")
+    else:
+        document = {}
+
+    if "statusLine" in document:
+        if document["statusLine"] == _STATUSLINE_VALUE:
+            return f"statusLine already runs `waystone statusline` in {target}; no changes made"
+        return (
+            f"existing statusLine preserved in {target}; Waystone did not modify it. "
+            "To embed project status in a script that parses Claude's `cwd`, add "
+            "`project_status=$(cd \"$cwd\" && waystone statusline)` and append its non-empty "
+            "output to your rendered line."
+        )
+
+    document["statusLine"] = dict(_STATUSLINE_VALUE)
+    common.write_text_atomic(
+        target, json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+    return f"installed statusLine: {target} (remove its statusLine field to roll back)"
+
+
 def _install_main(argv: list[str]) -> int:
-    if not argv or argv[0] not in _INSTALL_TARGETS:
-        print("waystone install: expected agents|hooks [--consent-recorded] [--root DIR]",
+    if not argv or argv[0] not in (*_INSTALL_TARGETS, _STATUSLINE_KIND):
+        print("waystone install: expected agents|hooks|statusline "
+              "[--consent-recorded] [--root DIR]",
               file=sys.stderr)
         return 1
     kind = argv[0]
@@ -255,19 +394,25 @@ def _install_main(argv: list[str]) -> int:
             if not common.has_accepted_consent(root, surface, context):
                 raise common.WorkflowError(
                     f"consent is required; record `{surface}` acceptance or pass --consent-recorded")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                with target.open("xb") as stream:
-                    stream.write(payload)
-            except BaseException:
-                target.unlink(missing_ok=True)
-                raise
+            if kind == _STATUSLINE_KIND:
+                install_message = _install_statusline(target)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with target.open("xb") as stream:
+                        stream.write(payload)
+                except BaseException:
+                    target.unlink(missing_ok=True)
+                    raise
     except common.WorkflowError as e:
         print(f"waystone install {kind}: {e}", file=sys.stderr)
         return 1
     except OSError as e:
         print(f"waystone install {kind}: cannot install managed surface — {e}", file=sys.stderr)
         return 2
+    if kind == _STATUSLINE_KIND:
+        print(install_message)
+        return 0
     legacy_settings = _legacy_boundary_hook_settings(root) if kind == "hooks" else None
     if legacy_settings is not None:
         print("legacy waystone Stop hook detected in "
@@ -484,6 +629,14 @@ def _module_handles_phase2(argv: list[str]) -> bool:
 
 def main(argv: list[str]) -> int:
     group = argv[0] if argv else None
+    # The prompt renderer is a strict read-only fast path. It must bypass both migration phases,
+    # their locks, and machine registry parsing so legacy/outside projects remain untouched.
+    if group == "statusline":
+        try:
+            return _statusline_main(argv[1:])
+        except Exception:  # noqa: BLE001 — never break the host prompt for an optional display
+            print(_statusline_error("status unavailable"))
+            return 0
     try:
         # Lock acquisition order is registry -> project -> record. Project registry verbs keep the
         # registry lock across Phase 1, their optional Phase 2 migration, and the registry RMW so a
