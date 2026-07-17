@@ -202,10 +202,11 @@ tasks:
     severity: "major"
     origin: "B200-2/steno dogfooding 사고 (2026-07-16)"
   - id: feat/review-pending-ledger
-    accept: ["pending 리뷰(요청은 있으나 feedback 미ingest)가 reviews 디렉터리에서 새 상태 파일 없이 결정론적으로 파생되는 단일 함수가 있고, waystone review pending이 round id, 경과일, 대상 sha, 리뷰어를 나열한다", "SessionStart 주입에 pending 리뷰 요약 한 줄이 추가된다 (0건이면 생략)", "Stop 경계의 waystone check가 pending 리뷰를 비차단 경고로 알린다 — exit code는 변하지 않는다", "round close가 이전 pending 리뷰 존재 시 목록과 함께 리마인드를 출력하되 마감을 막지 않는다", "전체 테스트 스위트(신규 계약 테스트는 RED-first)와 ruff F401,F841 검사가 통과한다"]
+    result: "위임 2차 패치(무원장 파생·4표면·비차단, RED-first 5) + main 마감(3건: 공유 사이드카 정렬 sequence-우선 — 발행게이트 리뷰가 지적한 동일 결함 근본 수정, 완료판정에서 identity 게이트 제거 — 수신≠커버리지, 손상 사이드카 라운드 격리, RED-first 3). 693 OK, ruff 클린."
+    accept: ["pending 리뷰(요청은 있으나 feedback 미ingest)가 reviews 디렉터리에서 새 상태 파일 없이 결정론적으로 파생되는 단일 함수가 있고, waystone review pending이 round id, 경과일, 대상 sha, 리뷰어를 나열한다", "SessionStart 주입에 pending 리뷰 요약 한 줄이 추가된다 (0건이면 생략)", "Stop 경계의 waystone check가 pending 리뷰를 비차단 경고로 알린다 — exit code는 변하지 않는다", "round close가 이전 pending 리뷰 존재 시 목록과 함께 리마인드를 출력하되 마감을 막지 않는다", "전체 테스트 스위트(신규 계약 테스트는 RED-first)와 ruff F401,F841 검사가 통과한다", "feedback 완료 판정은 파일 존재가 아니라 ingest 산출 증거(스크립트 작성 메타데이터 헤더 존재)로 한다 — 손으로 복사된 무헤더 파일은 여전히 pending (계약 테스트)", "재발행(binding-N)된 round는 최신 binding이 기준: feedback은 선언된 review-target이 최신 binding target과 일치할 때만 완료로 계산되고, 구 packet에 대한 feedback이 최신 packet의 pending을 침묵시키지 않는다 (기존 header 재계산 재사용, 신규 저장 상태 금지)", "age 표기는 round id·ingest 기록과 동일한 시간대(호스트 로컬) 기준으로 일관된다"]
     scope: ["scripts", "hooks", "skills"]
     title: "미회신 리뷰의 파생 추적(원장 없는 설계): pending = 요청 존재 && feedback 미ingest를 reviews 디렉터리에서 결정론 파생 — waystone review pending CLI, SessionStart 한 줄 주입, Stop 경계(waystone check) 비차단 경고, round close 시 시끄러운 리마인드(비차단). 병렬 라운드·복수 packet 허용 유지"
-    status: "pending"
+    status: "done"
     origin: "사용자 설계 요청 (2026-07-16)"
   - id: feat/waystone-statusline
     accept: ["waystone statusline이 현재 프로젝트의 한 줄 상태(tasks done/total, 현재 round, pending 리뷰 수, blocker 수)를 수백 ms 내 출력하고 waystone 프로젝트 밖에서는 빈 출력으로 조용히 끝난다", "설치는 optional이며 consent 기록을 남기고, 기존 statusLine 설정이 있으면 덮어쓰지 않고 waystone statusline을 기존 스크립트에 embed하는 안내를 출력한다", "한 줄 렌더링은 ANSI 색과 글리프를 활용하되 정보는 파생 상태만 사용하며 모델 토큰을 쓰지 않는다", "pending 리뷰 수는 feat/review-pending-ledger의 단일 파생 함수를 재사용한다 (중복 구현 금지)", "전체 테스트 스위트(신규 계약 테스트는 RED-first)와 ruff F401,F841 검사가 통과한다"]
