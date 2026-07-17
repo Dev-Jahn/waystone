@@ -475,6 +475,7 @@ tasks:
     severity: "minor"
     deps: ["fix/probe-proof-machine-scope", "fix/binding-narrative-digest"]
   - id: docs/readme-delegate-fold
+    result: "README delegate 섹션 재작성 @ 07bab60 — 리드+details fold, docs gate·730 green"
     title: "README delegate 섹션 재작성 — dev_docs/delegate_readme.md(codex 해설, 구버전 기준)를 참조 스타일로 최신 dev 동작에 맞게 재작성, 상세 메커니즘은 details fold로 접어 배치 (사용자 지시 2026-07-18, main 직접 — docs 작업)"
-    status: "pending"
+    status: "done"
     severity: "minor"
