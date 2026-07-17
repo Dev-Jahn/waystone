@@ -1959,7 +1959,7 @@ Fail-loud protocol boundaries.
             self.assertIn("binding-2", err.getvalue())
             self.assertIn("not published", err.getvalue())
 
-    def test_improve_warns_when_corrupt_request_binding_is_skipped(self):
+    def test_improve_preserves_corrupt_latest_request_binding_as_unknown(self):
         import contextlib
         import io
 
@@ -1972,7 +1972,9 @@ Fail-loud protocol boundaries.
             corrupt_freeze.write_text("{also-not-json")
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
-                self.assertEqual(improve._round_review_sidecars(rdir), {})
+                sidecars = improve._round_review_sidecars(rdir)
+            self.assertEqual(sidecars[self.ROUND_ID][0]["_binding_error"],
+                             "corrupt-round-request-sidecar")
             self.assertIn("corrupt review binding", err.getvalue())
             self.assertIn(str(corrupt), err.getvalue())
             self.assertIn(str(corrupt_freeze), err.getvalue())
@@ -3857,6 +3859,50 @@ class PendingReviewTests(unittest.TestCase):
             self.assertEqual(review.ingest(root, round_id, src=corrected, force=True), 0)
             self.assertEqual(review.pending_reviews(root), [])
 
+    def test_corrupt_latest_binding_keeps_old_matching_feedback_pending_unknown(self):
+        for corrupt_content in ("", '{"schema":'):
+            with self.subTest(corrupt_content=corrupt_content), tempfile.TemporaryDirectory() as d:
+                root = self._root(d)
+                round_id = "2026-01-01-corrupt-latest"
+                base = "b" * 40
+                old_target = "a" * 40
+                self._request(root, round_id, old_target, base=base, reviewers=["old-reviewer"])
+                source = root / "old-reply.md"
+                source.write_bytes(self._reply("old-reviewer", base, old_target))
+                self.assertEqual(review.ingest(root, round_id, src=source), 0)
+
+                latest = review.write_round_request_binding(
+                    root, round_id, "c" * 40, base, ["new-reviewer"], mode="packet")
+                latest.write_text(corrupt_content)
+
+                pending = review.pending_reviews(root)
+
+                self.assertEqual(len(pending), 1)
+                self.assertEqual(pending[0]["round_id"], round_id)
+                self.assertIsNone(pending[0]["target_sha"])
+                self.assertEqual(pending[0]["reviewers"], [])
+
+    def test_latest_binding_resolver_parses_only_highest_filename_sequence(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            root = self._root(d)
+            round_id = "2026-01-01-resolver-order"
+            first = self._request(root, round_id, "a" * 40)
+            latest = review.write_round_request_binding(
+                root, round_id, "c" * 40, "b" * 40, ["r2"], mode="packet")
+            latest.write_text('{"schema":')
+
+            with mock.patch.object(
+                    review, "read_round_request_binding",
+                    wraps=review.read_round_request_binding) as read:
+                path, row = review.latest_round_request_binding(
+                    [first, latest], expected_round_id=round_id)
+
+            self.assertEqual(path, latest)
+            self.assertIsNone(row)
+            read.assert_called_once_with(latest, expected_round_id=round_id)
+
     def test_binding_sequence_outranks_raw_timestamp_strings_across_offsets(self):
         with tempfile.TemporaryDirectory() as d:
             root = self._root(d)
@@ -3876,6 +3922,57 @@ class PendingReviewTests(unittest.TestCase):
 
             self.assertEqual([(r["target_sha"], r["reviewers"]) for r in pending],
                              [("c" * 40, ["r2"])])
+
+    def test_round_request_binding_publishes_complete_temp_via_exclusive_link(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            root = self._root(d)
+            round_id = "2026-01-01-atomic"
+            original_link = os.link
+            observed = []
+
+            def observe_publish(source, destination):
+                source_path = Path(source)
+                destination_path = Path(destination)
+                row = _json.loads(source_path.read_text())
+                self.assertEqual(row["round_id"], round_id)
+                self.assertEqual(row["target_sha"], "a" * 40)
+                self.assertFalse(destination_path.exists())
+                observed.append((source_path, destination_path))
+                return original_link(source, destination)
+
+            with mock.patch.object(review.os, "link", side_effect=observe_publish):
+                published = self._request(root, round_id, "a" * 40)
+
+            self.assertEqual([destination for _source, destination in observed], [published])
+            self.assertEqual(review.read_round_request_binding(published)["target_sha"], "a" * 40)
+            self.assertFalse(observed[0][0].exists())
+
+    def test_round_request_binding_publish_race_retries_next_sequence_exclusively(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            root = self._root(d)
+            round_id = "2026-01-01-atomic-race"
+            original_link = os.link
+            lost_race = False
+
+            def simulate_competing_publisher(source, destination):
+                nonlocal lost_race
+                if not lost_race:
+                    lost_race = True
+                    original_link(source, destination)
+                    raise FileExistsError(destination)
+                return original_link(source, destination)
+
+            with mock.patch.object(review.os, "link", side_effect=simulate_competing_publisher):
+                published = self._request(root, round_id, "a" * 40)
+
+            base = published.with_name(f"{round_id}-request.binding.json")
+            self.assertEqual(published.name, f"{round_id}-request.binding-2.json")
+            self.assertEqual(review.read_round_request_binding(base)["target_sha"], "a" * 40)
+            self.assertEqual(review.read_round_request_binding(published)["target_sha"], "a" * 40)
 
     def test_reply_matching_latest_target_completes_even_from_unconfigured_model(self):
         with tempfile.TemporaryDirectory() as d:
@@ -5843,6 +5940,41 @@ class ImproveReviewsTests(unittest.TestCase):
             self.assertIs(row["review_target_matches"], True)
             self.assertIs(row["reviewer_configured"], True)
             self.assertEqual(row["reply_metadata"]["foo"], "bar")
+
+    def test_corrupt_latest_binding_does_not_promote_old_target_in_projection(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root = base / "repo"
+            root.mkdir()
+            (root / ".waystone.yml").write_text(
+                "version: 1\nproject: demo\nreviews_dir: docs/reviews\n")
+            (root / "tasks.yaml").write_text("version: 1\nproject: demo\ntasks: []\n")
+            rdir = root / "docs" / "reviews"
+            rdir.mkdir(parents=True)
+            round_id = "2026-07-18-corrupt-latest"
+            base_sha = "b" * 40
+            old_target = "a" * 40
+            (rdir / f"{round_id}-request.md").write_text(
+                f"# request\n\n- Reviewing: {old_target}   (diff against {base_sha})\n")
+            review.write_round_request_binding(
+                root, round_id, old_target, base_sha, ["old-reviewer"], mode="packet")
+            (rdir / f"{round_id}-feedback.md").write_text(
+                "model: old-reviewer\neffort: high\n"
+                f"review-target: {base_sha[:12]}-{old_target[:12]}\n\nreviewed\n")
+            latest = review.write_round_request_binding(
+                root, round_id, "c" * 40, base_sha, ["new-reviewer"], mode="packet")
+            latest.write_text('{"schema":')
+            registry = base / "projects.json"
+            registry.write_text(_json.dumps({
+                "projects": [{"name": "demo", "path": str(root)}]}))
+            out = base / "out"
+
+            improve.run_reviews(registry, out)
+
+            row = self._load(out)[0][0]
+            self.assertIsNone(row["target_sha"])
+            self.assertEqual(row["review_binding_provenance"], "unknown")
+            self.assertEqual(row["review_binding_reason"], "corrupt-round-request-sidecar")
 
     def test_triage_ignores_verbatim_body(self):
         # the verbatim body's `### JW-GPT-*` blocks must not be parsed — only the appended table

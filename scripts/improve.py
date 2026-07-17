@@ -981,9 +981,16 @@ def _review_binding(request_file: Path | None, round_id: str, mode: str,
     import review
 
     packet_binding = review.parse_packet_request_binding(request_file)
-    if sidecars:
-        latest = max(sidecars, key=lambda row: review.round_request_binding_order(
-            Path(row["_file"]), row))
+    packet_sidecars = [
+        row for row in sidecars
+        if row.get("mode") == "packet" or row.get("_binding_error") is not None
+    ]
+    if packet_sidecars:
+        if len(packet_sidecars) != 1:
+            return result(reason="conflicting-round-request-sidecars")
+        latest = packet_sidecars[0]
+        if latest.get("_binding_error") is not None:
+            return result(reason=latest["_binding_error"])
         if packet_binding is None:
             return result(reason="missing-structured-reviewing-line")
         if packet_binding != (latest["target_sha"], latest.get("base_sha")):
@@ -1022,15 +1029,27 @@ def _round_review_sidecars(rdir: Path) -> dict[str, list[dict]]:
     rows: dict[str, list[dict]] = {}
     if not rdir.is_dir():
         return rows
+    request_paths: dict[str, list[Path]] = {}
     for path in sorted(rdir.glob("*-request.binding*.json")):
-        try:
-            data = review.read_round_request_binding(path)
-        except WorkflowError as e:
-            print(f"improve: warning: {e}; excluded from projection", file=sys.stderr)
+        identity = review.round_request_binding_identity(path)
+        if identity is None:
+            continue
+        request_paths.setdefault(identity[0], []).append(path)
+    for round_id, paths in sorted(request_paths.items()):
+        path, data = review.latest_round_request_binding(paths, expected_round_id=round_id)
+        if path is None:
+            continue
+        if data is None:
+            print(f"improve: warning: corrupt review binding {path}; preserved as unknown",
+                  file=sys.stderr)
+            rows.setdefault(round_id, []).append({
+                "round_id": round_id, "_file": str(path),
+                "_binding_error": "corrupt-round-request-sidecar",
+            })
             continue
         if data.get("mode") != "packet":
             continue
-        rows.setdefault(data["round_id"], []).append({**data, "_file": str(path)})
+        rows.setdefault(round_id, []).append({**data, "_file": str(path)})
     for path in sorted(rdir.glob("*-freeze-*.binding*.json")):
         try:
             data = review.read_pr_freeze_binding(path)

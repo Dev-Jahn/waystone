@@ -38,9 +38,11 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -57,6 +59,8 @@ CODEX_BOT = "chatgpt-codex-connector[bot]"  # REST `user.login` form
 INBOX = Path("/tmp/review.md")  # fixed drop-file: user saves the reviewer reply here, byte-exact
 ROUND_REQUEST_BINDING_SCHEMA = "waystone-round-request-binding-1"
 PR_FREEZE_BINDING_SCHEMA = "waystone-pr-freeze-binding-1"
+_ROUND_REQUEST_BINDING_FILE_RE = re.compile(
+    r"^(?P<round_id>.+)-request\.binding(?:-(?P<sequence>\d+))?\.json$")
 PACKET_REVIEWING_RE = re.compile(
     r"- Reviewing: ([0-9a-f]{40})   \(diff against ([0-9a-f]{40}|\(root\))\)")
 PACKET_REVIEWING_FORMAT = (
@@ -340,15 +344,25 @@ def write_round_request_binding(root: Path, round_id: str, target_sha: str, base
             return existing
     path = base
     number = 2
-    content = json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
-    while True:
-        try:
-            with path.open("x", encoding="utf-8") as stream:
-                stream.write(content)
-            return path
-        except FileExistsError:
-            path = base.with_name(f"{base.stem}-{number}{base.suffix}")
-            number += 1
+    content = (json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{round_id}-request.binding.", suffix=".tmp", dir=directory)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o644)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        while True:
+            try:
+                os.link(temporary, path)
+                return path
+            except FileExistsError:
+                path = base.with_name(f"{base.stem}-{number}{base.suffix}")
+                number += 1
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def read_round_request_binding(path: Path, *, expected_round_id: str | None = None) -> dict:
@@ -375,13 +389,43 @@ def read_round_request_binding(path: Path, *, expected_round_id: str | None = No
 
 
 def round_request_binding_order(path: Path, row: dict) -> tuple[int, float, str]:
-    """Canonical newest-sidecar order shared by publication and improve projection: the immutable
-    reissue sequence wins, and parsed offset-aware timestamps only break ties within a sequence —
-    raw local-offset strings must never decide recency (they invert across timezone changes)."""
-    match = re.search(r"-request\.binding(?:-(\d+))?\.json$", Path(path).name)
-    sequence = int(match.group(1)) if match and match.group(1) else 1
+    """Canonical parsed-sidecar order for strict publication gates.
+
+    The immutable reissue sequence wins, and parsed offset-aware timestamps only break ties within
+    a sequence — raw local-offset strings must never decide recency across timezone changes.
+    """
+    identity = round_request_binding_identity(path)
+    sequence = identity[1] if identity is not None else 1
     at = parse_iso_timestamp(str(row.get("at") or ""))
     return sequence, (at.timestamp() if at is not None else float("-inf")), str(path)
+
+
+def round_request_binding_identity(path: Path) -> tuple[str, int] | None:
+    """Return the round and immutable filename sequence without reading sidecar content."""
+    match = _ROUND_REQUEST_BINDING_FILE_RE.fullmatch(Path(path).name)
+    if match is None:
+        return None
+    return match.group("round_id"), int(match.group("sequence") or 1)
+
+
+def latest_round_request_binding(
+        paths: list[Path], *, expected_round_id: str | None = None,
+) -> tuple[Path | None, dict | None]:
+    """Resolve the newest filename candidate first, then parse only that candidate.
+
+    A corrupt newest sidecar is returned as ``(path, None)``. Older parseable bindings never
+    replace it, so callers can preserve honest-unknown state without failing unrelated rounds.
+    """
+    candidates = [Path(path) for path in paths]
+    if not candidates:
+        return None, None
+    latest = max(candidates, key=lambda path: (
+        (round_request_binding_identity(path) or ("", 1))[1], str(path)))
+    try:
+        row = read_round_request_binding(latest, expected_round_id=expected_round_id)
+    except WorkflowError:
+        return latest, None
+    return latest, row
 
 
 def ingest_round_binding(root: Path, round_id: str, cfg: dict) -> tuple[dict | None, str | None]:
@@ -393,9 +437,9 @@ def ingest_round_binding(root: Path, round_id: str, cfg: dict) -> tuple[dict | N
             paths = sorted(directory.glob(f"{round_id}-request.binding*.json"))
             if not paths:
                 return None, "missing-round-request-sidecar"
-            rows = [(path, read_round_request_binding(path, expected_round_id=round_id))
-                    for path in paths]
-            path, row = max(rows, key=lambda item: round_request_binding_order(*item))
+            path, row = latest_round_request_binding(paths, expected_round_id=round_id)
+            if path is None or row is None:
+                return None, "corrupt-round-binding:WorkflowError"
             return {**row, "source": str(path)}, None
 
         paths = sorted(directory.glob(f"{round_id}-freeze-*.binding*.json"))
@@ -498,15 +542,9 @@ def pending_reviews(root: Path, *, now: datetime | None = None) -> list[dict]:
         if binding_paths:
             # One damaged sidecar must not abort every other round's derivation — the damaged
             # round itself stays listed as pending with honest-unknown fields (binding None).
-            rows = []
-            for path in binding_paths:
-                try:
-                    rows.append((path, read_round_request_binding(path, expected_round_id=round_id)))
-                except WorkflowError:
-                    continue
-            if rows:
-                binding_path, binding = max(
-                    rows, key=lambda item: round_request_binding_order(item[0], item[1]))
+            binding_path, binding = latest_round_request_binding(
+                binding_paths, expected_round_id=round_id)
+            if binding is not None:
                 if binding["mode"] != "packet":
                     # PR-mode rounds are completion-tracked by the PR machinery, not this
                     # packet-pending surface.
