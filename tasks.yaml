@@ -440,8 +440,8 @@ tasks:
     severity: "major"
     origin: "review-2026-07-18-carrier-lanes"
   - id: fix/binding-narrative-digest
-    accept: ["binding contract에 검증된 narrative의 canonical digest가 포함된다 — narrative만 바뀐 재-prepare는 새 sidecar를 발행하고 해당 round가 pending으로 재개된다 (RED-first: prepare A → feedback ingest → prepare B 같은 target → pending 재개)", "freeze는 stored narrative digest를 최신 binding과 대조한 뒤에만 게시한다 — 불일치는 fail-loud", "digest 없는 기존(legacy) sidecar는 조용히 통과되지 않는다 — 정직한 unknown/재발행 유도 경로로 처리", "전체 테스트 스위트 green + ruff F401,F841 clean"]
-    notes: "JW-GPT-004 (REAL major). binding contract(review.py:324-330)에 canonical narrative digest(필요시 rendered request digest) 포함 — narrative만 바뀐 재-prepare(810-816 통과 경로)가 새 sidecar를 만들어 pending이 재개되게. freeze는 stored narrative digest를 binding과 대조 후 게시. RED: prepare(narrative A) → feedback ingest → prepare(narrative B, 같은 target) 후 pending 재개 또는 prepare 거부."
+    accept: ["binding contract에 검증된 narrative의 canonical digest가 포함된다 — narrative만 바뀐 재-prepare는 새 sidecar를 발행하고 해당 round가 pending으로 재개된다 (RED-first: prepare A → feedback ingest → prepare B 같은 target → pending 재개)", "freeze는 stored narrative digest를 최신 binding과 대조한 뒤에만 게시한다 — 불일치는 fail-loud", "digest 없는 기존(legacy) sidecar는 조용히 통과되지 않는다 — 정직한 unknown/재발행 유도 경로로 처리", "전체 테스트 스위트 green + ruff F401,F841 clean", "packet publication 게이트가 narrative 결속을 검증한다 — round exposure + stored narrative에서 request를 재렌더해 게시 대상 request.md와 대조(freeze와 동일 원리)하거나 동등한 fail-loud 검증으로, prepare 후 request.md narrative만 변조된 packet을 게이트가 거부한다 (RED 계약 테스트)", "(기존 legacy 항목 개정) digest 없는 legacy binding의 완료 판정은 구 계약(review_target_matches)으로 폴백하되 coverage reason에 legacy-pre-digest 라벨을 명시한다 — 재발행 유도는 재발행이 실제 가능한 현행 round에만, publication 게이트(freeze·packet verify)는 digest를 계속 하드 요구, 과거 라운드가 실행 불가능한 안내와 함께 영구 pending으로 남지 않는다 (RED: digestless binding + target-일치 feedback → pending 미등재 + 라벨 노출)"]
+    notes: "JW-GPT-004 (REAL major). binding contract에 canonical narrative digest 포함 — narrative만 바뀐 재-prepare가 새 sidecar를 만들어 pending 재개. freeze는 stored narrative digest를 binding과 대조 후 게시. RED: prepare(A) → feedback ingest → prepare(B, 같은 target) 후 pending 재개. [attempt-2] attempt-1 패치(.waystone/delegations/20260717T192426Z-fix-binding-narrative-digest/artifact/changes.patch)가 좋은 출발점 — digest 결속·재-prepare 재개·freeze 대조·latest-binding 헬퍼 통일은 인수됨. 기각 사유 보강 2건: (1) verify_packet_publication이 narrative 결속 미검증 — freeze처럼 exposure+stored narrative 재렌더 대조(또는 동등 fail-loud)로 게시 전 검증, (2) legacy digestless 처분이 막다른 길(과거 라운드는 prepare 재발행 불가·stale exposure 거부) — 완료 판정은 구 계약 폴백+legacy-pre-digest 라벨, publication 게이트만 digest 하드 요구 (기존 'unknown/재발행 유도' 항목을 이 개정이 대체). 주의: ingest가 현재 binding digest를 도장하는 race(리뷰 중 재-prepare)는 이 task 범위 밖 — fix/reply-narrative-echo로 분리, 회신 자체 증언이 없는 한 ingest 도장은 유지. 검증 재현은 tempdir 격리 필수."
     deps: ["fix/pending-corrupt-binding-honesty"]
     scope: ["scripts/review.py", "scripts/tests/run_tests.py"]
     title: "binding contract에 narrative/request digest 부재 — 동일 target 재-prepare가 구 sidecar·구 feedback 재사용. narrative digest를 contract에 포함해 재발행 시 pending 재개"
@@ -449,8 +449,8 @@ tasks:
     severity: "major"
     origin: "review-2026-07-18-carrier-lanes"
   - id: fix/probe-proof-machine-scope
-    accept: ["codex 프로브 증명이 커밋 추적 파일(.waystone.yml)에 더 이상 기록되지 않는다 — 저장 위치가 미커밋 티어({root}/.waystone, self-ignored)로 이동하고 읽기·쓰기·진단 안내가 전부 새 위치를 가리킨다", "RED-first: .waystone.yml에 legacy codex_runner_verified: true가 커밋돼 있어도 로컬 마커가 없으면 프로브가 실행된다 — legacy 키는 조용히 수용되지 않고 무시+제거 안내를 출력한다", "전체 테스트 스위트 green + ruff F401,F841 clean, 프로브 1회 실행(probe-once) 계약 무회귀"]
-    notes: "리뷰어 open question 1 승격 (REAL major, 상태 격리 위반). proof 저장을 커밋 추적 .waystone.yml(delegate.py:1137-1158, 973-1104)에서 미커밋 티어 {root}/.waystone(self-ignored, per-checkout)으로 이동. .waystone.yml 스키마에서 codex_runner_verified 제거 — legacy 키 발견 시 무시+제거 안내(조용한 수용 금지). 진단 메시지(1239-1258, 3090-3093)의 키 제거 안내 경로 갱신. RED: 커밋된 true 값이 있어도 로컬 마커 없으면 프로브 실행."
+    accept: ["codex 프로브 증명이 커밋 추적 파일(.waystone.yml)에 더 이상 기록되지 않는다 — 저장 위치가 미커밋 티어({root}/.waystone, self-ignored)로 이동하고 읽기·쓰기·진단 안내가 전부 새 위치를 가리킨다", "RED-first: .waystone.yml에 legacy codex_runner_verified: true가 커밋돼 있어도 로컬 마커가 없으면 프로브가 실행된다 — legacy 키는 조용히 수용되지 않고 무시+제거 안내를 출력한다", "전체 테스트 스위트 green + ruff F401,F841 clean, 프로브 1회 실행(probe-once) 계약 무회귀", "{root}/.waystone self-ignore는 복원적·원자적이다 — .gitignore가 없거나 내용이 '*' 전체 무시를 상실한 상태(빈 파일 포함)에서도 상태 디렉터리 ensure 경로가 canonical ignore를 원자적으로 복구해 마커가 git 추적 가능해지지 않는다 (RED: 빈 .waystone/.gitignore 상태에서 마커 기록 후 git check-ignore가 마커를 무시로 판정)", "legacy 키 제거 안내는 디스크 config를 실제로 읽은 로드 경로에서만 발화한다 — source 미상 normalize(statusline 표시·과거 ref blob 정책 투영)는 존재하지 않는 로컬 경로를 안내 문구에 지어내지 않는다", "마커 없이 동시 시작한 두 runner 경로에서 프로브가 정확히 1회 실행된다 — lock 하 마커 재확인 동시성 계약 테스트"]
+    notes: "리뷰어 open question 1 승격 (REAL major, 상태 격리 위반). proof 저장을 커밋 추적 .waystone.yml에서 미커밋 티어 {root}/.waystone(self-ignored, per-checkout)으로 이동. .waystone.yml 스키마에서 codex_runner_verified 제거 — legacy 키 발견 시 무시+제거 안내(조용한 수용 금지). 진단 메시지의 키 제거 안내 경로 갱신. RED: 커밋된 true 값이 있어도 로컬 마커 없으면 프로브 실행. [attempt-2] attempt-1 패치(.waystone/delegations/20260717T192425Z-fix-probe-proof-machine-scope/artifact/changes.patch)가 좋은 출발점 — 마커 이동·legacy fail-loud·RED 계약은 인수됐고, 기각 사유는 3가지 보강 누락: (1) common.py _ensure_project_self_ignore가 기존 .gitignore를 무검증(open('x')+FileExistsError pass, create/write 비원자) — 복원적·원자적으로 재작성 필수, (2) source 없는 normalize_config 호출처(waystone.py statusline·review.py 과거 ref blob)에서 legacy 안내가 경로를 지어냄 — source 있는 로드 경로에서만 발화, (3) 동시 probe-once lock 계약 테스트 부재. 검증 재현은 tempdir 격리 필수."
     deps: ["fix/packet-digest-prompt-coverage"]
     scope: ["scripts/delegate.py", "scripts/common.py", "scripts/tests/run_tests.py"]
     title: "codex 프로브 증명이 커밋 추적 .waystone.yml에 저장돼 머신 간 전파(상태 격리 위반) — 미커밋 티어({root}/.waystone)로 이동"
@@ -463,3 +463,18 @@ tasks:
     status: "done"
     severity: "minor"
     origin: "review-2026-07-18-carrier-lanes"
+  - id: fix/reply-narrative-echo
+    title: "리뷰 회신이 검토한 narrative를 자기증언하지 않아 ingest가 현재 binding digest를 도장 — prepare(A)→리뷰 중 prepare(B)→A회신 ingest 시 B 완료 오판. request 렌더에 digest 노출 + reply 구조화 헤더에 request-digest 에코 + ingest 대조 (reply 계약 변경 — 사용자 ruling 필요)"
+    status: "pending"
+    severity: "major"
+    deps: ["fix/binding-narrative-digest"]
+  - id: chore/legacy-name-residue
+    notes: "조사(2026-07-18): live 표면 잔재 — scripts/{common,delegate,improve,review}.py·run_tests.py의 JW_REPORT.yaml 계약, templates/delegate-prompt.md, hooks/scripts/{resume_snapshot.sh,session_context.sh,tasks_read_nudge.py}, skills/{init,review}/SKILL.md. 경계: 역사 기록(docs/reviews verbatim 아카이브·PROGRESS.md·tasks.yaml done 항목의 JW-GPT-N provenance 참조)은 보존 — 사용자 지시의 '마이그레이션 불요'는 런타임 호환 폐기이지 이력 개서 아님. skills/review의 finding ID 스킴(JW-GPT 접두)은 신규 라운드부터 새 접두(WS-GPT 등)로 전환. JW_REPORT.yaml → WAYSTONE_REPORT.yaml 류로 rename(계약·테스트·프롬프트 일괄). dev_docs/delegate_readme.md는 참고 원본이라 보존 또는 삭제는 사용자 판단."
+    title: "구명 잔재 전면 제거: JW_REPORT.yaml 등 JW·jahns-workflow 이름이 남은 표면을 rg 전수로 청소 (마이그레이션 호환 불요 — 사용자 지시 2026-07-18). delegate.py 계약·in-flight lane과 겹치므로 lane 머지 후 실행"
+    status: "pending"
+    severity: "minor"
+    deps: ["fix/probe-proof-machine-scope", "fix/binding-narrative-digest"]
+  - id: docs/readme-delegate-fold
+    title: "README delegate 섹션 재작성 — dev_docs/delegate_readme.md(codex 해설, 구버전 기준)를 참조 스타일로 최신 dev 동작에 맞게 재작성, 상세 메커니즘은 details fold로 접어 배치 (사용자 지시 2026-07-18, main 직접 — docs 작업)"
+    status: "pending"
+    severity: "minor"
