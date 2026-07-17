@@ -193,7 +193,7 @@ tasks:
     severity: "minor"
     origin: "사용자 실측 (2026-07-16)"
   - id: feat/deterministic-review-packet
-    accept: ["round의 리뷰 요청 문서는 script가 template 기반으로 렌더링한다 — 정확 참조 필드(Reviewing과 diff base sha, 프로젝트, 브랜치, 리뷰어, 회신 header 템플릿 블록)는 script가 git과 binding에서 도출해 채우며 모델 손을 거치지 않는다", "모델이 작성하는 부분은 서사 섹션(변경 의도, 우선 읽을 파일, 공격할 claim, 증거 표, 약점, 도메인 렌즈)에 한정되고 별도 입력 파일로 전달되어 script가 병합한다", "렌더링 시 Reviewing 값이 해당 round binding 대상과 일치함을 script가 검증하고 불일치는 fail-loud로 거부된다", "round skill이 리뷰 요청 생성을 라운드 마감의 무조건 단계로 서술하며 생성 여부를 사용자에게 묻는 선택지가 없다", "전체 테스트 스위트(신규 계약 테스트는 RED-first)와 ruff F401,F841 검사가 통과한다"]
+    accept: ["round의 리뷰 요청 문서는 script가 template 기반으로 렌더링한다 — 정확 참조 필드(Reviewing과 diff base sha, 프로젝트, 브랜치, 리뷰어, 회신 header 템플릿 블록)는 script가 git과 binding에서 도출해 채우며 모델 손을 거치지 않는다", "모델이 작성하는 부분은 서사 섹션(변경 의도, 우선 읽을 파일, 공격할 claim, 증거 표, 약점, 도메인 렌즈)에 한정되고 별도 입력 파일로 전달되어 script가 병합한다", "렌더링 시 Reviewing 값이 해당 round binding 대상과 일치함을 script가 검증하고 불일치는 fail-loud로 거부된다", "round skill이 리뷰 요청 생성을 라운드 마감의 무조건 단계로 서술하며 생성 여부를 사용자에게 묻는 선택지가 없다", "전체 테스트 스위트(신규 계약 테스트는 RED-first)와 ruff F401,F841 검사가 통과한다", "서사 입력에 참조 표면 lookalike(열0 '- Reviewing:'/'- Reviewer:'/'- Project:'/'- Branch:' 줄 및 회신 header 키 블록 유사 줄)가 있으면 렌더러가 시끄럽게 거부한다 — 렌더된 요청에서 각 참조 표면은 canonical 1회만 존재", "Reviewing 값은 현재 HEAD가 아니라 round exposure의 closeout head에서 도출되고, 현재 HEAD가 exposure head와 다르거나(스테일) 기존 사이드카와 불일치하면 조용한 supersede 없이 재마감 안내와 함께 fail-loud", "PR 모드의 요청 생성 경로가 실행 가능하게 정의된다 — prepare의 PR 모드 지원 또는 skill의 명시적 PR 경로, 템플릿에 미해석 placeholder 잔존 금지"]
     notes: "실제 사고: steno round 2026-07-16-review-execution-wave의 packet에서 Reviewing sha가 eaf6c3d5cc0e…로 기재됐으나 실제 closeout은 eaf6c3d8c57e… — 짧은 prefix(eaf6c3d)만 일치, 모델이 나머지 자릿수를 hallucinate. 리뷰어가 fail-closed 거부(검토 중단). 근본 원인: round skill이 모델에게 'git rev-parse HEAD로 Reviewing을 채우라'고 지시 → 모델이 손으로 옮겨 적는 구조. 해결: script 렌더링 + Reviewing≡binding 검증(fail-loud, C2 착지분의 bind 기구 활용) + 서사만 모델 입력. 또한 기존 사례(라운드 마감 선언 후 packet 미생성·'생성할까요?' 질문)도 skill 문구에서 제거. 추가 ruling (2026-07-17): 리뷰어 대상 지침(회신 헤더 블록 등)은 템플릿에서만 정적 렌더링 — skill 산문·전달 프롬프트에 재서술 금지(중복 산문 드리프트 실증: skill의 6–40이 84ad6a7의 12+ 상향을 놓침). script 렌더링이 착지하면 round skill의 keep-verbatim 한 줄도 제거 대상."
     scope: ["scripts", "templates", "skills"]
     title: "리뷰 packet의 결정론 렌더링 분리: 정확 참조 필드(Reviewing/diff base sha, 프로젝트·브랜치, 리뷰어, 회신 header 블록)는 script가 git/binding에서 채우고, 모델은 서사 섹션만 별도 입력으로 작성 — round skill은 packet 생성을 마감의 무조건 단계로 수행(생성 여부 질문 금지)"
@@ -280,7 +280,7 @@ tasks:
     severity: "major"
     origin: "review-raw-adversarial-20260716"
   - id: fix/task-cli-arg-validation
-    accept: ["task 서브커맨드(add/set/drop/show/list/archive)가 미지원 옵션을 즉시 오류로 거부하며 옵션 문자열을 root 경로로 오인하지 않는다 (drop --reason 사고 재현 계약 테스트, RED-first)", "migration/profile seeding은 초기화된 프로젝트 root(.waystone.yml 존재)에서만 동작하고 임의 경로에 디렉터리를 생성하지 않는다", "task drop이 --reason 옵션을 지원해 사유가 해당 task notes에 기록된 뒤 drop된다", "전체 테스트 스위트(신규 계약 RED-first)와 ruff F401,F841 검사가 통과한다"]
+    accept: ["task 서브커맨드(add/set/drop/show/list/archive)가 미지원 옵션을 즉시 오류로 거부하며 옵션 문자열을 root 경로로 오인하지 않는다 (drop --reason 사고 재현 계약 테스트, RED-first)", "migration/profile seeding은 초기화된 프로젝트 root(.waystone.yml 존재)에서만 동작하고 임의 경로에 디렉터리를 생성하지 않는다", "task drop이 --reason 옵션을 지원해 사유가 해당 task notes에 기록된 뒤 drop된다", "전체 테스트 스위트(신규 계약 RED-first)와 ruff F401,F841 검사가 통과한다", "front door(waystone task ...)에서 미지원 옵션 거부가 registry lock 생성과 home migration보다 먼저 수행된다 — 인자 검증은 순수 파싱이므로 lock 불요", "명시 root 인자를 받는 모든 명령군(tasks/delegate/overlay/review/round 등)이 미초기화 root(.waystone.yml 부재)에 .waystone/lock mkdir 없이 실행 전 명시 오류를 낸다 — root를 새로 초기화하는 명령(init)만 명시 예외", "'--'로 시작하는 정당한 옵션 값이 --flag=value 형태(또는 동등 이스케이프)로 전달 가능하고 값 위치 토큰을 옵션으로 오분류하지 않는다 (--title '-- follow-up' 회귀 테스트)", "RED-first 증거가 케이스별 개별 실행으로 기록된다"]
     scope: ["scripts"]
     title: "task CLI 인자 검증 부재: task drop <id> --reason <문장>이 미지원 플래그를 조용히 root 경로로 오인 — 존재하지 않는 root에 migration이 profile을 auto-seed(디렉터리 생성 부작용)한 뒤 crash. 미지원 옵션은 즉시 거부하고, migration seeding은 초기화된 프로젝트 root에서만 동작해야 함"
     status: "pending"
@@ -308,10 +308,11 @@ tasks:
     title: "codex-companion transport 완전 제거 — codex backend verifier를 호스트 불문 codex exec로 통일, ultra effort 관통, WAYSTONE_HOST 분기·legacy transport 정리"
     status: "dropped"
   - id: chore/overengineering-prune-batch1
+    result: "위임 apply(리뷰 blocker 0, 8 hunk 전수 순삭제 확인) + main이 겸유 커버리지(conflicting-pr-freeze-sidecars) 복원. 661 OK, ruff 클린."
     accept: ["discard가 discarding 상태 재개 시 원래 reason의 정확 재현을 요구하지 않는다 — 새 reason 또는 자동 승계로 discarded 전이하며 관련 테스트는 새 계약으로 교체된다", "claim 경로의 packet 검증에서 중복 다이제스트 재도출이 제거되어 단일 검증만 남는다 — run --expect-packet-sha의 fan-out 스테일 차단은 유지", "improve._review_sha_binding wrapper와 전용 테스트가 삭제된다 (프로덕션 호출자 0 재확인 포함)", "_finding_evidence의 '..' 경로 거부 분기가 제거된다 (해당 문자열은 어디서도 dereference되지 않음을 근거로)", "전체 테스트 스위트와 ruff F401,F841 통과 — 기존 계약 약화는 삭제 대상 자체의 전용 테스트에 한정"]
     scope: ["scripts"]
     title: "오버엔지니어링 전수조사 A-2 순삭제 묶음: discard 재개 시 reason 정확 재현 강제 제거, packet 3중 검사에서 claim측 다이제스트 재도출 축약, improve._review_sha_binding dead wrapper 삭제, _finding_evidence의 '..' 경로 거부 제거 (근거: dev_docs/overengineering-audit-2026-07-17.md)"
-    status: "pending"
+    status: "done"
     severity: "minor"
     origin: "overengineering-audit-20260717"
   - id: fix/reply-header-parser-simplification
