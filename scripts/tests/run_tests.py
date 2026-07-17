@@ -10118,6 +10118,8 @@ _FANOUT_PROFILE = (
 _FANOUT_TASKS = (
     "version: 1\nproject: demo\ntasks:\n"
     '  - id: feat/xyz\n    title: "implement xyz feature"\n    status: active\n'
+    '    milestone: "milestone one"\n    round: "round one"\n'
+    '    anchor: "src/a.py:10"\n    notes: "original dispatch note"\n'
     '    scope: [src/a]\n    accept:\n      - "criterion alpha here"\n'
     '  - id: feat/two\n    title: "the second task here"\n    status: active\n'
     '    scope: [src/b]\n    accept:\n      - "criterion beta here"\n')
@@ -10158,7 +10160,7 @@ class DelegateFanoutPlanTests(unittest.TestCase):
             self.assertEqual(plan["schema"], "waystone-fanout-plan-1")
             self.assertEqual(plan["root"], str(root.resolve()))
             self.assertRegex(plan["correlation_id"], r"^\d{8}T\d{6}Z-fanout-[0-9a-f]{6}$")
-            self.assertRegex(plan["registry_fingerprint"], r"^sha256:[0-9a-f]{64}$")
+            self.assertNotIn("registry_fingerprint", plan)
             self.assertEqual(plan["carrier"], {
                 "orchestrator": {"execution": "deterministic-workflow",
                                  "backend": "claude:fable-5", "effort": "high"},
@@ -10340,6 +10342,68 @@ class DelegatePacketDigestTests(unittest.TestCase):
 
 class DelegateExpectAndCarrierTests(unittest.TestCase):
     """§4.2 — --expect-packet-sha / --expect-profile / --carrier binding and validation."""
+
+    def _assert_registry_mutation_refuses_before_claim(self, old, new, *, tasks_yaml=_FANOUT_TASKS):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _fanout_project(d, tasks_yaml=tasks_yaml)
+            rc, _out, manifest = _run_plan(root, home, ["feat/xyz", "--json"])
+            self.assertEqual(rc, 0)
+            sha = manifest["tasks"][0]["packet_sha256"]
+            self.assertIn(old, tasks_yaml)
+            (root / "tasks.yaml").write_text(tasks_yaml.replace(old, new), encoding="utf-8")
+            ddir = _run_with_home(home, lambda: delegate._delegations_dir(root))
+            self.assertFalse(ddir.exists())
+            with self.assertRaisesRegex(delegate.WorkflowError, "digest mismatch"):
+                _run_with_home(home, lambda: delegate.run_delegation(
+                    root, "feat/xyz", "implementer", [], expect_packet_sha=sha))
+            self.assertFalse(ddir.exists())
+
+    def test_expect_packet_sha_refuses_stale_milestone_before_claim(self):
+        self._assert_registry_mutation_refuses_before_claim(
+            'milestone: "milestone one"', 'milestone: "milestone two"')
+
+    def test_expect_packet_sha_refuses_stale_round_before_claim(self):
+        self._assert_registry_mutation_refuses_before_claim(
+            'round: "round one"', 'round: "round two"')
+
+    def test_expect_packet_sha_refuses_stale_anchor_before_claim(self):
+        self._assert_registry_mutation_refuses_before_claim(
+            'anchor: "src/a.py:10"', 'anchor: "src/a.py:20"')
+
+    def test_expect_packet_sha_refuses_stale_notes_before_claim(self):
+        self._assert_registry_mutation_refuses_before_claim(
+            'notes: "original dispatch note"', 'notes: "changed dispatch note"')
+
+    def test_expect_packet_sha_tracks_prompt_visible_mapping_order_before_claim(self):
+        original = _FANOUT_TASKS.replace(
+            '    notes: "original dispatch note"\n',
+            "    notes:\n      nested:\n        first: one\n        second: two\n")
+        self._assert_registry_mutation_refuses_before_claim(
+            "      nested:\n        first: one\n        second: two\n",
+            "      nested:\n        second: two\n        first: one\n",
+            tasks_yaml=original)
+
+    def test_claim_run_refuses_prompt_visible_mapping_reorder_after_prepare(self):
+        # The prepare->claim window: _prepare_run pins plan["packet"] (order X); reordering a
+        # mapping-typed notes to order Y before _claim_run must be refused. Dict equality is
+        # order-insensitive, so only the order-sensitive core digest catches this reorder.
+        original = _FANOUT_TASKS.replace(
+            '    notes: "original dispatch note"\n',
+            "    notes:\n      nested:\n        first: one\n        second: two\n")
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _fanout_project(d, tasks_yaml=original)
+            plan = _run_with_home(home, lambda: delegate._prepare_run(
+                root, "feat/xyz", "implementer", []))
+            (root / "tasks.yaml").write_text(original.replace(
+                "      nested:\n        first: one\n        second: two\n",
+                "      nested:\n        second: two\n        first: one\n"), encoding="utf-8")
+            def claim():
+                with common.hold_lock(common.project_lock_path(root)):
+                    return delegate._claim_run(root, plan)
+            with self.assertRaisesRegex(delegate.WorkflowError, "changed while preparing"):
+                _run_with_home(home, claim)
+            self.assertFalse(
+                _run_with_home(home, lambda: delegate._delegations_dir(root)).exists())
 
     def test_expect_packet_sha_match_runs_and_stale_refuses(self):
         import contextlib

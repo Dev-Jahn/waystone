@@ -600,21 +600,23 @@ def _build_packet(data: dict, task_id: str, accept_flags: list[str], root: Path,
 def _packet_core_digest(packet: dict) -> str:
     """Machine- and worktree-stable digest of the decision-bearing packet core (§4.1 / Major 4).
 
-    Only the fixed field list below enters the hash. Volatile fields (routing_note, retry_context,
-    carrier, runner_override) are deliberately excluded so a carrier-instance never perturbs the
-    digest, and `project` is the config project NAME (never an absolute root) so the same task hashes
-    identically across machines and worktrees. `delegate plan` pins this value; `delegate run
-    --expect-packet-sha` recomputes it on the freshly rebuilt packet and refuses a mismatch before
-    any record is written."""
+    `_registry_task_prompt_lines` and `_acceptance_prompt_text` are the shared projection used here
+    and by `_render_prompt`: every registry-derived field visible to the implementer (id, title,
+    status, milestone, round, anchor, notes, deps, and acceptance) therefore enters the digest in
+    exactly the representation the prompt sees. Routing/carrier/retry metadata (routing_note,
+    retry_context, carrier, runner_override) is deliberately excluded so retries and carrier
+    instances never perturb the digest. `project` is the config project NAME (never an absolute
+    root), so the same task hashes identically across machines and worktrees. `delegate plan` pins
+    this value; `delegate run --expect-packet-sha` recomputes it on the freshly rebuilt packet and
+    refuses a mismatch before any record is written."""
     task = packet.get("task") or {}
     task_id = task.get("id")
     core = {
-        "task_id": task_id,
-        "title": task.get("title"),
+        "implementer_prompt": {
+            "task_lines": _registry_task_prompt_lines(task),
+            "acceptance": _acceptance_prompt_text(packet.get("acceptance") or []),
+        },
         "type": task_id.partition("/")[0] if isinstance(task_id, str) else None,
-        "status": task.get("status"),
-        "deps": [{"id": d.get("id"), "status": d.get("status")} for d in (task.get("deps") or [])],
-        "acceptance": list(packet.get("acceptance") or []),
         "accept_provenance": list(packet.get("accept_provenance") or []),
         "declared_scope": list(packet.get("declared_scope") or []),
         "project": (packet.get("project") or {}).get("name"),
@@ -639,14 +641,31 @@ def _validate_carrier(carrier: str | None, instance: str | None) -> dict | None:
     return {"name": carrier, "instance_id": instance}
 
 
-def _render_prompt(packet: dict, base_sha: str) -> str:
-    task = packet["task"]
-    lines = [f"- id: {task['id']}", f"- title: {task.get('title')}", f"- status: {task['status']}"]
+def _registry_task_prompt_lines(task: dict) -> list[str]:
+    """Render every registry-derived task field exposed in the implementer prompt.
+
+    The packet digest consumes this exact projection; add any future prompt-visible registry task
+    field here rather than independently in `_render_prompt` or `_packet_core_digest`.
+    """
+    lines = [f"- id: {task['id']}", f"- title: {task.get('title')}",
+             f"- status: {task['status']}"]
     for field in ("milestone", "round", "anchor", "notes"):
         if task.get(field):
             lines.append(f"- {field}: {task[field]}")
     if task.get("deps"):
-        lines.append("- deps: " + ", ".join(f"{d['id']} ({d['status']})" for d in task["deps"]))
+        lines.append("- deps: " + ", ".join(
+            f"{dep['id']} ({dep['status']})" for dep in task["deps"]))
+    return lines
+
+
+def _acceptance_prompt_text(acceptance: list) -> str:
+    """Render acceptance identically for the implementer prompt and packet digest."""
+    return "\n".join(f"{i}. {criterion}" for i, criterion in enumerate(acceptance, 1))
+
+
+def _render_prompt(packet: dict, base_sha: str) -> str:
+    task = packet["task"]
+    lines = _registry_task_prompt_lines(task)
     routing_note = packet.get("routing_note")
     if (isinstance(routing_note, dict)
             and routing_note.get("provenance") == "main-session"
@@ -654,7 +673,7 @@ def _render_prompt(packet: dict, base_sha: str) -> str:
             and routing_note["note"] and "\n" not in routing_note["note"]
             and "\r" not in routing_note["note"]):
         lines.append(f"- routing_note: {routing_note['note']}")
-    acceptance = "\n".join(f"{i}. {c}" for i, c in enumerate(packet["acceptance"], 1))
+    acceptance = _acceptance_prompt_text(packet["acceptance"])
     return (_TEMPLATE_PATH.read_text(encoding="utf-8")
             .replace("{{TASK_BLOCK}}", "\n".join(lines))
             .replace("{{ACCEPTANCE}}", acceptance)
@@ -1616,7 +1635,11 @@ def _claim_run(root: Path, plan: dict) -> tuple[str, Path]:
     except WorkflowError as e:
         raise WorkflowError(
             f"task {task_id} changed while preparing delegation — retry from current state: {e}") from e
-    if current_packet != plan["packet"]:
+    # Dict equality is order-insensitive, but the packet core digest is now order-sensitive (it
+    # hashes the exact prompt projection). Compare both so the prepare->claim drift check catches a
+    # prompt-visible reorder of a mapping-typed field, matching the --expect-packet-sha gate.
+    if (current_packet != plan["packet"]
+            or _packet_core_digest(current_packet) != _packet_core_digest(plan["packet"])):
         raise WorkflowError(
             f"task {task_id} changed while preparing delegation — retry from current state")
     active = _active_delegation_for_task(root, task_id)
@@ -3256,13 +3279,11 @@ def plan(root: Path, task_ids: list[str], routing_note: str | None) -> int:
             "deps": packet["task"]["deps"],
             "deps_ok": True,
         })
-    registry_bytes = (root / "tasks.yaml").read_bytes()
     manifest = {
         "schema": FANOUT_PLAN_SCHEMA,
         "root": str(root.resolve()),
         "correlation_id": _make_fanout_correlation_id(),
         "profile_fingerprint": fingerprint,
-        "registry_fingerprint": "sha256:" + hashlib.sha256(registry_bytes).hexdigest(),
         "carrier": carrier,
         "tasks": tasks_out,
         "overlap_pairs": _scope_overlap_pairs(tasks_out),
