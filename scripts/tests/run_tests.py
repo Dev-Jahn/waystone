@@ -33,6 +33,7 @@ import improve  # noqa: E402
 import lanes  # noqa: E402
 import overlay  # noqa: E402
 import merge  # noqa: E402
+import remote  # noqa: E402
 import resume  # noqa: E402
 import review  # noqa: E402
 import roadmap  # noqa: E402
@@ -1769,7 +1770,7 @@ Fail-loud protocol boundaries.
 
             untracked = cli("remote", "verify", str(root), "--round", self.ROUND_ID)
             self.assertNotEqual(untracked.returncode, 0)
-            self.assertIn("not committed", untracked.stderr)
+            self.assertIn("not published", untracked.stderr)
 
             git(root, "add", str(request.relative_to(root)))
             git(root, "commit", "-qm", "publish request without binding")
@@ -1784,6 +1785,178 @@ Fail-loud protocol boundaries.
             published = cli("remote", "verify", str(root), "--round", self.ROUND_ID)
             self.assertEqual(published.returncode, 0, published.stderr)
             self.assertIn("request and binding", published.stdout)
+
+    def _remote_project(self, base: Path) -> tuple[Path, str, Path]:
+        bare = base / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+        root, target, narrative = self._closed_project(base)
+        git(root, "remote", "add", "origin", str(bare))
+        git(root, "push", "-q", "-u", "origin", "main")
+        self.assertEqual(review.prepare_review_request(root, self.ROUND_ID, narrative), 0)
+        return root, target, narrative
+
+    def test_direct_binding_rejects_committed_but_unpushed_packet(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, _target, _narrative = self._remote_project(Path(d))
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "publish packet locally only")
+
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(review.verify_packet_publication(root, self.ROUND_ID), 1)
+            self.assertIn("not published", err.getvalue())
+
+            git(root, "push", "-q")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(review.verify_packet_publication(root, self.ROUND_ID), 0)
+
+    def test_latest_unpublished_binding_is_the_judged_packet(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            bare = base / "remote.git"
+            subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+            root = base / "repo"
+            root.mkdir()
+            init_repo(root)
+            (root / ".waystone.yml").write_text(
+                "version: 1\nproject: demo\nreviews_dir: docs/reviews\n"
+                "review:\n  mode: packet\n  reviewers: [reviewer-x]\n"
+                "state:\n  last_round_commit: null\n")
+            (root / "tasks.yaml").write_text("version: 1\nproject: demo\ntasks: []\n")
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "setup")
+            old_target = git(root, "rev-parse", "HEAD").stdout.strip()
+            self._request(root, old_target)
+            review.write_round_request_binding(
+                root, self.ROUND_ID, old_target, None, ["reviewer-x"], mode="packet")
+            git(root, "remote", "add", "origin", str(bare))
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "publish first packet")
+            git(root, "push", "-q", "-u", "origin", "main")
+
+            (root / "advance.txt").write_text("reissue\n")
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "new closeout")
+            new_target = git(root, "rev-parse", "HEAD").stdout.strip()
+            self._request(root, new_target)
+            review.write_round_request_binding(
+                root, self.ROUND_ID, new_target, None, ["reviewer-x"], mode="packet")
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "reissued packet committed locally only")
+
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(review.verify_packet_publication(root, self.ROUND_ID), 1)
+            # The LATEST binding's target is what gets judged — the stale published packet
+            # must not be the publication evidence.
+            self.assertIn(new_target, err.getvalue())
+            self.assertNotIn(old_target, err.getvalue())
+
+            git(root, "push", "-q")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(review.verify_packet_publication(root, self.ROUND_ID), 0)
+
+    def test_symlinked_packet_artifacts_are_rejected(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, _target, _narrative = self._remote_project(Path(d))
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "publish packet")
+            git(root, "push", "-q")
+            request = root / "docs" / "reviews" / f"{self.ROUND_ID}-request.md"
+            real = root / "docs" / "reviews" / "elsewhere.md"
+            request.rename(real)
+            request.symlink_to(real.name)
+
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(review.verify_packet_publication(root, self.ROUND_ID), 1)
+            self.assertIn("regular file", err.getvalue())
+
+    def test_gate_source_has_no_ancestry_topology_checks(self):
+        import inspect
+
+        source = inspect.getsource(review.verify_packet_publication)
+        for banned in ("HEAD", "first_parent", "parents", "head_pushed"):
+            self.assertNotIn(banned, source.replace(
+                "merge parents, first-parent chains, HEAD", ""))
+        # Exactly ONE containment primitive, and it binds the two pinned literals — any second
+        # is_ancestor (or one anchored to a symbolic ref) is ancestry-inference creeping back.
+        calls = [line.strip() for line in source.splitlines() if "is_ancestor(" in line]
+        self.assertEqual(
+            calls, ['if not is_ancestor(root, binding["target_sha"], remote_sha):'])
+        # The CLI boundary must not re-introduce a HEAD-topology precheck on the --round path:
+        # head_pushed belongs to the no-round question only (asserted as exactly one call site).
+        remote_source = inspect.getsource(remote.verify)
+        self.assertEqual(remote_source.count("head_pushed("), 1)
+        round_branch = remote_source.split("pushed, info = head_pushed(")[0]
+        self.assertIn("verify_packet_publication", round_branch)
+
+    def test_round_verify_judges_remote_not_local_head(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, target, _narrative = self._remote_project(Path(d))
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "publish packet")
+            git(root, "push", "-q")
+            published_head = git(root, "rev-parse", "HEAD").stdout.strip()
+            # Diverge the local HEAD away from the published history (force-push shape): the
+            # remote still carries the closeout and the packet bytes, so --round must pass.
+            git(root, "reset", "-q", "--hard", target)
+            git(root, "checkout", "-q", str(published_head), "--", "docs/reviews")
+            (root / "diverged.txt").write_text("local rewrite\n")
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "diverged local history")
+
+            import contextlib
+            import io
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = remote.verify(root, self.ROUND_ID)
+            self.assertEqual(rc, 0, out.getvalue())
+            rendered = out.getvalue()
+            self.assertIn("request and binding", rendered)
+            self.assertIn(target, rendered)          # the verified closeout (binding literal)
+            self.assertIn(published_head[:12], rendered)  # the pinned remote tip
+            local_head = git(root, "rev-parse", "HEAD").stdout.strip()
+            self.assertNotEqual(local_head, published_head)
+            self.assertNotIn(local_head[:12], rendered)   # local HEAD absent from the verdict
+
+    def test_published_stale_sidecar_cannot_stand_in_for_local_latest(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, _target, _narrative = self._remote_project(Path(d))
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "publish first packet")
+            git(root, "push", "-q")
+            # Reissue mid-state: the new closeout and REWRITTEN request are published, but the
+            # newest binding-2 exists only locally — the stale published sidecar must not be
+            # accepted as the publication evidence.
+            (root / "advance.txt").write_text("reissue\n")
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "new closeout")
+            new_target = git(root, "rev-parse", "HEAD").stdout.strip()
+            self._request(root, new_target)
+            git(root, "add", "-A")
+            git(root, "commit", "-qm", "publish rewritten request only")
+            git(root, "push", "-q")
+            review.write_round_request_binding(
+                root, self.ROUND_ID, new_target, None, ["reviewer-x"], mode="packet")
+
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(review.verify_packet_publication(root, self.ROUND_ID), 1)
+            self.assertIn("binding-2", err.getvalue())
+            self.assertIn("not published", err.getvalue())
 
     def test_improve_warns_when_corrupt_request_binding_is_skipped(self):
         import contextlib

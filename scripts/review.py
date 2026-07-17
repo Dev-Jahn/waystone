@@ -50,7 +50,7 @@ import yaml  # noqa: E402
 from common import (
     CONFIG_NAME, WorkflowError, find_project_root, git_full_sha, git_rc, hold_project_lock,
     is_ancestor, load_config, migrate_project_state, normalize_config, parse_iso_timestamp,
-    project_state_path, write_bytes_atomic,
+    project_state_path, upstream_ref, write_bytes_atomic,
 )  # noqa: E402
 
 CODEX_BOT = "chatgpt-codex-connector[bot]"  # REST `user.login` form
@@ -840,38 +840,46 @@ def prepare_packet_request(root: Path, round_id: str, narrative_path: Path | Non
     return prepare_review_request(root, round_id, narrative_path)
 
 
-def _committed_unchanged(root: Path, path: Path) -> tuple[bool, str | None]:
+def _remote_blob(root: Path, spec: str) -> bytes | None:
+    """Exact bytes of `<sha>:<path>` from the object store, or None when absent."""
     try:
-        relative = path.resolve().relative_to(root.resolve())
-    except ValueError:
-        return False, f"{path} is outside the project"
-    relative_text = relative.as_posix()
-    rc, status, error = git_rc(
-        root, "status", "--porcelain=v1", "--untracked-files=all", "--", relative_text)
-    if rc != 0:
-        return False, f"cannot inspect {relative_text}: {error or 'git status failed'}"
-    if status:
-        return False, f"{relative_text} is not committed unchanged at HEAD"
-    rc, _out, error = git_rc(root, "cat-file", "-e", f"HEAD:{relative_text}")
-    if rc != 0:
-        return False, f"{relative_text} is not committed in the HEAD tree: {error or 'missing'}"
-    return True, None
+        proc = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "blob", spec],
+            capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
 
 
 def verify_packet_publication(root: Path, round_id: str) -> int:
-    """Verify the pushed-HEAD packet payload after generic remote containment has passed."""
+    """Direct-binding publication gate. The only proposition proven: this round's packet
+    (request + LATEST binding sidecar) is byte-identical in the remote-tracking tree, and the
+    closeout SHA the binding names is contained in that same remote. Reviewed-commit identity
+    comes from the binding literal; publication comes from ONE pinned remote SHA resolved at the
+    start. No ancestry topology — merge parents, first-parent chains, HEAD — is inspected
+    (direct-binding ruling 2026-07-17; the ancestry class was the audited pot crack)."""
     cfg = load_config(root)
     if (cfg.get("review") or {}).get("mode", "packet") != "packet":
         print("remote: --round publication verification requires review.mode packet", file=sys.stderr)
         return 1
     rdir = root / cfg["reviews_dir"]
+    if rdir.is_symlink() or not rdir.is_dir():
+        print(f"remote: reviews directory must be a real directory: {rdir}", file=sys.stderr)
+        return 1
     request = rdir / f"{round_id}-request.md"
+    if request.is_symlink() or not request.is_file():
+        print(f"remote: packet request must be a regular file: {request}", file=sys.stderr)
+        return 1
     request_binding = parse_packet_request_binding(request)
     if request_binding is None:
         return 1
     sidecar_paths = sorted(rdir.glob(f"{round_id}-request.binding*.json"))
     if not sidecar_paths:
         print(f"remote: packet request binding is missing for round {round_id}", file=sys.stderr)
+        return 1
+    if any(path.is_symlink() or not path.is_file() for path in sidecar_paths):
+        print(f"remote: packet binding sidecars must be regular files for round {round_id}",
+              file=sys.stderr)
         return 1
     rows: list[tuple[Path, dict]] = []
     try:
@@ -890,16 +898,38 @@ def verify_packet_publication(root: Path, round_id: str) -> int:
             f"remote: packet request and latest binding disagree for round {round_id}",
             file=sys.stderr)
         return 1
-    for artifact in (request, binding_path):
-        committed, reason = _committed_unchanged(root, artifact)
-        if not committed:
-            print(f"remote: packet publication failed — {reason}", file=sys.stderr)
-            return 1
-    if not is_ancestor(root, binding["target_sha"], "HEAD"):
+
+    # Pin the publication evidence once: the remote-tracking ref resolves to one immutable SHA
+    # here, and every git access below uses that literal or the binding's literal target.
+    up = upstream_ref(root)
+    if not up:
+        print("remote: no upstream tracking branch — packet publication unverifiable",
+              file=sys.stderr)
+        return 1
+    rc, remote_sha, error = git_rc(root, "rev-parse", "--verify", f"refs/remotes/{up}^{{commit}}")
+    if rc != 0 or not remote_sha:
+        print(f"remote: cannot resolve refs/remotes/{up}: {error or 'unknown ref'}",
+              file=sys.stderr)
+        return 1
+    if not is_ancestor(root, binding["target_sha"], remote_sha):
         print(
-            f"remote: packet Reviewing target {binding['target_sha']} is not contained in HEAD",
+            f"remote: packet Reviewing target {binding['target_sha']} is not contained in {up}",
             file=sys.stderr)
         return 1
+    for artifact in (request, binding_path):
+        relative = artifact.resolve().relative_to(root.resolve()).as_posix()
+        published = _remote_blob(root, f"{remote_sha}:{relative}")
+        if published is None:
+            print(f"remote: {relative} is not published in {up}", file=sys.stderr)
+            return 1
+        if published != artifact.read_bytes():
+            print(f"remote: {relative} differs from the published copy in {up}", file=sys.stderr)
+            return 1
+    # The SHAs a reviewer can trust are the two the gate actually verified: the pinned remote
+    # tip whose tree carries the packet bytes, and the closeout the binding names. The local
+    # checkout appears nowhere in this judgment.
+    print(f"remote: round {round_id} request and binding are published in "
+          f"{up}@{remote_sha[:12]} — Reviewing {binding['target_sha']}")
     return 0
 
 

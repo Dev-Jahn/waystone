@@ -7,11 +7,13 @@
 
 Subcommands (also reachable as `waystone remote <sub>`):
   verify [root] [--round ID]  exit 0 if HEAD is pushed; with --round, also verify the packet
-                              request and binding are committed unchanged in that HEAD tree
+                              request and latest binding are byte-identical in the remote tree and
+                              the binding's closeout SHA is contained in that remote (direct binding)
   drift  [root]   print how many commits the local HEAD is behind upstream (informational)
 
-Deterministic git plus repo-artifact checks. Used by the round skill to refuse emitting a review
-packet that is not fully present in a pushed HEAD, and by the dashboard to surface remote drift.
+Deterministic git plus repo-artifact checks. Used by the round skill to refuse announcing a
+review packet that is not byte-present in the pushed remote tree, and by the dashboard to surface
+remote drift.
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import find_project_root, head_pushed  # noqa: E402
+from common import find_project_root, git_rc, head_pushed, upstream_ref  # noqa: E402
 
 
 def _root(argv: list[str]) -> Path | None:
@@ -32,19 +34,29 @@ def _root(argv: list[str]) -> Path | None:
 
 
 def verify(root: Path, round_id: str | None = None) -> int:
+    if round_id is not None:
+        # Packet publication is judged ONLY by the direct-binding gate: fetch so the pinned
+        # remote-tracking SHA is fresh, then hand over. The local HEAD's relationship to the
+        # remote is deliberately not consulted — a diverged/force-pushed local HEAD must not
+        # refuse a remote that genuinely contains the closeout and packet bytes.
+        up = upstream_ref(root)
+        if not up:
+            print("remote: cannot verify — no upstream tracking branch", file=sys.stderr)
+            return 3
+        rc, _out, err = git_rc(root, "fetch", "--quiet", up.split("/", 1)[0])
+        if rc != 0:
+            print(f"remote: cannot verify — fetch failed: {err or 'error'}", file=sys.stderr)
+            return 3
+        import review
+        return 0 if review.verify_packet_publication(root, round_id) == 0 else 3
     pushed, info = head_pushed(root, fetch=True)
     if "reason" in info:
         print(f"remote: cannot verify — {info['reason']}", file=sys.stderr)
         return 3
     if pushed:
-        if round_id is not None:
-            import review
-            if review.verify_packet_publication(root, round_id) != 0:
-                return 3
         behind = info.get("behind")
         tail = f" ({behind} behind {info['upstream']})" if behind else ""
-        packet = f"; round {round_id} request and binding are in HEAD" if round_id else ""
-        print(f"remote: HEAD {info['head'][:12]} is pushed to {info['upstream']}{tail}{packet}")
+        print(f"remote: HEAD {info['head'][:12]} is pushed to {info['upstream']}{tail}")
         return 0
     print(f"remote: HEAD {(info.get('head') or '?')[:12]} is NOT on {info['upstream']} — push before requesting review",
           file=sys.stderr)
