@@ -413,7 +413,7 @@ tasks:
     title: "dev 이력 대비 살아있는 문서 staleness 감사·정정 (README 표면·배지, ADR-0001 SSOT 포인터, CLAUDE.md 릴리스 메커니즘, docs gate 확장)"
     status: done
   - id: fix/remote-verify-live-ref
-    accept: ["publication 증명이 라이브 원격 기반이다 — 정확한 upstream branch를 명시 refspec으로 fetch한 결과(FETCH_HEAD 또는 전용 임시 ref)를 증거 SHA로 사용하고, persisted refs/remotes/* 신뢰 경로가 remote.py verify와 common.py head_pushed 양쪽에서 제거된다", "RED-first 2건: (a) 원격 branch가 삭제된 상태, (b) branch가 fetch refspec에서 제외된 상태 — 양쪽 모두 gate가 거부한다 (실 bare-remote 테스트, 검증 clone과 삭제 주체 clone 분리)", "fetch 실패·branch 부재·빈 FETCH_HEAD는 전부 fail-closed이며 오류 메시지가 원인(부재 vs 네트워크)을 구분한다", "전체 테스트 스위트 green + ruff F401,F841 clean, 기존 publication gate 계약 테스트 무회귀"]
+    accept: ["publication 증명이 라이브 원격 기반이다 — 정확한 upstream branch를 명시 refspec으로 fetch한 결과(FETCH_HEAD 또는 전용 임시 ref)를 증거 SHA로 사용하고, persisted refs/remotes/* 신뢰 경로가 remote.py verify와 common.py head_pushed 양쪽에서 제거된다", "RED-first 2건: (a) 원격 branch가 삭제된 상태, (b) branch가 fetch refspec에서 제외된 상태 — 양쪽 모두 gate가 거부한다 (실 bare-remote 테스트, 검증 clone과 삭제 주체 clone 분리)", "fetch 실패·branch 부재·빈 FETCH_HEAD는 전부 fail-closed이며 오류 메시지가 원인(부재 vs 네트워크)을 구분한다", "전체 테스트 스위트 green + ruff F401,F841 clean, 기존 publication gate 계약 테스트 무회귀", "freeze의 binding↔exposure 교차검증이 packet 게이트와 동등하다 — reviewers/mode 포함 전 필드 대조, exposure만 변조된 재렌더 게시를 거부한다 (RED; adversarial round-3 편입)"]
     notes: "JW-GPT-001 (REAL major, 동적 재현으로 실제 false PASS 확인). 원칙: publication 증명은 라이브 원격에서 — 정확한 branch를 명시 refspec으로 fetch해 FETCH_HEAD(또는 전용 임시 ref)의 SHA를 증거로 사용, branch 부재·fetch 실패는 fail-closed. remote.py:46 verify와 common.py:1596 head_pushed 공통 경로 모두 수정 (persisted refs/remotes/* 신뢰 제거가 근본 해소, --prune 단독은 땜질). RED 2건: 원격 branch 삭제 상태 / fetch refspec 제외 상태에서 gate 거부."
     deps: ["fix/binding-narrative-digest"]
     scope: ["scripts/remote.py", "scripts/common.py", "scripts/review.py", "scripts/tests/run_tests.py"]
@@ -440,21 +440,23 @@ tasks:
     severity: "major"
     origin: "review-2026-07-18-carrier-lanes"
   - id: fix/binding-narrative-digest
+    result: "@ 874c4c3 (attempt-3, 위임 20260717T200543Z): narrative digest 결속 + freeze/packet 재렌더 게이트 + 양측-digestless 한정 라벨 폴백 + improve 투영 보존. host 738 green·ruff clean, 적대 리뷰 3회전(freeze exposure-parity는 remote-verify-live-ref로 편입)"
     accept: ["binding contract에 검증된 narrative의 canonical digest가 포함된다 — narrative만 바뀐 재-prepare는 새 sidecar를 발행하고 해당 round가 pending으로 재개된다 (RED-first: prepare A → feedback ingest → prepare B 같은 target → pending 재개)", "freeze는 stored narrative digest를 최신 binding과 대조한 뒤에만 게시한다 — 불일치는 fail-loud", "digest 없는 기존(legacy) sidecar는 조용히 통과되지 않는다 — 정직한 unknown/재발행 유도 경로로 처리", "전체 테스트 스위트 green + ruff F401,F841 clean", "packet publication 게이트가 narrative 결속을 검증한다 — round exposure + stored narrative에서 request를 재렌더해 게시 대상 request.md와 대조(freeze와 동일 원리)하거나 동등한 fail-loud 검증으로, prepare 후 request.md narrative만 변조된 packet을 게이트가 거부한다 (RED 계약 테스트)", "(기존 legacy 항목 개정) digest 없는 legacy binding의 완료 판정은 구 계약(review_target_matches)으로 폴백하되 coverage reason에 legacy-pre-digest 라벨을 명시한다 — 재발행 유도는 재발행이 실제 가능한 현행 round에만, publication 게이트(freeze·packet verify)는 digest를 계속 하드 요구, 과거 라운드가 실행 불가능한 안내와 함께 영구 pending으로 남지 않는다 (RED: digestless binding + target-일치 feedback → pending 미등재 + 라벨 노출)", "legacy 폴백은 양측 digestless일 때만 적용된다 — binding에 digest가 없어도 feedback에 stamped digest가 있으면(post-upgrade 증거) 폴백을 거부하고 pending 유지 (RED: prepare A→ingest→prepare B 후 binding-2에서 narrative_digest만 제거해도 완료로 오판되지 않는다)", "improve의 review binding 재구성이 narrative_digest를 보존한다 — digest-bound binding에 대한 stamped digest mismatch가 improve 투영에서 legacy-pre-digest로 오보되지 않는다", "legacy-pre-digest 라벨은 reviewer coverage 사유와 독립적으로 항상 노출된다 — unconfigured/미식별 reviewer의 기존 coverage reason이 라벨을 밀어내도 legacy 완료가 무라벨로 지나가지 않는다 (RED: unconfigured reviewer + digestless binding 실파일 흐름)"]
     notes: "JW-GPT-004 (REAL major). binding contract에 canonical narrative digest — 재-prepare 시 pending 재개, freeze/packet 게이트 digest 대조, legacy는 라벨 폴백. [attempt-3] attempt-2 설계(digest 결속·strict latest 헬퍼·packet 재렌더 byte 대조·라벨 폴백 방향)는 인수 — 기각은 legacy 폴백 정직성 3건: (1) 폴백은 양측 digestless일 때만 — binding digest 부재 + feedback stamped digest 존재(post-upgrade 증거)면 폴백 거부·pending (digest-strip 위장 차단), (2) improve.py _review_binding 재구성이 narrative_digest 탈락 — 보존해 mismatch가 legacy로 오보되지 않게 (scope에 improve.py 추가됨), (3) legacy-pre-digest 라벨이 reviewer coverage reason에 밀려 소실 — 독립 노출(unconfigured reviewer RED 실파일 흐름 포함). template 재렌더 미결속 우려는 기존 확정 설계(재렌더가 무결성, template은 커밋 추적)로 반박 — 변경 금지. ingest 도장 race는 fix/reply-narrative-echo 별도 task — 변경 금지. 검증 재현은 tempdir 격리 필수."
     deps: ["fix/pending-corrupt-binding-honesty"]
     scope: ["scripts/review.py", "scripts/tests/run_tests.py", "scripts/improve.py"]
     title: "binding contract에 narrative/request digest 부재 — 동일 target 재-prepare가 구 sidecar·구 feedback 재사용. narrative digest를 contract에 포함해 재발행 시 pending 재개"
-    status: "pending"
+    status: "done"
     severity: "major"
     origin: "review-2026-07-18-carrier-lanes"
   - id: fix/probe-proof-machine-scope
+    result: "@ 874c4c3 (attempt-3, 위임 20260717T200543Z): 마커 미커밋 티어 이동 + untracked/내용 검증 + 복원적 self-ignore 통일 + barrier 동시성 계약. host 732 green·ruff clean, 적대 리뷰 3회전(잔여는 진단 폴리시로 minor 분리)"
     accept: ["codex 프로브 증명이 커밋 추적 파일(.waystone.yml)에 더 이상 기록되지 않는다 — 저장 위치가 미커밋 티어({root}/.waystone, self-ignored)로 이동하고 읽기·쓰기·진단 안내가 전부 새 위치를 가리킨다", "RED-first: .waystone.yml에 legacy codex_runner_verified: true가 커밋돼 있어도 로컬 마커가 없으면 프로브가 실행된다 — legacy 키는 조용히 수용되지 않고 무시+제거 안내를 출력한다", "전체 테스트 스위트 green + ruff F401,F841 clean, 프로브 1회 실행(probe-once) 계약 무회귀", "{root}/.waystone self-ignore는 복원적·원자적이다 — .gitignore가 없거나 내용이 '*' 전체 무시를 상실한 상태(빈 파일 포함)에서도 상태 디렉터리 ensure 경로가 canonical ignore를 원자적으로 복구해 마커가 git 추적 가능해지지 않는다 (RED: 빈 .waystone/.gitignore 상태에서 마커 기록 후 git check-ignore가 마커를 무시로 판정)", "legacy 키 제거 안내는 디스크 config를 실제로 읽은 로드 경로에서만 발화한다 — source 미상 normalize(statusline 표시·과거 ref blob 정책 투영)는 존재하지 않는 로컬 경로를 안내 문구에 지어내지 않는다", "마커 없이 동시 시작한 두 runner 경로에서 프로브가 정확히 1회 실행된다 — lock 하 마커 재확인 동시성 계약 테스트", "로컬 마커는 git 추적 상태가 아닐 때만 증명으로 인정된다 — 커밋/스테이징돼 전파된 마커는 무시하고 untrack 제거 안내를 출력한 뒤 프로브를 실행한다 (RED: 마커가 커밋된 체크아웃에서 로컬 증명 없이 프로브 실행 + 안내 출력)", "마커 내용이 계약값(verified)이 아니면 증명으로 인정하지 않는다 — 빈/손상 마커는 무시+안내 후 재프로브하고 성공 시 계약값으로 원자 재기록한다", "self-ignore 기록은 단일 복원적·원자적 헬퍼로 통일된다 — legacy migration 경로(_ensure_project_state_raw)도 같은 헬퍼를 경유하며 symlink .gitignore를 수용하지 않는다", "동시성 계약 테스트가 lock 하 재확인 자체를 고정한다 — 두 runner 모두 잠금 전 1차 마커 확인을 부재 상태로 통과한 것이 보장된 뒤에 첫 프로브가 완료된다 (재확인 제거 구현이면 RED)"]
     notes: "리뷰어 open question 1 승격 (REAL major, 상태 격리 위반). proof 저장을 커밋 추적 .waystone.yml에서 미커밋 티어 {root}/.waystone(self-ignored, per-checkout) 마커로 이동, legacy 키는 무시+제거 안내. [attempt-3] attempt-2는 마커 이동·legacy fail-loud·복원적 self-ignore·source-aware 안내를 정확히 구현(전부 인수) — 기각은 round-2 적대 리뷰의 신규 4건: (1) 마커 read-side가 git 추적 상태 무검증 — git ls-files 류로 추적된 마커는 증명 불인정(무시+untrack 안내+프로브, legacy 키 처리와 동일 패턴), (2) 마커 내용 무검증 — 계약값 아닌 파일은 불인정+재프로브, (3) common.py _ensure_project_state_raw(migration)가 별도 self-ignore 구현(symlink 추종 is_file + 비원자 write_text) — 단일 헬퍼로 통일, (4) 동시성 테스트가 두 worker 모두 잠금 전 1차 확인을 부재로 통과했음을 보장 안 함 — 1차 확인 지점 계측으로 재확인 제거 시 RED 되게. 주의: statusline(waystone.py)의 sourceless normalize는 의도된 무발화 표면(표시 표면 stderr 노이즈 방지) — 변경 금지. 검증 재현은 tempdir 격리 필수."
     deps: ["fix/packet-digest-prompt-coverage"]
     scope: ["scripts/delegate.py", "scripts/common.py", "scripts/tests/run_tests.py"]
     title: "codex 프로브 증명이 커밋 추적 .waystone.yml에 저장돼 머신 간 전파(상태 격리 위반) — 미커밋 티어({root}/.waystone)로 이동"
-    status: "pending"
+    status: "done"
     severity: "major"
     origin: "review-2026-07-18-carrier-lanes"
   - id: docs/release-single-writer-assumption
@@ -478,4 +480,19 @@ tasks:
     result: "README delegate 섹션 재작성 @ 07bab60 — 리드+details fold, docs gate·730 green"
     title: "README delegate 섹션 재작성 — dev_docs/delegate_readme.md(codex 해설, 구버전 기준)를 참조 스타일로 최신 dev 동작에 맞게 재작성, 상세 메커니즘은 details fold로 접어 배치 (사용자 지시 2026-07-18, main 직접 — docs 작업)"
     status: "done"
+    severity: "minor"
+  - id: fix/hook-matrix-color-env
+    scope: ["scripts/tests/run_tests.py"]
+    title: "hook matrix 테스트의 uv cache dir 파싱이 FORCE_COLOR 환경에서 ANSI 오염으로 실패 — subprocess env에서 색상 강제 변수 중화(또는 NO_COLOR 부여)로 환경 무관하게 (2026-07-18 실측: FORCE_COLOR=3 세션에서 main tree도 동일 실패, lane 회귀 아님)"
+    status: "pending"
+    severity: "minor"
+    deps: ["fix/probe-proof-machine-scope", "fix/binding-narrative-digest"]
+  - id: fix/marker-diagnostics-polish
+    title: "probe 마커 진단 폴리시: 추적 마커+워킹트리 삭제 상태의 1회차 안내 공백, staged 무효 마커 시 git rm --cached -f 안내 보강, lock 하 재확인 경합 창의 안내 억제 — 전부 fail-open 아님(프로브는 항상 실행), 안내 품질만 (adversarial round-3, main 판정 minor)"
+    status: "pending"
+    severity: "minor"
+    deps: ["fix/probe-proof-machine-scope"]
+  - id: chore/pre-header-feedback-settlement
+    title: "구조화 헤더(0.10) 이전 형식의 역사 feedback 3라운드가 완료 판정 불가로 영구 pending — 패치 전부터 동일(기존 부채). 역사 라운드 정착(settle) 방식 결정 필요: 아카이브 마커 vs 재-ingest vs pending 제외 규칙"
+    status: "pending"
     severity: "minor"
