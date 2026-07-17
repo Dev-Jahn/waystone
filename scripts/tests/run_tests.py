@@ -11437,62 +11437,192 @@ class DelegateVerifyTests(unittest.TestCase):
             self.assertEqual(legacy.stat().st_mtime_ns, legacy_mtime)
             self.assertTrue((rec / "artifact" / "verify-1.json").is_file())
 
-    def test_verifier_session_all_manifest_hooks_are_hermetic(self):
-        import os
+    def test_manifest_hook_matrix_covers_normal_and_verifier_modes(self):
+        manifest = _json.loads(
+            (SCRIPTS.parent / "hooks" / "hooks.json").read_text())["hooks"]
+        expected_worktree_writes = {
+            "PreToolUse": set(),
+            "SessionStart": {".waystone/.gitignore", ".waystone/lock"},
+            "PreCompact": {".waystone/resume.md"},
+            "SessionEnd": {".waystone/resume.md"},
+            "PostToolUse": {".waystone/.gitignore", ".waystone/lock", "ROADMAP.md"},
+            "Stop": {".waystone/.gitignore", ".waystone/lock"},
+        }
+        expected_home_writes = {
+            "PreToolUse": set(),
+            "SessionStart": {".waystone", ".waystone/registry.lock"},
+            "PreCompact": set(),
+            "SessionEnd": set(),
+            "PostToolUse": set(),
+            "Stop": {".waystone", ".waystone/registry.lock"},
+        }
+        mutation = os.environ.get("WAYSTONE_TEST_NOOP_HOOK")
+        mutation_seen = False
+        uv_cache_dir = subprocess.run(
+            ["uv", "cache", "dir"], capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertTrue(Path(uv_cache_dir).is_absolute())
 
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d) / "review-worktree"
-            record = Path(d) / "record"
-            root.mkdir()
-            record.mkdir()
-            init_repo(root)
-            (root / ".gitignore").write_text(".waystone/\n")
-            (root / ".waystone.yml").write_text("version: 1\nproject: demo\n")
-            (root / "tasks.yaml").write_text("version: 1\nproject: demo\ntasks: []\n")
-            (root / "ROADMAP.md").write_text("unchanged\n")
-            git(root, "add", "-A")
-            git(root, "commit", "-qm", "verifier hook fixture")
-            marker = root / ".waystone" / "boundary-hooks-enabled"
-            marker.parent.mkdir()
-            marker.touch()
+        def tree_snapshot(
+                base: Path, *, skip_git: bool = False,
+        ) -> dict[str, tuple]:
+            import stat as _stat
 
-            manifest = _json.loads(
-                (SCRIPTS.parent / "hooks" / "hooks.json").read_text())["hooks"]
-            payloads = {
-                "PreToolUse": {
-                    "hook_event_name": "PreToolUse", "tool_name": "Read", "cwd": str(root),
-                    "tool_input": {"file_path": str(root / "tasks.yaml")},
-                },
-                "SessionStart": {"hook_event_name": "SessionStart", "cwd": str(root)},
-                "PreCompact": {"hook_event_name": "PreCompact", "cwd": str(root)},
-                "SessionEnd": {"hook_event_name": "SessionEnd", "cwd": str(root)},
-                "PostToolUse": {
-                    "hook_event_name": "PostToolUse", "tool_name": "Edit", "cwd": str(root),
-                    "tool_input": {"file_path": str(root / "tasks.yaml")},
-                },
-                "Stop": {"hook_event_name": "Stop", "cwd": str(root)},
-            }
-            env = {
-                **os.environ,
-                "CLAUDE_PLUGIN_ROOT": str(SCRIPTS.parent),
-                "UV_CACHE_DIR": str(record / "runtime" / "uv-cache"),
-                "UV_OFFLINE": "1",
-                "WAYSTONE_VERIFIER_SESSION": "1",
-            }
-            before = delegate._verify_worktree_state(root)
-            for event, groups in manifest.items():
-                for group in groups:
-                    for hook in group["hooks"]:
-                        with self.subTest(event=event, command=hook["command"]):
-                            result = subprocess.run(
-                                ["bash", "-c", hook["command"]],
-                                input=_json.dumps(payloads[event]), cwd=root,
-                                capture_output=True, text=True, env=env,
-                            )
-                            self.assertEqual(result.returncode, 0, result.stderr)
-                            self.assertEqual(result.stdout, "")
-                            self.assertEqual(result.stderr, "")
-            self.assertEqual(delegate._verify_worktree_state(root), before)
+            snapshot: dict[str, tuple] = {}
+            for path in base.rglob("*"):
+                rel = path.relative_to(base)
+                if skip_git and ".git" in rel.parts:
+                    continue
+                info = path.lstat()
+                if _stat.S_ISLNK(info.st_mode):
+                    snapshot[str(rel)] = ("symlink", info.st_mode, os.readlink(path))
+                elif path.is_dir():
+                    snapshot[str(rel)] = ("directory", info.st_mode, b"")
+                else:
+                    snapshot[str(rel)] = ("file", info.st_mode, path.read_bytes())
+            return snapshot
+
+        def changed_paths(before: dict, after: dict) -> set[str]:
+            return {path for path in before.keys() | after.keys()
+                    if before.get(path) != after.get(path)}
+
+        entries = []
+        for event, groups in manifest.items():
+            for group_index, group in enumerate(groups):
+                for hook_index, hook in enumerate(group["hooks"]):
+                    entry_id = f"{event}[{group_index}].hooks[{hook_index}]"
+                    entries.append((entry_id, event, hook["command"]))
+        self.assertEqual(
+            {event for _entry_id, event, _command in entries},
+            {"PreToolUse", "SessionStart", "PreCompact", "SessionEnd", "PostToolUse", "Stop"},
+        )
+
+        for entry_id, event, manifest_command in entries:
+            for verifier_session in (False, True):
+                with self.subTest(entry=entry_id, verifier_session=verifier_session), \
+                        tempfile.TemporaryDirectory() as d:
+                    base = Path(d)
+                    root = base / "worktree"
+                    home = base / "home"
+                    root.mkdir()
+                    home.mkdir()
+                    init_repo(root)
+                    (root / ".gitignore").write_text(".waystone/\n")
+                    (root / ".waystone.yml").write_text("version: 1\nproject: demo\n")
+                    (root / "tasks.yaml").write_text(
+                        "version: 1\nproject: demo\nmilestones: []\ntasks: []\n")
+                    (root / "ROADMAP.md").write_text("stale roadmap\n")
+                    git(root, "add", "-A")
+                    git(root, "commit", "-qm", "hook fixture")
+                    marker = root / ".waystone" / "boundary-hooks-enabled"
+                    marker.parent.mkdir()
+                    marker.touch()
+
+                    payloads = {
+                        "PreToolUse": {
+                            "hook_event_name": "PreToolUse", "tool_name": "Read",
+                            "cwd": str(root),
+                            "tool_input": {"file_path": str(root / "tasks.yaml")},
+                        },
+                        "SessionStart": {
+                            "hook_event_name": "SessionStart", "source": "startup",
+                            "cwd": str(root),
+                        },
+                        "PreCompact": {
+                            "hook_event_name": "PreCompact", "trigger": "manual",
+                            "cwd": str(root),
+                        },
+                        "SessionEnd": {
+                            "hook_event_name": "SessionEnd", "reason": "other",
+                            "cwd": str(root),
+                        },
+                        "PostToolUse": {
+                            "hook_event_name": "PostToolUse", "tool_name": "Edit",
+                            "cwd": str(root),
+                            "tool_input": {"file_path": str(root / "tasks.yaml")},
+                        },
+                        "Stop": {"hook_event_name": "Stop", "cwd": str(root)},
+                    }
+                    env = {
+                        "PATH": os.environ["PATH"],
+                        "HOME": str(home),
+                        "WAYSTONE_HOME": str(home / ".waystone"),
+                        "CLAUDE_PLUGIN_ROOT": str(SCRIPTS.parent),
+                        "UV_CACHE_DIR": uv_cache_dir,
+                        "UV_OFFLINE": "1",
+                        "PYTHONNOUSERSITE": "1",
+                    }
+                    if verifier_session:
+                        env["WAYSTONE_VERIFIER_SESSION"] = "1"
+                    self.assertNotEqual(env["HOME"], os.environ.get("HOME"))
+                    self.assertEqual("WAYSTONE_VERIFIER_SESSION" in env, verifier_session)
+                    worktree_before = tree_snapshot(root, skip_git=True)
+                    home_before = tree_snapshot(home)
+                    # Full git-aware manifest (status/HEAD/untracked/ignored/lstat) — the same
+                    # capture the old hermetic assertion used; path snapshots alone miss
+                    # git-only mutations.
+                    git_state_before = delegate._verify_worktree_state(root)
+
+                    command = manifest_command
+                    if mutation == entry_id:
+                        command = ":"
+                        mutation_seen = True
+                    result = subprocess.run(
+                        ["bash", "-c", command], input=_json.dumps(payloads[event]),
+                        cwd=root, capture_output=True, text=True, env=env, timeout=30,
+                    )
+                    worktree_after = tree_snapshot(root, skip_git=True)
+                    home_after = tree_snapshot(home)
+
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    if verifier_session:
+                        self.assertEqual(result.stdout, "")
+                        self.assertEqual(result.stderr, "")
+                        self.assertEqual(worktree_after, worktree_before)
+                        self.assertEqual(home_after, home_before)
+                        self.assertEqual(
+                            delegate._verify_worktree_state(root), git_state_before)
+                        if event == "SessionStart":
+                            self.assertFalse((home / ".waystone" / "registry.lock").exists())
+                        continue
+
+                    self.assertEqual(result.stderr, "")
+                    self.assertEqual(
+                        changed_paths(worktree_before, worktree_after),
+                        expected_worktree_writes[event],
+                    )
+                    self.assertEqual(
+                        changed_paths(home_before, home_after), expected_home_writes[event])
+                    # Normal-mode hooks may write declared files but never move git state.
+                    git_state_after = delegate._verify_worktree_state(root)
+                    self.assertEqual(git_state_after["head"], git_state_before["head"])
+                    if event == "PostToolUse":
+                        self.assertEqual(git_state_after["status"], b" M ROADMAP.md\x00")
+                    else:
+                        self.assertEqual(
+                            git_state_after["status"], git_state_before["status"])
+                    if event == "PreToolUse":
+                        self.assertNotEqual(result.stdout, "")
+                        output = _json.loads(result.stdout)
+                        self.assertEqual(
+                            output["hookSpecificOutput"]["permissionDecision"], "deny")
+                    elif event == "SessionStart":
+                        output = _json.loads(result.stdout)
+                        hook_output = output["hookSpecificOutput"]
+                        self.assertEqual(hook_output["hookEventName"], "SessionStart")
+                        self.assertIn("[waystone] project: demo", hook_output["additionalContext"])
+                        self.assertTrue((home / ".waystone" / "registry.lock").is_file())
+                    elif event in {"PreCompact", "SessionEnd"}:
+                        self.assertEqual(result.stdout, "")
+                        resume_file = root / ".waystone" / "resume.md"
+                        self.assertIn("captured_head:", resume_file.read_text())
+                    elif event == "PostToolUse":
+                        self.assertEqual(result.stdout, "")
+                        self.assertIn("# Roadmap — demo", (root / "ROADMAP.md").read_text())
+                    else:
+                        self.assertEqual(result.stdout, "waystone check: no active-delta warnings\n")
+        if mutation is not None:
+            self.assertTrue(mutation_seen, f"unknown hook mutation target: {mutation}")
 
     def test_verifier_worktree_mutation_is_fail_loud_and_records_no_artifact(self):
         with tempfile.TemporaryDirectory() as d:
