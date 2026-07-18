@@ -21,6 +21,7 @@ import fcntl
 import hashlib
 import json
 import os
+import platform
 import re
 import signal
 import shlex
@@ -90,6 +91,11 @@ _CLAUDE_EFFORT_VALUES = ("low", "medium", "high", "xhigh")
 _VERIFIER_SESSION_ENV = "WAYSTONE_VERIFIER_SESSION"
 _CODEX_RUNNER_VERIFIED_MARKER = "codex-runner-verified"
 _CODEX_RUNNER_VERIFICATION_LOCK = "codex-runner-verification.lock"
+_CODEX_RUNNER_PROOF_SCHEMA = "waystone-codex-runner-proof-1"
+_CODEX_SANDBOX_INVOCATION_CONTRACT = "codex-exec:workspace-write:v1"
+_IOPLATFORM_UUID_RE = re.compile(
+    r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
 # Fan-out carrier attribution (§4.2 / ADR-0001): recorded in the immutable packet as an
 # improve/cclog join key. v1 has a single carrier; the instance id is a pre-generated correlation id.
 _CARRIER_NAMES = ("claude-workflow",)
@@ -711,9 +717,10 @@ def _run_env_prep(worktree: Path, commands: list[str]) -> tuple[int, str]:
 
 
 # ---- runners (§6 — isolated and transport-injectable for tests) ---------------
-def _codex_exec_command(worktree: Path, model: str, effort: str | None) -> list[str]:
+def _codex_exec_command(
+        codex_path: str, worktree: Path, model: str, effort: str | None) -> list[str]:
     """Build the shared Codex command prefix so probe and task use the same sandbox policy."""
-    cmd = ["codex", "exec", "-C", str(worktree), "-m", model, "-s", "workspace-write"]
+    cmd = [codex_path, "exec", "-C", str(worktree), "-m", model, "-s", "workspace-write"]
     if effort is not None:
         cmd.extend(["-c", f'model_reasoning_effort="{effort}"'])
     return cmd
@@ -827,9 +834,12 @@ def _probe_transport_kind(rc: int | None, stderr: str) -> str:
     return "runner-exit"
 
 
-def _run_codex_sandbox_probe(worktree: Path, model: str, record_dir: Path,
-                             *, effort: str | None = None) -> dict:
+def _run_codex_sandbox_probe(
+        worktree: Path, model: str, record_dir: Path, *, effort: str | None = None,
+        fingerprint: dict | None = None) -> dict:
     """Prove one sandboxed write in a disposable sibling and record every failure path."""
+    if fingerprint is None:
+        fingerprint = _codex_runner_fingerprint(worktree)
     start = time.monotonic()
     probe_worktree = _sandbox_probe_worktree_path(worktree, record_dir)
     probe_name = f".waystone-sandbox-write-probe-{record_dir.name}"
@@ -899,7 +909,26 @@ def _run_codex_sandbox_probe(worktree: Path, model: str, record_dir: Path,
                 result["creation_state"] = "created"
 
         if failure is None:
-            cmd = _codex_exec_command(probe_worktree, model, effort)
+            try:
+                probed_mount = _worktree_mount_identity(probe_worktree)
+            except WorkflowError as e:
+                failure = ("evidence", str(e))
+            else:
+                result["worktree_cache_mount"] = probed_mount
+                if probed_mount != fingerprint.get("worktree_cache_mount"):
+                    failure = (
+                        "evidence",
+                        "sandbox probe target mount does not match the runtime fingerprint; "
+                        "refusing to prove one mount and record another",
+                    )
+
+        if failure is None:
+            codex_path = fingerprint.get("resolved_codex_path")
+            if not isinstance(codex_path, str) or not Path(codex_path).is_absolute():
+                failure = ("evidence", "runtime fingerprint has no resolved absolute Codex path")
+
+        if failure is None:
+            cmd = _codex_exec_command(codex_path, probe_worktree, model, effort)
             cmd.extend([
                 "--ephemeral", "--color", "never", "--output-last-message",
                 str(record_dir / "sandbox-probe-last-message.md"), "--json",
@@ -990,15 +1019,170 @@ def _run_codex_sandbox_probe(worktree: Path, model: str, record_dir: Path,
     return result
 
 
-def _record_codex_runner_verified(marker_path: Path) -> None:
-    """Record the checkout-local one-time Codex runner proof atomically."""
+def _worktree_mount_identity(worktree: Path) -> dict:
+    """Identify the storage boundary containing the disposable runner worktree."""
     try:
-        write_text_atomic(marker_path, "verified\n")
+        resolved = worktree.resolve(strict=True)
+        device = resolved.stat().st_dev
+        device_boundary = resolved
+        while device_boundary.parent != device_boundary:
+            if device_boundary.parent.stat().st_dev != device:
+                break
+            device_boundary = device_boundary.parent
+        filesystem = os.statvfs(resolved)
+    except OSError as e:
+        raise WorkflowError(
+            f"cannot identify Codex runner worktree cache mount for {worktree}: {e}") from e
+    # This deliberately identifies only a device/fsid boundary. A bind-mount reconfiguration that
+    # preserves both values is outside this lightweight proof's detection scope.
+    return {
+        "device_boundary": str(device_boundary),
+        "device": device,
+        "filesystem_id": int(filesystem.f_fsid),
+        "readonly": bool(filesystem.f_flag & os.ST_RDONLY),
+    }
+
+
+def _stable_host_identity(system: str) -> dict:
+    """Return a stable host identifier stronger than a mutable hostname."""
+    if system == "Linux":
+        source = Path("/etc/machine-id")
+        try:
+            value = source.read_text(encoding="utf-8").strip()
+        except OSError as e:
+            raise WorkflowError(f"cannot read Linux machine identity from {source}: {e}") from e
+        if not value or value.casefold() == "uninitialized":
+            raise WorkflowError(
+                f"cannot read Linux machine identity from {source}: invalid sentinel or empty "
+                "value")
+        if re.fullmatch(r"[0-9a-f]{32}", value) is None or value == "0" * 32:
+            raise WorkflowError(
+                f"cannot read Linux machine identity from {source}: expected a non-zero "
+                "32-character lowercase hexadecimal value")
+        return {"source": str(source), "value": value}
+    if system == "Darwin":
+        try:
+            process = subprocess.run(
+                ["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise WorkflowError(f"cannot query macOS IOPlatformUUID: {e}") from e
+        match = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', process.stdout)
+        if process.returncode != 0 or match is None:
+            detail = process.stderr.strip() or f"rc {process.returncode}"
+            raise WorkflowError(f"cannot query macOS IOPlatformUUID: {detail}")
+        value = match.group(1)
+        if _IOPLATFORM_UUID_RE.fullmatch(value) is None:
+            raise WorkflowError("cannot query macOS IOPlatformUUID: invalid UUID format")
+        return {"source": "IOPlatformUUID", "value": value}
+    raise WorkflowError(
+        f"cannot fingerprint Codex runner: no stable host identity source for {system}")
+
+
+def _host_sandbox_observation(system: str) -> dict:
+    """Record only cheap host sandbox state that is directly observable.
+
+    Linux's LSM inventory does not describe the complete policy applied to a future Codex process.
+    It is kept separate from the invocation contract and is therefore best-effort evidence only.
+    """
+    if system != "Linux":
+        return {"source": "none", "status": "not-observed", "platform": system}
+    source = Path("/sys/kernel/security/lsm")
+    try:
+        value = source.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return {"source": str(source), "status": "not-present"}
+    except OSError:
+        return {"source": str(source), "status": "unavailable"}
+    return {"source": str(source), "status": "observed", "value": value}
+
+
+def _codex_runner_fingerprint(worktree: Path) -> dict:
+    """Collect the machine/runtime axes that make one sandbox probe reusable."""
+    executable = shutil.which("codex")
+    if executable is None:
+        raise WorkflowError("cannot fingerprint Codex runner: codex executable is not on PATH")
+    try:
+        resolved = Path(executable).resolve(strict=True)
+        info = resolved.stat()
+    except OSError as e:
+        raise WorkflowError(
+            f"cannot resolve Codex runner executable {executable}: {e}") from e
+    if not stat.S_ISREG(info.st_mode) or not os.access(resolved, os.X_OK):
+        raise WorkflowError(
+            f"cannot fingerprint Codex runner: resolved executable is not an executable file: "
+            f"{resolved}")
+    try:
+        version_process = subprocess.run(
+            [str(resolved), "--version"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise WorkflowError(f"cannot query Codex runner version from {resolved}: {e}") from e
+    version = {
+        "stdout": version_process.stdout.strip(),
+        "stderr": version_process.stderr.strip(),
+    }
+    if version_process.returncode != 0 or not any(version.values()):
+        detail = "\n".join(value for value in version.values() if value)
+        raise WorkflowError(
+            f"cannot query Codex runner version from {resolved}: "
+            f"{detail or f'rc {version_process.returncode}'}")
+    uname = platform.uname()
+    if not all((uname.node, uname.system, uname.machine, uname.release, uname.version)):
+        raise WorkflowError("cannot fingerprint Codex runner: platform identity is incomplete")
+    return {
+        "schema": _CODEX_RUNNER_PROOF_SCHEMA,
+        "resolved_codex_path": str(resolved),
+        "codex_version": version,
+        "codex_executable": {"size": info.st_size, "mtime_ns": info.st_mtime_ns},
+        "machine": uname.node,
+        "host_identity": _stable_host_identity(uname.system),
+        "platform": {"system": uname.system, "machine": uname.machine},
+        "kernel": {"release": uname.release, "version": uname.version},
+        "sandbox_invocation_contract": _CODEX_SANDBOX_INVOCATION_CONTRACT,
+        "host_sandbox_observation": _host_sandbox_observation(uname.system),
+        "worktree_cache_mount": _worktree_mount_identity(worktree),
+    }
+
+
+def _codex_runner_proof_text(fingerprint: dict) -> str:
+    return json.dumps(
+        fingerprint, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+
+
+def _codex_runner_comparison_view(fingerprint: dict) -> dict:
+    """Return deterministic proof axes; version stderr is retained only as diagnostics."""
+    comparable = json.loads(json.dumps(fingerprint, ensure_ascii=False))
+    version = comparable.get("codex_version")
+    if isinstance(version, dict):
+        # Presence and string type remain contractual; only the dynamic diagnostic value is ignored.
+        # Residual: a static stderr-only version shim can replace its child without detection when
+        # the shim's own size and mtime_ns also stay fixed. Comparing stderr would instead make
+        # ordinary timestamp/PID diagnostics invalidate every proof, so stderr remains record-only.
+        if isinstance(version.get("stderr"), str):
+            version["stderr"] = "<recorded-diagnostic>"
+    return comparable
+
+
+def _codex_runner_mismatch_axes(recorded: dict, current: dict) -> list[str]:
+    recorded_view = _codex_runner_comparison_view(recorded)
+    current_view = _codex_runner_comparison_view(current)
+    return sorted(
+        key for key in set(recorded_view) | set(current_view)
+        if key not in recorded_view or key not in current_view
+        or json.dumps(recorded_view.get(key), ensure_ascii=False, sort_keys=True)
+        != json.dumps(current_view.get(key), ensure_ascii=False, sort_keys=True))
+
+
+def _record_codex_runner_verified(marker_path: Path, fingerprint: dict) -> None:
+    """Record the checkout-local, runtime-bound Codex runner proof atomically."""
+    try:
+        write_text_atomic(marker_path, _codex_runner_proof_text(fingerprint))
     except OSError as e:
         raise WorkflowError(f"cannot record Codex runner proof at {marker_path}: {e}") from e
 
 
-def _codex_runner_marker_recorded(marker_path: Path, *, diagnose: bool = True) -> bool:
+def _codex_runner_marker_recorded(
+        marker_path: Path, fingerprint: dict, *, diagnose: bool = True) -> bool:
     try:
         info = marker_path.lstat()
     except FileNotFoundError:
@@ -1025,22 +1209,55 @@ def _codex_runner_marker_recorded(marker_path: Path, *, diagnose: bool = True) -
                 file=sys.stderr,
             )
         return False
-    valid = stat.S_ISREG(info.st_mode)
-    if valid:
-        try:
-            valid = marker_path.read_bytes() == b"verified\n"
-        except OSError as e:
-            raise WorkflowError(f"cannot read Codex runner proof at {marker_path}: {e}") from e
-    if not valid and diagnose:
-        print(
-            f"waystone: invalid checkout-local Codex runner proof at {marker_path} is ignored; "
-            "a fresh preflight probe will run and replace it with the verified contract value",
-            file=sys.stderr,
-        )
-    return valid
+    if not stat.S_ISREG(info.st_mode):
+        if diagnose:
+            print(
+                f"waystone: invalid checkout-local Codex runner proof at {marker_path} is "
+                "ignored; a fresh preflight probe will run and replace it with the versioned "
+                "JSON contract",
+                file=sys.stderr,
+            )
+        return False
+    try:
+        content = marker_path.read_bytes()
+    except OSError as e:
+        raise WorkflowError(f"cannot read Codex runner proof at {marker_path}: {e}") from e
+    if content == b"verified\n":
+        if diagnose:
+            print(
+                f"waystone: legacy fixed-string Codex runner proof at {marker_path} is ignored; "
+                "a fresh preflight probe will run and replace it with the versioned JSON contract",
+                file=sys.stderr,
+            )
+        return False
+    try:
+        recorded = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        recorded = None
+    if not isinstance(recorded, dict):
+        if diagnose:
+            print(
+                f"waystone: invalid checkout-local Codex runner proof at {marker_path} is "
+                "ignored; a fresh preflight probe will run and replace it with the versioned "
+                "JSON contract",
+                file=sys.stderr,
+            )
+        return False
+    axes = _codex_runner_mismatch_axes(recorded, fingerprint)
+    if axes:
+        if diagnose:
+            print(
+                f"waystone: checkout-local Codex runner proof fingerprint mismatch at "
+                f"{marker_path} ({', '.join(axes)}); a fresh preflight probe will run and "
+                "replace it with the current runtime contract",
+                file=sys.stderr,
+            )
+        return False
+    return True
 
 
-def _codex_runner_verification_marker(record_dir: Path) -> tuple[Path, bool] | None:
+def _codex_runner_verification_marker(
+        record_dir: Path, fingerprint: dict) -> tuple[Path, bool, dict] | None:
     """The checkout-local marker and whether its one-time runner proof is already recorded."""
     if not (record_dir / "exposure.json").exists():
         return None  # low-level probe contracts have no project exposure and always exercise probe
@@ -1052,7 +1269,7 @@ def _codex_runner_verification_marker(record_dir: Path) -> tuple[Path, bool] | N
     project_root = Path(root)
     load_config(project_root)  # validate config and surface legacy-key removal guidance
     marker_path = ensure_project_state_dir(project_root) / _CODEX_RUNNER_VERIFIED_MARKER
-    return marker_path, _codex_runner_marker_recorded(marker_path)
+    return marker_path, _codex_runner_marker_recorded(marker_path, fingerprint), fingerprint
 
 
 def _run_codex(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
@@ -1064,20 +1281,46 @@ def _run_codex(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
     `.waystone` project state here. Result capture still includes only Git material."""
     start = time.monotonic()
     try:
-        def probe_if_needed(verification: tuple[Path, bool] | None) -> None:
+        runtime_fingerprint = _codex_runner_fingerprint(worktree)
+
+        def probe_if_needed(verification: tuple[Path, bool, dict] | None) -> None:
+            nonlocal runtime_fingerprint
             if verification is not None and verification[1]:
+                runtime_fingerprint = verification[2]
                 return
-            probe = _run_codex_sandbox_probe(worktree, model, record_dir, effort=effort)
+            expected_fingerprint = verification[2] if verification is not None \
+                else runtime_fingerprint
+            probe = _run_codex_sandbox_probe(
+                worktree, model, record_dir, effort=effort,
+                fingerprint=expected_fingerprint)
+            current_fingerprint = _codex_runner_fingerprint(worktree)
+            axes = _codex_runner_mismatch_axes(expected_fingerprint, current_fingerprint)
+            if axes:
+                raise _RunnerProbeEvidenceFailure(
+                    "runner preflight passed but the Codex runtime fingerprint changed during "
+                    f"the probe ({', '.join(axes)}); refusing to record stale proof",
+                    probe,
+                )
+            probed_mount = probe.get("worktree_cache_mount")
+            if probed_mount != current_fingerprint.get("worktree_cache_mount"):
+                raise _RunnerProbeEvidenceFailure(
+                    "runner preflight passed but its write target mount differs from the "
+                    "current runtime fingerprint; refusing to record stale proof",
+                    probe,
+                )
+            # Source the recorded mount axis from the path where the probe actually wrote.
+            current_fingerprint["worktree_cache_mount"] = probed_mount
+            runtime_fingerprint = current_fingerprint
             if verification is None:
                 return
             try:
-                _record_codex_runner_verified(verification[0])
+                _record_codex_runner_verified(verification[0], current_fingerprint)
             except WorkflowError as e:
                 raise _RunnerProbeEvidenceFailure(
                     f"runner preflight passed but its checkout-local proof could not be "
                     f"recorded: {e}", probe) from e
 
-        verification = _codex_runner_verification_marker(record_dir)
+        verification = _codex_runner_verification_marker(record_dir, runtime_fingerprint)
         if verification is None:
             probe_if_needed(None)
         else:
@@ -1092,9 +1335,10 @@ def _run_codex(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
                 raise _RunnerProbeEvidenceFailure(
                     f"cannot lock checkout-local Codex runner proof {lock_path}: {e}") from e
             try:
+                locked_fingerprint = _codex_runner_fingerprint(worktree)
                 probe_if_needed(
                     (verification[0], _codex_runner_marker_recorded(
-                        verification[0], diagnose=False)))
+                        verification[0], locked_fingerprint, diagnose=True), locked_fingerprint))
             finally:
                 fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
                 lock_stream.close()
@@ -1113,7 +1357,8 @@ def _run_codex(worktree: Path, model: str, prompt_path: Path, record_dir: Path,
         raise _RunnerProbeFailure(
             f"runner preflight internal error (harness defect, not transport): "
             f"{type(e).__name__}: {e}", result) from e
-    cmd = _codex_exec_command(worktree, model, effort)
+    codex_path = runtime_fingerprint["resolved_codex_path"]
+    cmd = _codex_exec_command(codex_path, worktree, model, effort)
     cmd.extend(["--color", "never", "--output-last-message",
                 str(record_dir / "last_message.md"), "--json"])
     env = {**os.environ, "UV_CACHE_DIR": str(worktree / ".waystone-uv-cache")}
@@ -1821,7 +2066,9 @@ def _run_codex_verifier(worktree: Path, model: str, focus: str,
                         record_dir: Path, *, effort: str | None = None) -> tuple[int, str]:
     """Run the native Codex verifier in a read-only, ephemeral session with schema output."""
     output, jsonl, stderr = _prepare_codex_verifier_transport(record_dir)
-    cmd = ["codex", "exec", "-C", str(worktree), "-m", model, "-s", "read-only"]
+    fingerprint = _codex_runner_fingerprint(worktree)
+    cmd = [fingerprint["resolved_codex_path"], "exec", "-C", str(worktree),
+           "-m", model, "-s", "read-only"]
     if effort is not None:
         cmd.extend(["-c", f'model_reasoning_effort="{effort}"'])
     cmd.extend([

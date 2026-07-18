@@ -56,6 +56,27 @@ def init_repo(root: Path):
     git(root, "commit", "-qm", "c0")
 
 
+def _synthetic_codex_fingerprint(worktree: Path) -> dict:
+    """Hermetic fingerprint for tests that exercise transport behavior, not discovery."""
+    return {
+        "schema": "waystone-codex-runner-proof-1",
+        "resolved_codex_path": "/opt/waystone-test/bin/codex",
+        "codex_version": {"stdout": "codex-cli 9.9.9", "stderr": "test build"},
+        "codex_executable": {"size": 1234, "mtime_ns": 5678},
+        "machine": "test-machine",
+        "host_identity": {
+            "source": "/etc/machine-id", "value": "0123456789abcdef0123456789abcdef",
+        },
+        "platform": {"system": "TestOS", "machine": "test-arch"},
+        "kernel": {"release": "1.2.3", "version": "test-kernel"},
+        "sandbox_invocation_contract": "codex-exec:workspace-write:v1",
+        "host_sandbox_observation": {
+            "source": "none", "status": "not-observed", "platform": "TestOS",
+        },
+        "worktree_cache_mount": delegate._worktree_mount_identity(worktree),
+    }
+
+
 class ReleaseToMainTests(unittest.TestCase):
     def _repo(self, d: str, *, shipped_change: bool) -> tuple[Path, dict[str, str]]:
         import os
@@ -5114,7 +5135,8 @@ class UninitializedRootGateTests(unittest.TestCase):
                     self.assertEqual(common.ensure_project_state_dir(root), state)
                     atomic.assert_called_once_with(ignore, "*\n")
                 delegate._record_codex_runner_verified(
-                    state / "codex-runner-verified")
+                    state / "codex-runner-verified",
+                    {"schema": "waystone-codex-runner-proof-1"})
 
                 self.assertEqual(ignore.read_text(), "*\n")
                 self.assertEqual(git(
@@ -8357,6 +8379,13 @@ class DelegatePacketTests(unittest.TestCase):
 class DelegateRunTests(unittest.TestCase):
     """Full run flow with injected Codex/Claude runners; never invokes a real runner."""
 
+    def setUp(self):
+        self.original_fingerprint = delegate._codex_runner_fingerprint
+        delegate._codex_runner_fingerprint = _synthetic_codex_fingerprint
+
+    def tearDown(self):
+        delegate._codex_runner_fingerprint = self.original_fingerprint
+
     def _project(self, d) -> tuple[Path, Path]:
         root = Path(d) / "repo"
         root.mkdir()
@@ -8833,7 +8862,7 @@ class DelegateRunTests(unittest.TestCase):
             original = delegate.subprocess.run
 
             def fake(cmd, **kwargs):
-                if cmd[:2] != ["codex", "exec"]:
+                if len(cmd) < 2 or cmd[1] != "exec" or not Path(cmd[0]).is_absolute():
                     return original(cmd, **kwargs)
                 calls.append((cmd, kwargs))
                 kwargs["stderr"].write(stderr)
@@ -8848,7 +8877,8 @@ class DelegateRunTests(unittest.TestCase):
                 delegate.subprocess.run = original
             self.assertEqual(len(calls), 1)
             command = calls[0][0]
-            self.assertEqual(command[:2], ["codex", "exec"])
+            self.assertTrue(Path(command[0]).is_absolute())
+            self.assertEqual(command[1], "exec")
             probe_worktree = Path(command[command.index("-C") + 1])
             self.assertNotEqual(probe_worktree, worktree)
             self.assertEqual(
@@ -8867,7 +8897,7 @@ class DelegateRunTests(unittest.TestCase):
             stderr = "landlock sandbox: failed to write: Permission denied\n"
             original = delegate._run_codex_sandbox_probe
 
-            def fail_probe(worktree, model, record_dir, *, effort=None):
+            def fail_probe(worktree, model, record_dir, *, effort=None, fingerprint=None):
                 (record_dir / "sandbox-probe.stderr").write_text(stderr, encoding="utf-8")
                 raise delegate._RunnerSandboxUnusable(
                     f"runner sandbox unusable: {stderr}")
@@ -8903,7 +8933,7 @@ class DelegateRunTests(unittest.TestCase):
             }
             original = delegate._run_codex_sandbox_probe
 
-            def fail_probe(worktree, model, record_dir, *, effort=None):
+            def fail_probe(worktree, model, record_dir, *, effort=None, fingerprint=None):
                 raise delegate._RunnerProbeTransportFailure(
                     "runner preflight transport failed: invalid API key", probe)
 
@@ -8961,7 +8991,7 @@ class DelegateRunTests(unittest.TestCase):
             observed = {}
 
             def fake(cmd, **kwargs):
-                if cmd[:2] != ["codex", "exec"]:
+                if len(cmd) < 2 or cmd[1] != "exec" or not Path(cmd[0]).is_absolute():
                     return original(cmd, **kwargs)
                 probe_worktree = Path(cmd[cmd.index("-C") + 1])
                 observed["worktree"] = probe_worktree
@@ -9016,7 +9046,7 @@ class DelegateRunTests(unittest.TestCase):
                     record.mkdir()
 
                     def fake(cmd, **kwargs):
-                        if cmd[:2] != ["codex", "exec"]:
+                        if len(cmd) < 2 or cmd[1] != "exec" or not Path(cmd[0]).is_absolute():
                             return original(cmd, **kwargs)
                         kwargs["stderr"].write(stderr)
                         return types.SimpleNamespace(returncode=1)
@@ -9074,7 +9104,7 @@ class DelegateRunTests(unittest.TestCase):
             original_read_text = Path.read_text
 
             def fake_run(cmd, **kwargs):
-                if cmd[:2] != ["codex", "exec"]:
+                if len(cmd) < 2 or cmd[1] != "exec" or not Path(cmd[0]).is_absolute():
                     return original_run(cmd, **kwargs)
                 probe_worktree = Path(cmd[cmd.index("-C") + 1])
                 (probe_worktree / f".waystone-sandbox-write-probe-{record.name}").write_text(
@@ -9171,7 +9201,7 @@ class DelegateRunTests(unittest.TestCase):
             original = delegate.subprocess.run
 
             def fake(cmd, **kwargs):
-                if cmd[:2] != ["codex", "exec"]:
+                if len(cmd) < 2 or cmd[1] != "exec" or not Path(cmd[0]).is_absolute():
                     return original(cmd, **kwargs)
                 probe_worktree = Path(cmd[cmd.index("-C") + 1])
                 self.assertFalse((probe_worktree / "stale.txt").exists())
@@ -9203,7 +9233,7 @@ class DelegateRunTests(unittest.TestCase):
             ticks = iter((10.0, 11.0, 13.0, 16.0))
 
             def fake(cmd, **kwargs):
-                if cmd[:2] != ["codex", "exec"]:
+                if len(cmd) < 2 or cmd[1] != "exec" or not Path(cmd[0]).is_absolute():
                     return original_run(cmd, **kwargs)
                 if "--ephemeral" in cmd:
                     probe_worktree = Path(cmd[cmd.index("-C") + 1])
@@ -9550,6 +9580,45 @@ def _latest_rec(root, home):
 
 
 class CodexRunnerVerificationGateTests(unittest.TestCase):
+    def setUp(self):
+        self.proof = {
+            "schema": "waystone-codex-runner-proof-1",
+            "resolved_codex_path": "/opt/waystone-test/bin/codex",
+            "codex_version": {"stdout": "codex-cli 9.9.9", "stderr": "build test"},
+            "codex_executable": {"size": 1234, "mtime_ns": 5678},
+            "machine": "test-machine",
+            "host_identity": {"source": "/etc/machine-id", "value": "test-host-id"},
+            "platform": {"system": "TestOS", "machine": "test-arch"},
+            "kernel": {"release": "1.2.3", "version": "test-kernel"},
+            "sandbox_invocation_contract": "codex-exec:workspace-write:v1",
+            "host_sandbox_observation": {
+                "source": "none", "status": "not-observed", "platform": "TestOS",
+            },
+            "worktree_cache_mount": {
+                "device_boundary": "/test-cache", "device": 42, "filesystem_id": 84,
+                "readonly": False,
+            },
+        }
+        self.original_fingerprint = delegate._codex_runner_fingerprint
+        delegate._codex_runner_fingerprint = lambda _worktree: _json.loads(
+            _json.dumps(self.proof))
+
+    def tearDown(self):
+        delegate._codex_runner_fingerprint = self.original_fingerprint
+
+    def _proof_text(self, proof=None):
+        return _json.dumps(
+            self.proof if proof is None else proof,
+            ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+
+    def _passed_probe(self):
+        return {
+            "schema": "waystone-sandbox-probe-1",
+            "outcome": "passed",
+            "worktree_cache_mount": _json.loads(_json.dumps(
+                self.proof["worktree_cache_mount"])),
+        }
+
     @staticmethod
     def _fixture(base: Path, config: bytes) -> tuple[Path, Path, Path, Path]:
         import json
@@ -9567,6 +9636,447 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
         prompt = base / "prompt.txt"
         prompt.write_text("implement", encoding="utf-8")
         return root, worktree, record, prompt
+
+    def test_runtime_fingerprint_records_all_bounded_axes(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            fake_bin = base / "bin"
+            fake_bin.mkdir()
+            fake_codex = fake_bin / "codex"
+            fake_codex.write_text(
+                "#!/bin/sh\nprintf 'codex-cli 7.8.9\\n'\nprintf 'build abc\\n' >&2\n")
+            fake_codex.chmod(0o755)
+            worktree = base / "worktree"
+            worktree.mkdir()
+            host = {"source": "test-host", "value": "host-123"}
+            observed = {"source": "test", "status": "observed", "value": "test-lsm"}
+            with mock.patch.dict(os.environ, {"PATH": str(fake_bin)}), \
+                 mock.patch.object(delegate, "_stable_host_identity", return_value=host), \
+                 mock.patch.object(delegate, "_host_sandbox_observation", return_value=observed):
+                proof = self.original_fingerprint(worktree)
+
+            self.assertEqual(proof["schema"], "waystone-codex-runner-proof-1")
+            self.assertEqual(proof["resolved_codex_path"], str(fake_codex.resolve()))
+            self.assertEqual(proof["codex_version"], {
+                "stdout": "codex-cli 7.8.9", "stderr": "build abc"})
+            self.assertEqual(proof["codex_executable"], {
+                "size": fake_codex.stat().st_size, "mtime_ns": fake_codex.stat().st_mtime_ns})
+            self.assertEqual(proof["host_identity"], host)
+            self.assertTrue(proof["platform"]["system"])
+            self.assertTrue(proof["platform"]["machine"])
+            self.assertTrue(proof["kernel"]["release"])
+            self.assertTrue(proof["kernel"]["version"])
+            self.assertEqual(
+                proof["sandbox_invocation_contract"], "codex-exec:workspace-write:v1")
+            self.assertEqual(proof["host_sandbox_observation"], observed)
+            mount = proof["worktree_cache_mount"]
+            self.assertTrue(Path(mount["device_boundary"]).is_absolute())
+            self.assertEqual(mount["device"], worktree.stat().st_dev)
+            self.assertIsInstance(mount["filesystem_id"], int)
+            self.assertIsInstance(mount["readonly"], bool)
+
+    def test_stable_host_identity_uses_machine_id_and_ioplatformuuid_fail_closed(self):
+        import types
+        from unittest import mock
+
+        machine_id = "0123456789abcdef0123456789abcdef"
+        with mock.patch.object(Path, "read_text", return_value=machine_id + "\n"):
+            self.assertEqual(delegate._stable_host_identity("Linux"), {
+                "source": "/etc/machine-id", "value": machine_id})
+        with mock.patch.object(Path, "read_text", side_effect=OSError("denied")):
+            with self.assertRaisesRegex(common.WorkflowError, "machine identity.*denied"):
+                delegate._stable_host_identity("Linux")
+
+        for invalid in ("", " \n", "uninitialized\n", "UNINITIALIZED"):
+            with self.subTest(machine_id=invalid), \
+                 mock.patch.object(Path, "read_text", return_value=invalid):
+                with self.assertRaisesRegex(common.WorkflowError, "invalid sentinel|empty"):
+                    delegate._stable_host_identity("Linux")
+
+        for invalid in (
+                "linux-host-id", "0123456789ABCDEF0123456789ABCDEF",
+                "0123456789abcdef0123456789abcde", "g" * 32, "0" * 32):
+            with self.subTest(machine_id=invalid), \
+                 mock.patch.object(Path, "read_text", return_value=invalid):
+                with self.assertRaisesRegex(
+                        common.WorkflowError,
+                        "non-zero 32-character lowercase hexadecimal"):
+                    delegate._stable_host_identity("Linux")
+
+        uuid = "01234567-89AB-CDEF-0123-456789ABCDEF"
+        ioreg = types.SimpleNamespace(
+            returncode=0,
+            stdout=f'    "IOPlatformUUID" = "{uuid}"\n',
+            stderr="",
+        )
+        with mock.patch.object(delegate.subprocess, "run", return_value=ioreg):
+            self.assertEqual(delegate._stable_host_identity("Darwin"), {
+                "source": "IOPlatformUUID", "value": uuid})
+        malformed = types.SimpleNamespace(
+            returncode=0, stdout='"IOPlatformUUID" = "not-a-uuid"\n', stderr="")
+        with mock.patch.object(delegate.subprocess, "run", return_value=malformed):
+            with self.assertRaisesRegex(common.WorkflowError, "invalid UUID format"):
+                delegate._stable_host_identity("Darwin")
+        failed = types.SimpleNamespace(returncode=1, stdout="", stderr="not available")
+        with mock.patch.object(delegate.subprocess, "run", return_value=failed):
+            with self.assertRaisesRegex(common.WorkflowError, "IOPlatformUUID.*not available"):
+                delegate._stable_host_identity("Darwin")
+
+    def test_linux_lsm_observation_is_explicitly_best_effort(self):
+        from unittest import mock
+
+        with mock.patch.object(Path, "read_text", return_value="landlock,apparmor\n"):
+            self.assertEqual(delegate._host_sandbox_observation("Linux"), {
+                "source": "/sys/kernel/security/lsm", "status": "observed",
+                "value": "landlock,apparmor",
+            })
+        with mock.patch.object(Path, "read_text", side_effect=PermissionError("denied")):
+            self.assertEqual(delegate._host_sandbox_observation("Linux"), {
+                "source": "/sys/kernel/security/lsm", "status": "unavailable",
+            })
+
+    def test_environment_machine_id_and_version_mismatch_reprobe_and_name_axes(self):
+        import contextlib
+        import io
+        import types
+
+        original = b"version: 1\nproject: demo\ndelegation:\n  enabled: true\n"
+        cases = (
+            ({"machine": "other-machine",
+              "host_identity": {"source": "/etc/machine-id", "value": "other-host-id"},
+              "platform": {"system": "OtherOS", "machine": "other-arch"},
+              "worktree_cache_mount": {
+                  "device_boundary": "/foreign-cache", "device": 999,
+                  "filesystem_id": 1000, "readonly": True,
+              }}, ("machine", "host_identity", "platform", "worktree_cache_mount")),
+            ({"codex_version": {"stdout": "codex-cli 9.9.8", "stderr": "build test"}},
+             ("codex_version",)),
+            ({"codex_version": {"stdout": "codex-cli 9.9.9"}},
+             ("codex_version",)),
+            ({"codex_version": {"stdout": "codex-cli 9.9.9", "stderr": None}},
+             ("codex_version",)),
+            ({"worktree_cache_mount": {
+                "device_boundary": "/test-cache", "device": 42, "filesystem_id": 84,
+                "readonly": 0,
+            }}, ("worktree_cache_mount",)),
+            ({"foreign_axis": None}, ("foreign_axis",)),
+        )
+        for changes, changed_axes in cases:
+            with self.subTest(changed_axes=changed_axes), tempfile.TemporaryDirectory() as d:
+                root, worktree, record, prompt = self._fixture(Path(d), original)
+                marker = root / ".waystone" / "codex-runner-verified"
+                marker.parent.mkdir()
+                (marker.parent / ".gitignore").write_text("*\n")
+                stale = _json.loads(_json.dumps(self.proof))
+                stale.update(changes)
+                marker.write_text(self._proof_text(stale))
+                calls = {"probe": 0, "runner": 0}
+                original_probe = delegate._run_codex_sandbox_probe
+                original_run = delegate.subprocess.run
+
+                def probe(*args, **kwargs):
+                    calls["probe"] += 1
+                    result = self._passed_probe()
+                    result["worktree_cache_mount"] = _json.loads(_json.dumps(
+                        kwargs["fingerprint"]["worktree_cache_mount"]))
+                    return result
+
+                def run(*args, **kwargs):
+                    if args and args[0] and args[0][0] == "git":
+                        return original_run(*args, **kwargs)
+                    calls["runner"] += 1
+                    return types.SimpleNamespace(returncode=0)
+
+                delegate._run_codex_sandbox_probe = probe
+                delegate.subprocess.run = run
+                stderr = io.StringIO()
+                try:
+                    with contextlib.redirect_stderr(stderr):
+                        self.assertEqual(delegate._run_codex(
+                            worktree, "gpt-test", prompt, record)[0], 0)
+                finally:
+                    delegate.subprocess.run = original_run
+                    delegate._run_codex_sandbox_probe = original_probe
+
+                self.assertEqual(calls, {"probe": 1, "runner": 1})
+                self.assertEqual(marker.read_text(), self._proof_text())
+                self.assertIn("fingerprint mismatch", stderr.getvalue())
+                for axis in changed_axes:
+                    self.assertIn(axis, stderr.getvalue())
+
+    def test_legacy_fixed_string_marker_is_reprobed_and_rewritten_as_json(self):
+        import contextlib
+        import io
+        import types
+
+        original = b"version: 1\nproject: demo\ndelegation:\n  enabled: true\n"
+        with tempfile.TemporaryDirectory() as d:
+            root, worktree, record, prompt = self._fixture(Path(d), original)
+            marker = root / ".waystone" / "codex-runner-verified"
+            marker.parent.mkdir()
+            (marker.parent / ".gitignore").write_text("*\n")
+            marker.write_text("verified\n")
+            calls = {"probe": 0, "runner": 0}
+            original_probe = delegate._run_codex_sandbox_probe
+            original_run = delegate.subprocess.run
+
+            def probe(*args, **kwargs):
+                calls["probe"] += 1
+                return self._passed_probe()
+
+            def run(*args, **kwargs):
+                if args and args[0] and args[0][0] == "git":
+                    return original_run(*args, **kwargs)
+                calls["runner"] += 1
+                return types.SimpleNamespace(returncode=0)
+
+            delegate._run_codex_sandbox_probe = probe
+            delegate.subprocess.run = run
+            stderr = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(stderr):
+                    self.assertEqual(delegate._run_codex(
+                        worktree, "gpt-test", prompt, record)[0], 0)
+            finally:
+                delegate.subprocess.run = original_run
+                delegate._run_codex_sandbox_probe = original_probe
+
+            self.assertEqual(calls, {"probe": 1, "runner": 1})
+            self.assertEqual(marker.read_text(), self._proof_text())
+            self.assertIn("legacy fixed-string", stderr.getvalue())
+            self.assertIn("fresh preflight probe", stderr.getvalue())
+
+    def test_fixed_stdout_shim_replacement_reprobes_via_executable_stat_identity(self):
+        import contextlib
+        import io
+        import types
+        from unittest import mock
+
+        original = b"version: 1\nproject: demo\ndelegation:\n  enabled: true\n"
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, worktree, record, prompt = self._fixture(base, original)
+            marker = root / ".waystone" / "codex-runner-verified"
+            marker.parent.mkdir()
+            (marker.parent / ".gitignore").write_text("*\n")
+            fake_bin = base / "bin"
+            fake_bin.mkdir()
+            fake_codex = fake_bin / "codex"
+            fake_codex.write_text("#!/bin/sh\nprintf 'codex-cli stable\\n'\n")
+            fake_codex.chmod(0o755)
+            path = str(fake_bin) + os.pathsep + os.environ["PATH"]
+            host = {"source": "test-host", "value": "host-123"}
+            observed = {"source": "test", "status": "observed", "value": "test-lsm"}
+
+            with mock.patch.dict(os.environ, {"PATH": path}), \
+                 mock.patch.object(delegate, "_stable_host_identity", return_value=host), \
+                 mock.patch.object(delegate, "_host_sandbox_observation", return_value=observed):
+                stale = self.original_fingerprint(worktree)
+                marker.write_text(delegate._codex_runner_proof_text(stale))
+                fake_codex.write_text(
+                    "#!/bin/sh\n# replaced implementation\nprintf 'codex-cli stable\\n'\n")
+                fake_codex.chmod(0o755)
+                replaced = fake_codex.stat()
+                os.utime(fake_codex, ns=(
+                    replaced.st_atime_ns,
+                    max(replaced.st_mtime_ns, stale["codex_executable"]["mtime_ns"] + 1_000_000),
+                ))
+                current = self.original_fingerprint(worktree)
+
+                self.assertEqual(stale["codex_version"], current["codex_version"])
+                self.assertNotEqual(stale["codex_executable"], current["codex_executable"])
+                calls = {"probe": 0, "runner": 0}
+                original_probe = delegate._run_codex_sandbox_probe
+                original_run = delegate.subprocess.run
+
+                def probe(*args, **kwargs):
+                    calls["probe"] += 1
+                    result = self._passed_probe()
+                    result["worktree_cache_mount"] = _json.loads(_json.dumps(
+                        kwargs["fingerprint"]["worktree_cache_mount"]))
+                    return result
+
+                def run(*args, **kwargs):
+                    command = args[0] if args else []
+                    if (command and command[0] == "git") or (
+                            len(command) >= 2
+                            and command[0] == str(fake_codex.resolve())
+                            and command[1] == "--version"):
+                        return original_run(*args, **kwargs)
+                    calls["runner"] += 1
+                    return types.SimpleNamespace(returncode=0)
+
+                delegate._run_codex_sandbox_probe = probe
+                delegate.subprocess.run = run
+                stderr = io.StringIO()
+                try:
+                    with mock.patch.object(
+                            delegate, "_codex_runner_fingerprint",
+                            side_effect=self.original_fingerprint):
+                        with contextlib.redirect_stderr(stderr):
+                            self.assertEqual(delegate._run_codex(
+                                worktree, "gpt-test", prompt, record)[0], 0)
+                finally:
+                    delegate.subprocess.run = original_run
+                    delegate._run_codex_sandbox_probe = original_probe
+
+            self.assertEqual(calls, {"probe": 1, "runner": 1})
+            self.assertEqual(_json.loads(marker.read_text()), current)
+            self.assertIn("codex_executable", stderr.getvalue())
+
+    def test_dynamic_version_stderr_uses_resolved_path_and_still_records_proof(self):
+        import types
+        from unittest import mock
+
+        original = b"version: 1\nproject: demo\ndelegation:\n  enabled: true\n"
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, _worktree, record, prompt = self._fixture(base, original)
+            fake_bin = base / "bin"
+            fake_bin.mkdir()
+            fake_codex = fake_bin / "codex"
+            fake_codex.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = --version ]; then\n"
+                "  printf 'codex-cli stable\\n'\n"
+                "  printf 'pid=%s\\n' \"$$\" >&2\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 99\n")
+            fake_codex.chmod(0o755)
+            resolved = str(fake_codex.resolve())
+            path = str(fake_bin) + os.pathsep + os.environ["PATH"]
+            host = {"source": "test-host", "value": "host-123"}
+            observed = {"source": "test", "status": "observed", "value": "test-lsm"}
+            commands = []
+            version_stderr = []
+            original_run = delegate.subprocess.run
+
+            def run(command, **kwargs):
+                if command[0] == "git":
+                    return original_run(command, **kwargs)
+                self.assertEqual(command[0], resolved)
+                if command[1] == "--version":
+                    process = original_run(command, **kwargs)
+                    version_stderr.append(process.stderr.strip())
+                    return process
+                self.assertEqual(command[1], "exec")
+                commands.append(command)
+                if "--ephemeral" in command:
+                    probe_worktree = Path(command[command.index("-C") + 1])
+                    (probe_worktree / f".waystone-sandbox-write-probe-{record.name}").write_text(
+                        "waystone-sandbox-write-probe\n")
+                return types.SimpleNamespace(returncode=0)
+
+            with mock.patch.dict(os.environ, {"PATH": path}), \
+                 mock.patch.object(delegate, "_stable_host_identity", return_value=host), \
+                 mock.patch.object(delegate, "_host_sandbox_observation", return_value=observed), \
+                 mock.patch.object(
+                     delegate, "_codex_runner_fingerprint",
+                     side_effect=self.original_fingerprint), \
+                 mock.patch.object(delegate.subprocess, "run", side_effect=run):
+                self.assertEqual(delegate._run_codex(
+                    root, "gpt-test", prompt, record)[0], 0)
+                self.assertEqual(delegate._run_codex(
+                    root, "gpt-test", prompt, record)[0], 0)
+
+            self.assertGreaterEqual(len(set(version_stderr)), 2)
+            self.assertEqual(sum("--ephemeral" in command for command in commands), 1)
+            self.assertEqual(len(commands), 3)
+            self.assertTrue(all(command[0] == resolved for command in commands))
+            marker = root / ".waystone" / "codex-runner-verified"
+            proof = _json.loads(marker.read_text())
+            self.assertEqual(proof["resolved_codex_path"], resolved)
+            self.assertEqual(proof["codex_version"]["stdout"], "codex-cli stable")
+            self.assertIn(proof["codex_version"]["stderr"], version_stderr)
+
+    def test_probe_refuses_to_record_a_different_mount_than_its_write_target(self):
+        from unittest import mock
+
+        original = b"version: 1\nproject: demo\ndelegation:\n  enabled: true\n"
+        with tempfile.TemporaryDirectory() as d:
+            root, _worktree, record, _prompt = self._fixture(Path(d), original)
+            probe_target = delegate._sandbox_probe_worktree_path(root, record)
+            foreign_mount = {
+                "device_boundary": "/foreign-cache", "device": 9001,
+                "filesystem_id": 9002, "readonly": True,
+            }
+            observed_targets = []
+
+            def mount_identity(target):
+                observed_targets.append(target)
+                self.assertEqual(target, probe_target)
+                self.assertTrue(target.is_dir())
+                return foreign_mount
+
+            with mock.patch.object(
+                    delegate, "_worktree_mount_identity", side_effect=mount_identity):
+                with self.assertRaisesRegex(
+                        delegate._RunnerProbeEvidenceFailure,
+                        "refusing to prove one mount and record another") as failure:
+                    delegate._run_codex_sandbox_probe(
+                        root, "gpt-test", record, fingerprint=self.proof)
+
+            self.assertEqual(observed_targets, [probe_target])
+            self.assertEqual(
+                failure.exception.probe_result["worktree_cache_mount"], foreign_mount)
+            self.assertEqual(failure.exception.probe_result["cleanup_state"], "cleaned")
+            self.assertFalse(os.path.lexists(probe_target))
+
+    def test_lock_recheck_reports_fingerprint_mismatch_discovered_after_initial_check(self):
+        import contextlib
+        import io
+        import types
+        from unittest import mock
+
+        original = b"version: 1\nproject: demo\ndelegation:\n  enabled: true\n"
+        with tempfile.TemporaryDirectory() as d:
+            root, worktree, record, prompt = self._fixture(Path(d), original)
+            marker = root / ".waystone" / "codex-runner-verified"
+            marker.parent.mkdir()
+            (marker.parent / ".gitignore").write_text("*\n")
+            marker.write_text(self._proof_text())
+            stale = _json.loads(_json.dumps(self.proof))
+            stale["host_identity"]["value"] = "appeared-after-initial-check"
+            calls = {"probe": 0, "runner": 0}
+            original_probe = delegate._run_codex_sandbox_probe
+            original_run = delegate.subprocess.run
+            original_flock = delegate.fcntl.flock
+
+            def probe(*args, **kwargs):
+                calls["probe"] += 1
+                return self._passed_probe()
+
+            def run(*args, **kwargs):
+                if args and args[0] and args[0][0] == "git":
+                    return original_run(*args, **kwargs)
+                calls["runner"] += 1
+                return types.SimpleNamespace(returncode=0)
+
+            def flock(stream, operation):
+                result = original_flock(stream, operation)
+                if operation == delegate.fcntl.LOCK_EX:
+                    marker.write_text(self._proof_text(stale))
+                return result
+
+            delegate._run_codex_sandbox_probe = probe
+            delegate.subprocess.run = run
+            stderr = io.StringIO()
+            try:
+                with mock.patch.object(delegate.fcntl, "flock", side_effect=flock):
+                    with contextlib.redirect_stderr(stderr):
+                        self.assertEqual(delegate._run_codex(
+                            worktree, "gpt-test", prompt, record)[0], 0)
+            finally:
+                delegate.subprocess.run = original_run
+                delegate._run_codex_sandbox_probe = original_probe
+
+            self.assertEqual(calls, {"probe": 1, "runner": 1})
+            self.assertEqual(marker.read_text(), self._proof_text())
+            self.assertIn("fingerprint mismatch", stderr.getvalue())
+            self.assertIn("host_identity", stderr.getvalue())
 
     def test_concurrent_runner_paths_probe_once_under_checkout_local_lock(self):
         import concurrent.futures
@@ -9590,8 +10100,8 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
             original_probe = delegate._run_codex_sandbox_probe
             original_run = delegate.subprocess.run
 
-            def verification(record):
-                result = original_verification(record)
+            def verification(record, candidate_worktree):
+                result = original_verification(record, candidate_worktree)
                 if not getattr(initial_check_local, "passed", False):
                     initial_check_local.passed = True
                     with counter_lock:
@@ -9605,7 +10115,7 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
                 probe_started.set()
                 if not release_probe.wait(5):
                     raise AssertionError("test did not release the first probe")
-                return {"schema": "waystone-sandbox-probe-1", "outcome": "passed"}
+                return self._passed_probe()
 
             def run(*args, **kwargs):
                 if args and args[0] and args[0][0] == "git":
@@ -9636,8 +10146,8 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
 
             self.assertEqual(calls, {"initial_absent": 2, "probe": 1, "runner": 2})
             self.assertEqual((root / ".waystone.yml").read_bytes(), original)
-            self.assertEqual(
-                (root / ".waystone" / "codex-runner-verified").read_text(), "verified\n")
+            self.assertEqual((root / ".waystone" / "codex-runner-verified").read_text(),
+                             self._proof_text())
 
     def test_success_records_local_marker_and_skips_probe(self):
         import types
@@ -9655,7 +10165,7 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
 
             def probe(*args, **kwargs):
                 calls["probe"] += 1
-                return {"schema": "waystone-sandbox-probe-1", "outcome": "passed"}
+                return self._passed_probe()
 
             def run(*args, **kwargs):
                 if args and args[0] and args[0][0] == "git":
@@ -9676,8 +10186,9 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
 
             self.assertEqual(calls, {"probe": 1, "runner": 2})
             self.assertEqual((root / ".waystone.yml").read_bytes(), original)
-            self.assertEqual(
-                (root / ".waystone" / "codex-runner-verified").read_text(), "verified\n")
+            marker = root / ".waystone" / "codex-runner-verified"
+            self.assertEqual(marker.read_text(), self._proof_text())
+            self.assertEqual(_json.loads(marker.read_text()), self.proof)
             self.assertEqual((root / ".waystone" / ".gitignore").read_text(), "*\n")
             self.assertFalse(any(record.glob("sandbox-probe*")))
 
@@ -9700,7 +10211,7 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
 
             def probe(*args, **kwargs):
                 calls["probe"] += 1
-                return {"schema": "waystone-sandbox-probe-1", "outcome": "passed"}
+                return self._passed_probe()
 
             def run(*args, **kwargs):
                 if args and args[0] and args[0][0] == "git":
@@ -9737,7 +10248,7 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
             state = root / ".waystone"
             state.mkdir()
             (state / ".gitignore").write_text("*\n")
-            (state / "codex-runner-verified").write_text("verified\n")
+            (state / "codex-runner-verified").write_text(self._proof_text())
             calls = {"runner": 0}
             original_probe = delegate._run_codex_sandbox_probe
             original_run = delegate.subprocess.run
@@ -9772,7 +10283,7 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
             root, worktree, record, prompt = self._fixture(Path(d), original)
             marker = root / ".waystone" / "codex-runner-verified"
             marker.parent.mkdir()
-            marker.write_text("verified\n")
+            marker.write_text(self._proof_text())
             self.assertEqual(git(root, "add", "-f", str(marker)).returncode, 0)
             self.assertEqual(git(root, "commit", "-qm", "track invalid proof").returncode, 0)
             self.assertEqual(git(
@@ -9784,7 +10295,7 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
 
             def probe(*args, **kwargs):
                 calls["probe"] += 1
-                return {"schema": "waystone-sandbox-probe-1", "outcome": "passed"}
+                return self._passed_probe()
 
             def run(*args, **kwargs):
                 if args and args[0] and args[0][0] == "git":
@@ -9829,7 +10340,7 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
 
                 def probe(*args, **kwargs):
                     calls["probe"] += 1
-                    return {"schema": "waystone-sandbox-probe-1", "outcome": "passed"}
+                    return self._passed_probe()
 
                 def run(*args, **kwargs):
                     if args and args[0] and args[0][0] == "git":
@@ -9847,13 +10358,13 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
                         with contextlib.redirect_stderr(stderr):
                             self.assertEqual(delegate._run_codex(
                                 worktree, "gpt-test", prompt, record)[0], 0)
-                        atomic.assert_called_once_with(marker, "verified\n")
+                        atomic.assert_called_once_with(marker, self._proof_text())
                 finally:
                     delegate.subprocess.run = original_run
                     delegate._run_codex_sandbox_probe = original_probe
 
                 self.assertEqual(calls, {"probe": 1, "runner": 1})
-                self.assertEqual(marker.read_bytes(), b"verified\n")
+                self.assertEqual(marker.read_text(), self._proof_text())
                 self.assertIn("invalid", stderr.getvalue())
                 self.assertIn("fresh preflight probe", stderr.getvalue())
 
@@ -9890,8 +10401,7 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
             calls = {"runner": 0}
             original_probe = delegate._run_codex_sandbox_probe
             original_run = delegate.subprocess.run
-            delegate._run_codex_sandbox_probe = lambda *args, **kwargs: {
-                "schema": "waystone-sandbox-probe-1", "outcome": "passed"}
+            delegate._run_codex_sandbox_probe = lambda *args, **kwargs: self._passed_probe()
 
             def run(*args, **kwargs):
                 calls["runner"] += 1
@@ -13340,6 +13850,13 @@ class ImproveL2BAdversarialTests(unittest.TestCase):
 class DelegateVerifyTests(unittest.TestCase):
     """0.8.0 M2 §11/§12 — same-base independent verifier transport (synthetic only)."""
 
+    def setUp(self):
+        self.original_fingerprint = delegate._codex_runner_fingerprint
+        delegate._codex_runner_fingerprint = _synthetic_codex_fingerprint
+
+    def tearDown(self):
+        delegate._codex_runner_fingerprint = self.original_fingerprint
+
     _PROFILE = (
         "schema: waystone-profile-1\nbindings:\n"
         "  implementer: {execution: external-runner, backend: \"codex:gpt-5.6-sol\"}\n"
@@ -13525,7 +14042,7 @@ class DelegateVerifyTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertEqual(_json.loads(output), payload)
             cmd, kwargs = calls[0]
-            self.assertEqual(cmd[:2], ["codex", "exec"])
+            self.assertEqual(cmd[:2], ["/opt/waystone-test/bin/codex", "exec"])
             self.assertEqual(cmd[cmd.index("-C") + 1], str(worktree))
             self.assertEqual(cmd[cmd.index("-s") + 1], "read-only")
             self.assertEqual(
@@ -14232,6 +14749,13 @@ class DelegateVerifyTests(unittest.TestCase):
 class UvCacheTests(unittest.TestCase):
     """0.8.0 M2 §13 — worktree-local uv cache env and result-snapshot exclusion."""
 
+    def setUp(self):
+        self.original_fingerprint = delegate._codex_runner_fingerprint
+        delegate._codex_runner_fingerprint = _synthetic_codex_fingerprint
+
+    def tearDown(self):
+        delegate._codex_runner_fingerprint = self.original_fingerprint
+
     def test_env_is_passed_to_prep_and_codex_without_global_mutation(self):
         import os
         import types
@@ -14250,8 +14774,12 @@ class UvCacheTests(unittest.TestCase):
                 command = args[0]
                 if command[0] == "git":
                     return orig(*args, **kwargs)
+                if (len(command) >= 2 and command[1] == "--version") or \
+                        command[0] == "/usr/sbin/ioreg":
+                    return orig(*args, **kwargs)
                 seen.append(kwargs.get("env"))
-                if command[:2] == ["codex", "exec"] and "--ephemeral" in command:
+                if (len(command) >= 2 and Path(command[0]).is_absolute()
+                        and command[1] == "exec" and "--ephemeral" in command):
                     probe_worktree = Path(command[command.index("-C") + 1])
                     (probe_worktree / f".waystone-sandbox-write-probe-{record.name}").write_text(
                         "waystone-sandbox-write-probe\n")
@@ -14315,6 +14843,9 @@ class UvCacheTests(unittest.TestCase):
 
             def fake(cmd, **kwargs):
                 if cmd[0] == "git":
+                    return orig(cmd, **kwargs)
+                if (len(cmd) >= 2 and cmd[1] == "--version") or \
+                        cmd[0] == "/usr/sbin/ioreg":
                     return orig(cmd, **kwargs)
                 commands.append(cmd)
                 if "--ephemeral" in cmd:
