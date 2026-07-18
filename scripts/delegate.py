@@ -1125,7 +1125,7 @@ def _execution_principal_identity() -> dict:
 
 
 def _codex_config_root_identity() -> dict:
-    """Resolve the effective Codex config root and record its filesystem identity."""
+    """Record the effective Codex config input and root filesystem diagnostics."""
     configured = os.environ.get("CODEX_HOME")
     source = "CODEX_HOME" if configured else "default"
     configured_path = configured if configured else "~/.codex"
@@ -1148,23 +1148,38 @@ def _codex_config_root_identity() -> dict:
     try:
         info = resolved.stat()
     except FileNotFoundError:
-        return {**identity, "status": "not-present"}
+        root_observation = {"status": "not-present"}
     except OSError as e:
-        return {**identity, "status": "not-observed", "reason": type(e).__name__}
-    return {
-        **identity,
-        "status": "present",
-        "stat": {
-            "device": info.st_dev,
-            "inode": info.st_ino,
-            "mode": info.st_mode,
-            "uid": info.st_uid,
-            "gid": info.st_gid,
-            "size": info.st_size,
-            "mtime_ns": info.st_mtime_ns,
-            "ctime_ns": info.st_ctime_ns,
-        },
-    }
+        root_observation = {"status": "not-observed", "reason": type(e).__name__}
+    else:
+        root_observation = {
+            "status": "present",
+            "stat": {
+                "device": info.st_dev,
+                "inode": info.st_ino,
+                "mode": info.st_mode,
+                "uid": info.st_uid,
+                "gid": info.st_gid,
+                "size": info.st_size,
+                "mtime_ns": info.st_mtime_ns,
+                "ctime_ns": info.st_ctime_ns,
+            },
+        }
+
+    config_path = resolved / "config.toml"
+    config_identity = {"path": str(config_path)}
+    try:
+        config_content = config_path.read_bytes()
+    except FileNotFoundError:
+        config_identity["status"] = "not-present"
+    except OSError as e:
+        config_identity.update({"status": "not-observed", "reason": type(e).__name__})
+    else:
+        config_identity.update({
+            "status": "present",
+            "digest": "sha256:" + hashlib.sha256(config_content).hexdigest(),
+        })
+    return {**identity, **root_observation, "config_toml": config_identity}
 
 
 def _not_observed_process_axis(source: Path, reason: str) -> dict:
@@ -1298,6 +1313,12 @@ def _codex_runner_comparison_view(fingerprint: dict) -> dict:
         # ordinary timestamp/PID diagnostics invalidate every proof, so stderr remains record-only.
         if isinstance(version.get("stderr"), str):
             version["stderr"] = "<recorded-diagnostic>"
+    config_root = comparable.get("codex_config_root")
+    if isinstance(config_root, dict):
+        # Codex creates sessions and logs under this directory. Its stat result is useful for
+        # diagnosis but is neither stable during a probe nor an identity for config.toml content.
+        for diagnostic in ("status", "stat", "reason"):
+            config_root.pop(diagnostic, None)
     process_context = comparable.get("process_context")
     if isinstance(process_context, dict):
         for axis in ("Seccomp", "NoNewPrivs", "CapEff", "security_label"):
@@ -1339,8 +1360,15 @@ def _codex_runner_reuse_blockers(fingerprint: dict) -> list[str]:
         blockers.append("execution_principal")
 
     config_root = fingerprint.get("codex_config_root")
-    if (not isinstance(config_root, dict)
-            or config_root.get("status") not in ("present", "not-present")):
+    config_toml = config_root.get("config_toml") if isinstance(config_root, dict) else None
+    config_status = config_toml.get("status") if isinstance(config_toml, dict) else None
+    if (not isinstance(config_toml, dict)
+            or not isinstance(config_toml.get("path"), str) or not config_toml["path"]
+            or config_status not in ("present", "not-present")
+            or (config_status == "present"
+                and (not isinstance(config_toml.get("digest"), str)
+                     or re.fullmatch(r"sha256:[0-9a-f]{64}", config_toml["digest"]) is None))
+            or (config_status == "not-present" and "digest" in config_toml)):
         blockers.append("codex_config_root")
 
     process_context = fingerprint.get("process_context")

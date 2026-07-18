@@ -88,6 +88,10 @@ def _synthetic_codex_fingerprint(worktree: Path) -> dict:
         "codex_config_root": {
             "source": "default", "configured_path": "~/.codex",
             "resolved_path": "/home/waystone-test/.codex", "status": "not-present",
+            "config_toml": {
+                "path": "/home/waystone-test/.codex/config.toml",
+                "status": "not-present",
+            },
         },
         "process_context": {
             "Seccomp": {"source": "/proc/self/status", "status": "observed", "value": "2"},
@@ -10900,6 +10904,10 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
             "codex_config_root": {
                 "source": "default", "configured_path": "~/.codex",
                 "resolved_path": "/home/waystone-test/.codex", "status": "not-present",
+                "config_toml": {
+                    "path": "/home/waystone-test/.codex/config.toml",
+                    "status": "not-present",
+                },
             },
             "process_context": {
                 "Seccomp": {
@@ -11052,13 +11060,15 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
                         common.WorkflowError, rf"execution principal.*{function} denied"):
                     delegate._execution_principal_identity()
 
-    def test_codex_config_root_records_resolved_stat_identity_and_honest_absence(self):
+    def test_codex_config_root_records_digest_only_stat_diagnostics_and_honest_absence(self):
         from unittest import mock
 
         with tempfile.TemporaryDirectory() as d:
             base = Path(d)
             target = base / "actual-codex-home"
             target.mkdir()
+            config_content = b'model = "gpt-test"\nsecret = "must-not-be-recorded"\n'
+            (target / "config.toml").write_bytes(config_content)
             configured = base / "codex-home-link"
             configured.symlink_to(target, target_is_directory=True)
             with mock.patch.dict(os.environ, {"CODEX_HOME": str(configured)}):
@@ -11079,7 +11089,13 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
                     "mtime_ns": info.st_mtime_ns,
                     "ctime_ns": info.st_ctime_ns,
                 },
+                "config_toml": {
+                    "path": str(target.resolve() / "config.toml"),
+                    "status": "present",
+                    "digest": "sha256:" + hashlib.sha256(config_content).hexdigest(),
+                },
             })
+            self.assertNotIn("must-not-be-recorded", _json.dumps(identity))
 
             home = base / "missing-home"
             home.mkdir()
@@ -11091,18 +11107,172 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
                 "configured_path": "~/.codex",
                 "resolved_path": str((home / ".codex").resolve()),
                 "status": "not-present",
+                "config_toml": {
+                    "path": str((home / ".codex" / "config.toml").resolve()),
+                    "status": "not-present",
+                },
             })
 
-            unavailable = _json.loads(_json.dumps(self.proof))
-            unavailable["codex_config_root"] = {
-                "source": "CODEX_HOME",
-                "configured_path": str(base / "unavailable"),
-                "resolved_path": str(base / "unavailable"),
+    def test_codex_config_toml_read_failure_blocks_marker_reuse(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            config_home = Path(d) / "codex-home"
+            config_home.mkdir()
+            (config_home / "config.toml").write_text('model = "gpt-test"\n')
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(config_home)}), \
+                 mock.patch.object(
+                     Path, "read_bytes", side_effect=PermissionError("config denied")):
+                identity = delegate._codex_config_root_identity()
+
+            self.assertEqual(identity["config_toml"], {
+                "path": str(config_home.resolve() / "config.toml"),
                 "status": "not-observed",
                 "reason": "PermissionError",
-            }
+            })
+            unavailable = _json.loads(_json.dumps(self.proof))
+            unavailable["codex_config_root"] = identity
             self.assertEqual(
                 delegate._codex_runner_reuse_blockers(unavailable), ["codex_config_root"])
+
+    def test_codex_config_content_change_reprobes_without_directory_stat_change(self):
+        import contextlib
+        import io
+        import types
+        from unittest import mock
+
+        original = b"version: 1\nproject: demo\ndelegation:\n  enabled: true\n"
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, worktree, record, prompt = self._fixture(base, original)
+            config_home = base / "codex-home"
+            config_home.mkdir()
+            config_path = config_home / "config.toml"
+            config_a = b'model = "gpt-a"\nsecret = "proof-secret-a"\n'
+            config_b = b'model = "gpt-b"\nsecret = "proof-secret-b"\n'
+            config_path.write_bytes(config_a)
+            directory_stat = config_home.stat()
+            calls = {"probe": 0, "runner": 0}
+            original_probe = delegate._run_codex_sandbox_probe
+            original_run = delegate.subprocess.run
+
+            def fingerprint(_worktree):
+                proof = _json.loads(_json.dumps(self.proof))
+                proof["codex_config_root"] = delegate._codex_config_root_identity()
+                return proof
+
+            def probe(*args, **kwargs):
+                calls["probe"] += 1
+                result = self._passed_probe()
+                result["worktree_cache_mount"] = _json.loads(_json.dumps(
+                    kwargs["fingerprint"]["worktree_cache_mount"]))
+                return result
+
+            def run(*args, **kwargs):
+                if args and args[0] and args[0][0] == "git":
+                    return original_run(*args, **kwargs)
+                calls["runner"] += 1
+                return types.SimpleNamespace(returncode=0)
+
+            delegate._codex_runner_fingerprint = fingerprint
+            delegate._run_codex_sandbox_probe = probe
+            delegate.subprocess.run = run
+            try:
+                with mock.patch.dict(os.environ, {"CODEX_HOME": str(config_home)}), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(delegate._run_codex(
+                        worktree, "gpt-test", prompt, record)[0], 0)
+                    first_marker = (
+                        root / ".waystone" / "codex-runner-verified").read_text()
+                    config_path.write_bytes(config_b)
+                    changed_directory_stat = config_home.stat()
+                    self.assertEqual(
+                        (directory_stat.st_ino, directory_stat.st_size,
+                         directory_stat.st_mtime_ns, directory_stat.st_ctime_ns),
+                        (changed_directory_stat.st_ino, changed_directory_stat.st_size,
+                         changed_directory_stat.st_mtime_ns,
+                         changed_directory_stat.st_ctime_ns),
+                    )
+                    self.assertEqual(delegate._run_codex(
+                        worktree, "gpt-test", prompt, record)[0], 0)
+            finally:
+                delegate.subprocess.run = original_run
+                delegate._run_codex_sandbox_probe = original_probe
+
+            marker = (root / ".waystone" / "codex-runner-verified").read_text()
+            self.assertEqual(calls, {"probe": 2, "runner": 2})
+            self.assertNotEqual(first_marker, marker)
+            self.assertEqual(
+                _json.loads(marker)["codex_config_root"]["config_toml"]["digest"],
+                "sha256:" + hashlib.sha256(config_b).hexdigest(),
+            )
+            self.assertNotIn("proof-secret-a", marker)
+            self.assertNotIn("proof-secret-b", marker)
+
+    def test_probe_config_root_directory_churn_is_diagnostic_and_absent_config_reuses(self):
+        import types
+        from unittest import mock
+
+        original = b"version: 1\nproject: demo\ndelegation:\n  enabled: true\n"
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, worktree, record, prompt = self._fixture(base, original)
+            config_home = base / "codex-home"
+            config_home.mkdir()
+            before = _json.loads(_json.dumps(self.proof))
+            before["codex_config_root"] = {
+                "source": "CODEX_HOME",
+                "configured_path": str(config_home),
+                "resolved_path": str(config_home.resolve()),
+                "status": "present",
+                "stat": {"mtime_ns": 1, "ctime_ns": 1},
+                "config_toml": {
+                    "path": str(config_home.resolve() / "config.toml"),
+                    "status": "not-present",
+                },
+            }
+            after = _json.loads(_json.dumps(before))
+            after["codex_config_root"]["stat"] = {"mtime_ns": 2, "ctime_ns": 2}
+            fingerprint_calls = {"count": 0}
+            calls = {"probe": 0, "runner": 0}
+            original_probe = delegate._run_codex_sandbox_probe
+            original_run = delegate.subprocess.run
+
+            def fingerprint(_worktree):
+                fingerprint_calls["count"] += 1
+                proof = before if fingerprint_calls["count"] <= 2 else after
+                return _json.loads(_json.dumps(proof))
+
+            def probe(*args, **kwargs):
+                calls["probe"] += 1
+                result = self._passed_probe()
+                result["worktree_cache_mount"] = _json.loads(_json.dumps(
+                    kwargs["fingerprint"]["worktree_cache_mount"]))
+                return result
+
+            def run(*args, **kwargs):
+                if args and args[0] and args[0][0] == "git":
+                    return original_run(*args, **kwargs)
+                calls["runner"] += 1
+                return types.SimpleNamespace(returncode=0)
+
+            delegate._codex_runner_fingerprint = fingerprint
+            delegate._run_codex_sandbox_probe = probe
+            delegate.subprocess.run = run
+            try:
+                with mock.patch.dict(os.environ, {"CODEX_HOME": str(config_home)}):
+                    self.assertEqual(delegate._run_codex(
+                        worktree, "gpt-test", prompt, record)[0], 0)
+                    self.assertEqual(delegate._run_codex(
+                        worktree, "gpt-test", prompt, record)[0], 0)
+            finally:
+                delegate.subprocess.run = original_run
+                delegate._run_codex_sandbox_probe = original_probe
+
+            marker = _json.loads(
+                (root / ".waystone" / "codex-runner-verified").read_text())
+            self.assertEqual(calls, {"probe": 1, "runner": 2})
+            self.assertEqual(marker["codex_config_root"], after["codex_config_root"])
 
     def test_linux_process_context_records_each_axis_and_marks_unobserved_explicitly(self):
         from unittest import mock
