@@ -19,7 +19,7 @@ Markers in fenced code blocks are ignored.
 
 Markers (HTML comments embedded in PR comment bodies):
   waystone-review-cycle  : a freeze — {round_id, cycle, target_sha, base_sha, reviewers,
-                                       profile_fingerprint}
+                                       profile_fingerprint, rendered_request_digest}
   waystone-review-result : an external reviewer reply footer — {reviewer, review_cycle, reviewed_sha, verdict, decision_required}
   waystone-findings      : adjudication outcome for a cycle — {cycle, resolved}
   waystone-approval      : SHA-bound human approval — {sha, by}
@@ -66,7 +66,8 @@ ROUND_REQUEST_BINDING_SCHEMA = "waystone-round-request-binding-2"
 # those historical rounds is explicitly owned by chore/pre-header-feedback-settlement; widening
 # the cutoff or guessing provenance here would retroactively corrupt authentic 0.10.0 artifacts.
 DIGEST_BINDING_ROUND_CUTOFF = date(2026, 7, 18)
-PR_FREEZE_BINDING_SCHEMA = "waystone-pr-freeze-binding-1"
+PR_FREEZE_BINDING_V1_SCHEMA = "waystone-pr-freeze-binding-1"
+PR_FREEZE_BINDING_SCHEMA = "waystone-pr-freeze-binding-2"
 _ROUND_REQUEST_BINDING_FILE_RE = re.compile(
     r"^(?P<round_id>.+)-request\.binding(?:-(?P<sequence>\d+))?\.json$")
 PACKET_REVIEWING_RE = re.compile(
@@ -116,7 +117,8 @@ def is_codex(login: str | None) -> bool:
     return (login or "").removesuffix("[bot]") == "chatgpt-codex-connector"
 
 
-MARKER_RE = re.compile(r"<!--\s*(?:waystone|jw)-([a-z-]+):v1\s*\n(.*?)\n\s*-->", re.DOTALL)
+MARKER_RE = re.compile(
+    r"<!--\s*(?:waystone|jw)-([a-z-]+):v([12])\s*\n(.*?)\n\s*-->", re.DOTALL)
 FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 MERGE_OK_VERDICTS = {"shipped", "shipped-with-risk", "approved", "approve", "lgtm"}
 # output-contract finding blocks: `### JW-GPT-NNN — <title>` then a `- Severity: <x>` line.
@@ -125,12 +127,16 @@ SEVERITY_RE = re.compile(r"(?im)^\s*[-*]?\s*Severity\s*:\s*`?(blocker|major|mino
 
 
 # ---- pure marker logic -------------------------------------------------------
-def emit_marker(kind: str, fields: dict) -> str:
+def emit_marker(kind: str, fields: dict, *, version: int = 1) -> str:
     """Encode a marker as real YAML (lists stay lists, ints stay ints) — never hand-joined text,
     so the round-trip is a typed protocol, not a string blob."""
+    if type(version) is not int or version not in (1, 2):
+        raise WorkflowError("review marker version must be 1 or 2")
+    if version == 2 and kind != "review-cycle":
+        raise WorkflowError("only review-cycle markers have a v2 schema")
     body = yaml.safe_dump(dict(fields), sort_keys=False, default_flow_style=False,
                           allow_unicode=True).strip()
-    return f"<!-- waystone-{kind}:v1\n{body}\n-->"
+    return f"<!-- waystone-{kind}:v{version}\n{body}\n-->"
 
 
 def _reply_key(value: str) -> str:
@@ -531,21 +537,44 @@ def ingest_round_binding(root: Path, round_id: str, cfg: dict) -> tuple[dict | N
                 for path in paths]
         latest_cycle = max(row["cycle"] for _path, row in rows)
         latest = [(path, row) for path, row in rows if row["cycle"] == latest_cycle]
-        contracts = {(row["target_sha"], row["base_sha"], tuple(row["reviewers"]))
-                     for _path, row in latest}
-        if len(contracts) != 1:
+        core_contracts = {(
+            row["target_sha"], row["base_sha"], tuple(row["reviewers"]),
+            row.get("profile_fingerprint"), row["pr"],
+        ) for _path, row in latest}
+        v2_rows = [(path, row) for path, row in latest
+                   if row["schema"] == PR_FREEZE_BINDING_SCHEMA]
+        v2_digests = {row["rendered_request_digest"] for _path, row in v2_rows}
+        if len(core_contracts) != 1 or len(v2_digests) > 1:
             return None, "conflicting-pr-freeze-sidecars"
-        path, row = max(latest, key=lambda item: (item[1]["at"], str(item[0])))
+        version_skew = len({row["schema"] for _path, row in latest}) > 1
+        path, row = max(v2_rows or latest, key=lambda item: (item[1]["at"], str(item[0])))
         request_directory = project_state_path(root) / "review-requests"
-        request_paths = sorted(request_directory.glob(f"{round_id}-request.binding*.json"))
-        if not request_paths:
-            if _round_requires_digest_binding(round_id):
-                return None, "corrupt-round-binding:missing-pr-request-sidecar"
-            return {**row, "source": str(path)}, None
-        request_path, request_row = latest_round_request_binding(
-            request_paths, expected_round_id=round_id)
-        if request_path is None or request_row is None:
-            return None, "corrupt-round-binding:WorkflowError"
+        if row["schema"] == PR_FREEZE_BINDING_V1_SCHEMA:
+            return {
+                **row,
+                "request_binding_schema": None,
+                "narrative_digest": None,
+                "rendered_request_digest": None,
+                "request_binding_provenance": "legacy-pre-digest",
+                "request_binding_reason": "legacy-pre-digest",
+                "pr_freeze_version_skew": False,
+                "source": str(path),
+                "request_binding_source": None,
+            }, "legacy-pre-digest"
+        cycle_digest = row["rendered_request_digest"]
+        request_row = _request_generation_in_directory(
+            request_directory, round_id, cycle_digest)
+        if request_row is None:
+            return {
+                **row,
+                "request_binding_schema": None,
+                "narrative_digest": None,
+                "request_binding_provenance": "unknown",
+                "request_binding_reason": "missing-pr-request-generation",
+                "pr_freeze_version_skew": version_skew,
+                "source": str(path),
+                "request_binding_source": None,
+            }, "missing-pr-request-generation"
         if (request_row["mode"] != "pr"
                 or request_row["target_sha"] != row["target_sha"]
                 or request_row["reviewers"] != row["reviewers"]):
@@ -555,9 +584,12 @@ def ingest_round_binding(root: Path, round_id: str, cfg: dict) -> tuple[dict | N
             "request_binding_schema": request_row["schema"],
             "narrative_digest": request_row.get("narrative_digest"),
             "rendered_request_digest": request_row.get("rendered_request_digest"),
+            "request_binding_provenance": "explicit",
+            "request_binding_reason": None,
+            "pr_freeze_version_skew": version_skew,
             "source": str(path),
-            "request_binding_source": str(request_path),
-        }, None
+            "request_binding_source": request_row["source"],
+        }, "pr-freeze-version-skew" if version_skew else None
     except (OSError, WorkflowError) as e:
         return None, f"corrupt-round-binding:{type(e).__name__}"
 
@@ -960,7 +992,14 @@ def read_pr_freeze_binding(path: Path, *, expected_round_id: str | None = None,
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise WorkflowError(f"corrupt review binding {path}: {type(e).__name__}") from e
-    if (not isinstance(data, dict) or data.get("schema") != PR_FREEZE_BINDING_SCHEMA
+    schema = data.get("schema") if isinstance(data, dict) else None
+    digest_schema_valid = (
+        (schema == PR_FREEZE_BINDING_V1_SCHEMA
+         and "rendered_request_digest" not in data)
+        or (schema == PR_FREEZE_BINDING_SCHEMA
+            and _is_sha256_digest(data.get("rendered_request_digest")))
+    )
+    if (not isinstance(data, dict) or not digest_schema_valid
             or not isinstance(data.get("round_id"), str) or not data["round_id"]
             or _round_request_binding_date(data.get("round_id")) is None
             or type(data.get("pr")) is not int or data["pr"] < 1
@@ -986,20 +1025,24 @@ def read_pr_freeze_binding(path: Path, *, expected_round_id: str | None = None,
 
 def write_pr_freeze_binding(root: Path, round_id: str, pr: int, cycle: int,
                             target_sha: str, base_sha: str, reviewers: list[str],
-                            profile_fingerprint: str | None, reviews_dir: str) -> Path:
+                            profile_fingerprint: str | None, reviews_dir: str, *,
+                            rendered_request_digest: str) -> Path:
     """Record the successful PR freeze as local, immutable, round-bound improve evidence."""
     if (not isinstance(round_id, str) or not round_id.strip() or type(pr) is not int or pr < 1
             or not _is_cycle(cycle) or not _is_sha(target_sha) or not _is_sha(base_sha)
             or not _is_strlist(reviewers)
             or (profile_fingerprint is not None and not _nonempty_str(profile_fingerprint))
+            or not _is_sha256_digest(rendered_request_digest)
             or not _nonempty_str(reviews_dir)):
-        raise WorkflowError("PR freeze binding requires round, PR, cycle, SHAs, and reviewers")
+        raise WorkflowError(
+            "PR freeze binding requires round, PR, cycle, SHAs, reviewers, and request digest")
     directory = Path(root) / reviews_dir
     directory.mkdir(parents=True, exist_ok=True)
     row = {
         "schema": PR_FREEZE_BINDING_SCHEMA, "round_id": round_id, "pr": pr,
         "cycle": cycle, "target_sha": target_sha, "base_sha": base_sha,
         "reviewers": reviewers, "profile_fingerprint": profile_fingerprint,
+        "rendered_request_digest": rendered_request_digest,
         "mode": "pr", "canonical_store": "local-freeze-evidence",
         "at": datetime.now(timezone.utc).isoformat(),
     }
@@ -1471,13 +1514,21 @@ def marker_valid(m: dict) -> bool:
     SHA/base_sha are validated when present; binding to head/base is a separate freshness check."""
     k = m.get("_kind")
     if k == "review-cycle":
-        return (_is_cycle(m.get("cycle")) and _is_sha(m.get("target_sha"))
+        version = m.get("_version", 1)
+        digest_schema_valid = (
+            (version == 1 and "rendered_request_digest" not in m)
+            or (version == 2 and _is_sha256_digest(m.get("rendered_request_digest")))
+        )
+        return (digest_schema_valid
+                and _is_cycle(m.get("cycle")) and _is_sha(m.get("target_sha"))
                 and (m.get("base_sha") is None or _is_sha(m.get("base_sha")))
                 and (m.get("reviewers") is None or (
                     _is_strlist(m.get("reviewers"))
                     and all(_literal_reviewer(value) for value in m["reviewers"])))
                 and (m.get("profile_fingerprint") is None
                      or _nonempty_str(m.get("profile_fingerprint"))))
+    if m.get("_version", 1) != 1:
+        return False
     if k == "review-result":
         return (_is_cycle(m.get("review_cycle")) and _is_sha(m.get("reviewed_sha"))
                 and _literal_reviewer(m.get("reviewer")) and _nonempty_str(m.get("verdict"))
@@ -1491,12 +1542,12 @@ def marker_valid(m: dict) -> bool:
 
 
 def parse_markers(text: str, kind: str | None = None) -> list[dict]:
-    """Extract waystone-*:v1 markers from a blob. Markers inside ``` fenced blocks are ignored
+    """Extract waystone marker schemas from a blob. Markers inside ``` fenced blocks are ignored
     (a quoted example must not be read as live state)."""
     out = []
     clean = FENCE_RE.sub("", text or "")
     for m in MARKER_RE.finditer(clean):
-        k, body = m.group(1), m.group(2)
+        k, version, body = m.group(1), int(m.group(2)), m.group(3)
         if kind and k != kind:
             continue
         try:
@@ -1506,6 +1557,7 @@ def parse_markers(text: str, kind: str | None = None) -> list[dict]:
         if not isinstance(d, dict):
             d = {}
         d["_kind"] = k
+        d["_version"] = version
         out.append(d)
     return out
 
@@ -1534,8 +1586,8 @@ def latest_cycle(markers: list[dict], operators: tuple = ()) -> dict | None:
     return max(cycles, key=lambda m: (m["cycle"], m.get("_at") or "")) if cycles else None
 
 
-def next_cycle_number(markers: list[dict]) -> int:
-    lc = latest_cycle(markers)
+def next_cycle_number(markers: list[dict], operators: tuple = ()) -> int:
+    lc = latest_cycle(markers, operators)
     return (lc["cycle"] + 1) if lc else 1
 
 
@@ -1573,17 +1625,21 @@ def classify(markers: list[dict], current_head: str, macro_reviewers: tuple = ()
     if trusted_cycles:
         max_cycle = max(m["cycle"] for m in trusted_cycles)
         same_cycle = [m for m in trusted_cycles if m["cycle"] == max_cycle]
-        conflict = len({(
+        core_contracts = {(
             str(m.get("target_sha")), str(m.get("base_sha")),
             tuple(m.get("reviewers") or ()), str(m.get("profile_fingerprint")),
-        ) for m in same_cycle}) > 1
-        lc = max(same_cycle, key=at)
+        ) for m in same_cycle}
+        v2_cycles = [m for m in same_cycle if m.get("_version", 1) == 2]
+        v2_digests = {m["rendered_request_digest"] for m in v2_cycles}
+        conflict = len(core_contracts) > 1 or len(v2_digests) > 1
+        version_skew = len({m.get("_version", 1) for m in same_cycle}) > 1
+        lc = max(v2_cycles or same_cycle, key=at)
+        freeze_at = max((at(m) for m in same_cycle), default="")
     else:
-        conflict, lc = False, None
+        conflict, version_skew, lc, freeze_at = False, False, None, ""
     cyc = lc["cycle"] if lc else None
     frozen = (lc or {}).get("target_sha")
     frozen_base = (lc or {}).get("base_sha")
-    freeze_at = at(lc) if lc else ""
     base_ok = current_base is None or str(frozen_base) == current_base
     head_matches = bool(lc) and not conflict and str(frozen) == current_head and base_ok
 
@@ -1647,6 +1703,9 @@ def classify(markers: list[dict], current_head: str, macro_reviewers: tuple = ()
         "latest_cycle": cyc,
         "round_id": (lc or {}).get("round_id"),
         "profile_fingerprint": (lc or {}).get("profile_fingerprint"),
+        "rendered_request_digest": (lc or {}).get("rendered_request_digest"),
+        "cycle_marker_version": (lc or {}).get("_version", 1) if lc else None,
+        "cycle_version_skew": version_skew,
         "frozen_sha": frozen,
         "frozen_base": frozen_base,
         "cycle_conflict": conflict,
@@ -1985,10 +2044,13 @@ def freeze(root: Path, pr: int, round_id: str | None) -> int:
     head = bundle["head"] or git_full_sha(root, "HEAD")
     base_sha = bundle.get("base_sha", "")
     markers = parse_bodies(bundle["bodies"])
-    n = next_cycle_number(markers)
+    owner = (ctx["repo"].split("/", 1)[0] if ctx.get("repo") else "")
+    operators = tuple({owner, *policy["review"].get("operators", [])} - {""})
+    n = next_cycle_number(markers, operators)
     reviewers, profile_fingerprint = resolve_reviewer_set(
         root, policy["review"]["reviewers"])
     request_text = None
+    request_sidecar = None
     if round_id is not None:
         request = prepared_request_path(root, round_id, mode="pr")
         sidecar_paths = sorted(request.parent.glob(f"{round_id}-request.binding*.json"))
@@ -2038,11 +2100,16 @@ def freeze(root: Path, pr: int, round_id: str | None) -> int:
                 "binding; reclose and prepare again with a new round id",
                 file=sys.stderr)
             return 1
-    marker = emit_marker("review-cycle", {
+    marker_fields = {
         "round_id": round_id or "(unset)", "cycle": n, "target_sha": head,
         "base_sha": base_sha, "reviewers": reviewers,
         "profile_fingerprint": profile_fingerprint,
-    })
+    }
+    if request_sidecar is not None:
+        marker_fields["rendered_request_digest"] = request_sidecar[
+            "rendered_request_digest"]
+    marker = emit_marker(
+        "review-cycle", marker_fields, version=2 if request_sidecar is not None else 1)
     macro = [r for r in reviewers if r != "codex"]
     body = (f"## Review cycle {n} — frozen at `{head[:12]}` (base `{base_sha[:12]}`)\n\n"
             f"Immutable review target for cycle {n}. A new push — or a base advance — makes this "
@@ -2061,7 +2128,8 @@ def freeze(root: Path, pr: int, round_id: str | None) -> int:
         try:
             write_pr_freeze_binding(
                 root, round_id, pr, n, head, base_sha, reviewers, profile_fingerprint,
-                policy["reviews_dir"])
+                policy["reviews_dir"],
+                rendered_request_digest=request_sidecar["rendered_request_digest"])
         except (OSError, WorkflowError) as e:
             print(
                 f"review freeze: PR comment posted but local freeze binding was not recorded: {e}",
@@ -2085,6 +2153,7 @@ def status(root: Path, pr: int | None) -> int:
         print(f"  current head:   {facts['current_head'][:12]}")
         print(f"  latest cycle:   {facts['latest_cycle']} (frozen {str(facts['frozen_sha'])[:12]})")
         print(f"  cycle fresh:    {facts['cycle_fresh']}  (False = push after freeze → re-freeze)")
+        print(f"  cycle version skew: {facts['cycle_version_skew']}")
         print(f"  profile drift:  {facts['reviewer_profile_drift']}")
         print(f"  codex fresh:    {facts['codex_fresh']}")
         print(f"  CI:             {facts['ci']}")
@@ -2097,12 +2166,15 @@ def status(root: Path, pr: int | None) -> int:
                 and _is_sha(facts.get("frozen_sha"))
                 and _is_sha(facts.get("frozen_base"))
                 and _is_strlist(facts.get("reviewers"))
-                and facts.get("cycle_conflict") is False):
+                and facts.get("cycle_conflict") is False
+                and facts.get("cycle_marker_version") == 2
+                and _is_sha256_digest(facts.get("rendered_request_digest"))):
             try:
                 write_pr_freeze_binding(
                     root, round_id, pr, facts["latest_cycle"], facts["frozen_sha"],
                     facts["frozen_base"], facts["reviewers"],
-                    facts.get("profile_fingerprint"), ctx["policy"]["reviews_dir"])
+                    facts.get("profile_fingerprint"), ctx["policy"]["reviews_dir"],
+                    rendered_request_digest=facts["rendered_request_digest"])
             except (OSError, WorkflowError) as e:
                 print(f"review status: trusted PR cycle could not be recorded locally: {e}",
                       file=sys.stderr)

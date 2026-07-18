@@ -126,6 +126,28 @@ def write_legacy_round_request_binding(
     return path
 
 
+def write_legacy_pr_freeze_binding(
+        root: Path, round_id: str, pr: int, cycle: int, target_sha: str,
+        base_sha: str, reviewers: list[str], *, suffix: str = "") -> Path:
+    directory = root / "docs/reviews"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{round_id}-freeze-{cycle}.binding{suffix}.json"
+    path.write_text(_json.dumps({
+        "schema": review.PR_FREEZE_BINDING_V1_SCHEMA,
+        "round_id": round_id,
+        "pr": pr,
+        "cycle": cycle,
+        "target_sha": target_sha,
+        "base_sha": base_sha,
+        "reviewers": reviewers,
+        "profile_fingerprint": None,
+        "mode": "pr",
+        "canonical_store": "local-freeze-evidence",
+        "at": "2026-07-18T00:00:00+00:00",
+    }) + "\n")
+    return path
+
+
 class ReleaseToMainTests(unittest.TestCase):
     def _repo(self, d: str, *, shipped_change: bool) -> tuple[Path, dict[str, str]]:
         import os
@@ -697,6 +719,49 @@ class MarkerTests(unittest.TestCase):
         self.assertEqual(review.next_cycle_number(ms), 3)
         self.assertEqual(review.next_cycle_number([]), 1)
 
+    def test_next_cycle_uses_only_trusted_operator_markers(self):
+        bodies = [
+            {"body": review.emit_marker("review-cycle", {
+                "cycle": 2, "target_sha": "a" * 40,
+            }), "author": "owner"},
+            {"body": review.emit_marker("review-cycle", {
+                "cycle": 99, "target_sha": "b" * 40,
+            }), "author": "attacker"},
+        ]
+        markers = review.parse_bodies(bodies)
+        self.assertEqual(review.next_cycle_number(markers, ("owner",)), 3)
+
+    def test_freeze_ignores_untrusted_high_cycle_marker(self):
+        from unittest import mock
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, target, round_id = _pr_prepared_round(Path(d), "macro-reviewer")
+            policy = common.load_config(root)
+            attacker_marker = review.emit_marker("review-cycle", {
+                "cycle": 99, "target_sha": "f" * 40,
+            })
+            posted = []
+            context = {
+                "repo": "owner/repo", "pr": 9,
+                "bundle": {
+                    "head": target, "base_sha": "b" * 40,
+                    "bodies": [{"body": attacker_marker, "author": "attacker"}],
+                },
+                "head": target, "base_sha": "b" * 40, "base": "main",
+                "policy": policy,
+            }
+            with mock.patch.object(review, "pr_context", return_value=context), \
+                    mock.patch.object(
+                        review, "_gh",
+                        side_effect=lambda _root, *args: (posted.append(args) or (0, "ok"))), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(review.freeze(root, 9, round_id), 0)
+            body = posted[0][posted[0].index("--body") + 1]
+            self.assertEqual(
+                review.parse_markers(body, "review-cycle")[0]["cycle"], 1)
+
     def test_classify_fresh_vs_stale(self):
         head = "b" * 40
         # cycle frozen at a different sha => stale
@@ -823,6 +888,49 @@ class MarkerTests(unittest.TestCase):
         c = review.classify(review.parse_bodies(bodies), head, operators=("owner",))
         self.assertTrue(c["cycle_conflict"])
         self.assertFalse(c["cycle_fresh"])
+
+    def test_cycle_digest_conflict_fails_closed(self):
+        head = "e" * 40
+        bodies = [
+            {"body": review.emit_marker("review-cycle", {
+                "cycle": 2, "target_sha": head,
+                "rendered_request_digest": "sha256:" + "a" * 64,
+            }, version=2), "author": "owner"},
+            {"body": review.emit_marker("review-cycle", {
+                "cycle": 2, "target_sha": head,
+                "rendered_request_digest": "sha256:" + "b" * 64,
+            }, version=2), "author": "owner"},
+        ]
+        c = review.classify(review.parse_bodies(bodies), head, operators=("owner",))
+        self.assertTrue(c["cycle_conflict"])
+        self.assertFalse(c["cycle_fresh"])
+
+    def test_cycle_v1_v2_mix_is_version_skew_not_digest_conflict(self):
+        head = "e" * 40
+        bodies = [
+            {"body": review.emit_marker("review-cycle", {
+                "cycle": 2, "target_sha": head,
+            }), "author": "owner", "at": "2026-07-19T00:00:01Z"},
+            {"body": review.emit_marker("review-cycle", {
+                "cycle": 2, "target_sha": head,
+                "rendered_request_digest": TEST_RENDERED_REQUEST_DIGEST,
+            }, version=2), "author": "owner", "at": "2026-07-19T00:00:00Z"},
+        ]
+        c = review.classify(review.parse_bodies(bodies), head, operators=("owner",))
+        self.assertFalse(c["cycle_conflict"])
+        self.assertTrue(c["cycle_version_skew"])
+        self.assertEqual(c["rendered_request_digest"], TEST_RENDERED_REQUEST_DIGEST)
+
+    def test_cycle_marker_schema_requires_digest_exactly_in_v2(self):
+        v1_with_digest = review.parse_markers(review.emit_marker("review-cycle", {
+            "cycle": 1, "target_sha": "a" * 40,
+            "rendered_request_digest": TEST_RENDERED_REQUEST_DIGEST,
+        }))[0]
+        v2_without_digest = review.parse_markers(review.emit_marker("review-cycle", {
+            "cycle": 1, "target_sha": "a" * 40,
+        }, version=2))[0]
+        self.assertFalse(review.marker_valid(v1_with_digest))
+        self.assertFalse(review.marker_valid(v2_without_digest))
 
     def test_findings_latest_trusted_state_reblocks(self):
         head = "e" * 40
@@ -2114,11 +2222,31 @@ Fail-loud protocol boundaries.
             root = Path(d)
             path = review.write_pr_freeze_binding(
                 root, "2026-99-99-r1", 7, 1, "a" * 40, "b" * 40,
-                ["reviewer-x"], None, "docs/reviews")
+                ["reviewer-x"], None, "docs/reviews",
+                rendered_request_digest=TEST_RENDERED_REQUEST_DIGEST)
             with self.assertRaisesRegex(common.WorkflowError, "corrupt review binding"):
                 review.read_pr_freeze_binding(path)
             with self.assertRaisesRegex(common.WorkflowError, "real YYYY-MM-DD"):
                 review._round_requires_digest_binding("2026-99-99-r1")
+
+    def test_pr_freeze_binding_schema_requires_digest_exactly_in_v2(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            path = review.write_pr_freeze_binding(
+                root, "2026-07-19-r1", 7, 1, "a" * 40, "b" * 40,
+                ["reviewer-x"], None, "docs/reviews",
+                rendered_request_digest=TEST_RENDERED_REQUEST_DIGEST)
+            binding = _json.loads(path.read_text())
+            binding.pop("rendered_request_digest")
+            path.write_text(_json.dumps(binding) + "\n")
+            with self.assertRaisesRegex(common.WorkflowError, "corrupt review binding"):
+                review.read_pr_freeze_binding(path)
+
+            binding["schema"] = review.PR_FREEZE_BINDING_V1_SCHEMA
+            binding["rendered_request_digest"] = TEST_RENDERED_REQUEST_DIGEST
+            path.write_text(_json.dumps(binding) + "\n")
+            with self.assertRaisesRegex(common.WorkflowError, "corrupt review binding"):
+                review.read_pr_freeze_binding(path)
 
     def test_prepare_rejects_narrative_protocol_lookalikes(self):
         lookalikes = (
@@ -2424,7 +2552,7 @@ Fail-loud protocol boundaries.
                 review.REVIEW_REQUEST_TEMPLATE = original_template
 
             body = posted[0][posted[0].index("--body") + 1]
-            self.assertIn(request_text + "\n<!-- waystone-review-cycle:v1", body)
+            self.assertIn(request_text + "\n<!-- waystone-review-cycle:v2", body)
             self.assertTrue(request_text.endswith("   \n"))
 
     def test_reviewing_line_is_exact_and_malformed_input_warns(self):
@@ -3162,7 +3290,8 @@ Fail-loud protocol boundaries.
             with self.assertRaisesRegex(common.WorkflowError, "corrupt review binding"):
                 review.write_pr_freeze_binding(
                     Path(d), self.ROUND_ID, 1, 1, "a" * 40, "b" * 40,
-                    ["codex:test"], None, "reviews")
+                    ["codex:test"], None, "reviews",
+                    rendered_request_digest=TEST_RENDERED_REQUEST_DIGEST)
 
 
 class ResumeStartHereTests(unittest.TestCase):
@@ -4720,7 +4849,8 @@ class IngestTests(unittest.TestCase):
                 directory=request_dir)
             review.write_pr_freeze_binding(
                 root, round_id, 7, 1, "a" * 40, "b" * 40,
-                ["codex:gpt-5.6-sol"], None, "docs/reviews")
+                ["codex:gpt-5.6-sol"], None, "docs/reviews",
+                rendered_request_digest=TEST_RENDERED_REQUEST_DIGEST)
             src = root / "reply.md"
             src.write_bytes(self._reply())
             self.assertEqual(review.ingest(root, round_id, src=src), 0)
@@ -19873,7 +20003,8 @@ class L3GapClosureAcceptanceTests(unittest.TestCase):
                 "target_sha": target, "base_sha": base_sha,
                 "reviewers": ["macro-reviewer"],
                 "profile_fingerprint": "sha256:profile",
-            })
+                "rendered_request_digest": TEST_RENDERED_REQUEST_DIGEST,
+            }, version=2)
             bundle = {
                 "bodies": [{"body": marker, "author": "owner",
                             "at": "2026-07-15T00:00:00Z"}],
@@ -19896,6 +20027,11 @@ class L3GapClosureAcceptanceTests(unittest.TestCase):
             self.assertEqual(row["reviewers"], ["macro-reviewer"])
             self.assertEqual(row["review_profile_fingerprint"], "sha256:profile")
             self.assertEqual(row["review_binding_provenance"], "explicit")
+            self.assertEqual(row["rendered_request_digest"],
+                             TEST_RENDERED_REQUEST_DIGEST)
+            self.assertEqual(row["review_request_binding_provenance"], "unknown")
+            self.assertEqual(row["review_request_binding_reason"],
+                             "missing-pr-request-generation")
 
     def test_pr_improve_joins_freeze_with_v2_request_digest_provenance(self):
         from unittest import mock
@@ -19932,6 +20068,206 @@ class L3GapClosureAcceptanceTests(unittest.TestCase):
             self.assertEqual(row["rendered_request_digest"],
                              request_binding["rendered_request_digest"])
 
+    def test_pr_cycle_freeze_binds_exact_request_generation_after_reprepare(self):
+        from unittest import mock
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, target, round_id = _pr_prepared_round(base, "macro-reviewer")
+            cfg = common.load_config(root)
+            request_dir = common.project_state_path(root) / "review-requests"
+            first_path = next(request_dir.glob(f"{round_id}-request.binding*.json"))
+            first = review.read_round_request_binding(first_path)
+            posted = []
+            context = {
+                "repo": "owner/repo", "pr": 9,
+                "bundle": {"head": target, "base_sha": "b" * 40, "bodies": []},
+                "head": target, "base_sha": "b" * 40, "base": "main",
+                "policy": cfg,
+            }
+            with mock.patch.object(review, "pr_context", return_value=context), \
+                    mock.patch.object(
+                        review, "_gh",
+                        side_effect=lambda _root, *args: (posted.append(args) or (0, "ok"))), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(review.freeze(root, 9, round_id), 0)
+
+            body = posted[0][posted[0].index("--body") + 1]
+            marker = review.parse_markers(body, "review-cycle")[0]
+            self.assertEqual(marker["_version"], 2)
+            self.assertEqual(marker["rendered_request_digest"],
+                             first["rendered_request_digest"])
+            freeze_binding = review.read_pr_freeze_binding(next(
+                (root / cfg["reviews_dir"]).glob(f"{round_id}-freeze-*.binding*.json")))
+            self.assertEqual(freeze_binding["schema"], review.PR_FREEZE_BINDING_SCHEMA)
+            self.assertEqual(freeze_binding["rendered_request_digest"],
+                             first["rendered_request_digest"])
+
+            narrative = base / "narrative.md"
+            narrative.write_text(_PR_NARRATIVE.replace(
+                "Freeze republishes only rendered bytes.",
+                "Freeze binds the exact rendered generation."))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(review.prepare_review_request(root, round_id, narrative), 0)
+            latest_path, latest = review.latest_round_request_binding(
+                list(request_dir.glob(f"{round_id}-request.binding*.json")),
+                expected_round_id=round_id)
+            self.assertIsNotNone(latest_path)
+            self.assertNotEqual(latest["rendered_request_digest"],
+                                first["rendered_request_digest"])
+
+            binding, reason = review.ingest_round_binding(root, round_id, cfg)
+            self.assertIsNone(reason)
+            self.assertEqual(binding["rendered_request_digest"],
+                             first["rendered_request_digest"])
+            self.assertEqual(Path(binding["request_binding_source"]), first_path)
+            row = next(item for item in improve._project_review_rows("demo", root, cfg)
+                       if item["round_id"] == round_id)
+            self.assertEqual(row["rendered_request_digest"],
+                             first["rendered_request_digest"])
+            self.assertEqual(Path(row["review_request_binding_source"]), first_path)
+
+    def test_status_recovers_marker_generation_and_missing_request_stays_unknown(self):
+        from unittest import mock
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, target, round_id = _pr_prepared_round(base, "macro-reviewer")
+            cfg = common.load_config(root)
+            request_dir = common.project_state_path(root) / "review-requests"
+            first_path = next(request_dir.glob(f"{round_id}-request.binding*.json"))
+            first = review.read_round_request_binding(first_path)
+            posted = []
+            freeze_context = {
+                "repo": "owner/repo", "pr": 9,
+                "bundle": {"head": target, "base_sha": "b" * 40, "bodies": []},
+                "head": target, "base_sha": "b" * 40, "base": "main",
+                "policy": cfg,
+            }
+            with mock.patch.object(review, "pr_context", return_value=freeze_context), \
+                    mock.patch.object(
+                        review, "_gh",
+                        side_effect=lambda _root, *args: (posted.append(args) or (0, "ok"))), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(review.freeze(root, 9, round_id), 0)
+            body = posted[0][posted[0].index("--body") + 1]
+            for path in (root / cfg["reviews_dir"]).glob(
+                    f"{round_id}-freeze-*.binding*.json"):
+                path.unlink()
+
+            narrative = base / "narrative.md"
+            narrative.write_text(_PR_NARRATIVE.replace(
+                "Full suite green.", "Generation B is not part of cycle A."))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(review.prepare_review_request(root, round_id, narrative), 0)
+            status_bundle = {
+                "bodies": [{"body": body, "author": "owner",
+                            "at": "2026-07-19T00:00:00Z"}],
+                "reviews": [], "head": target, "base_sha": "b" * 40,
+                "state": "OPEN", "is_draft": False, "checks": [],
+                "base": "main", "merge_state": "CLEAN",
+            }
+            status_context = {**freeze_context, "bundle": status_bundle}
+            with mock.patch.object(review, "pr_context", return_value=status_context), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(review.status(root, 9), 0)
+
+            row = next(item for item in improve._project_review_rows("demo", root, cfg)
+                       if item["round_id"] == round_id)
+            self.assertEqual(row["rendered_request_digest"],
+                             first["rendered_request_digest"])
+            self.assertEqual(Path(row["review_request_binding_source"]), first_path)
+
+            first_path.unlink()
+            row = next(item for item in improve._project_review_rows("demo", root, cfg)
+                       if item["round_id"] == round_id)
+            self.assertEqual(row["rendered_request_digest"],
+                             first["rendered_request_digest"])
+            self.assertEqual(row["review_request_binding_provenance"], "unknown")
+            self.assertEqual(row["review_request_binding_reason"],
+                             "missing-pr-request-generation")
+            binding, reason = review.ingest_round_binding(root, round_id, cfg)
+            self.assertEqual(reason, "missing-pr-request-generation")
+            self.assertEqual(binding["rendered_request_digest"],
+                             first["rendered_request_digest"])
+            self.assertEqual(binding["request_binding_provenance"], "unknown")
+            self.assertIsNone(binding["narrative_digest"])
+
+    def test_legacy_pr_freeze_does_not_adopt_latest_request_generation(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, target, round_id = _pr_prepared_round(base, "macro-reviewer")
+            cfg = common.load_config(root)
+            write_legacy_pr_freeze_binding(
+                root, round_id, 9, 1, target, "b" * 40, ["macro-reviewer"])
+
+            binding, reason = review.ingest_round_binding(root, round_id, cfg)
+            self.assertEqual(reason, "legacy-pre-digest")
+            self.assertEqual(binding["request_binding_provenance"], "legacy-pre-digest")
+            self.assertIsNone(binding.get("narrative_digest"))
+            self.assertIsNone(binding.get("rendered_request_digest"))
+            row = next(item for item in improve._project_review_rows("demo", root, cfg)
+                       if item["round_id"] == round_id)
+            self.assertEqual(row["review_request_binding_provenance"],
+                             "legacy-pre-digest")
+            self.assertEqual(row["review_request_binding_reason"], "legacy-pre-digest")
+            self.assertIsNone(row["narrative_digest"])
+            self.assertIsNone(row["rendered_request_digest"])
+
+    def test_mixed_v1_v2_freeze_sidecars_report_skew_and_recover_v2(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, target, round_id = _pr_prepared_round(base, "macro-reviewer")
+            cfg = common.load_config(root)
+            request_path = next((common.project_state_path(root) / "review-requests").glob(
+                f"{round_id}-request.binding*.json"))
+            request = review.read_round_request_binding(request_path)
+            write_legacy_pr_freeze_binding(
+                root, round_id, 9, 1, target, "b" * 40, ["macro-reviewer"])
+            review.write_pr_freeze_binding(
+                root, round_id, 9, 1, target, "b" * 40, ["macro-reviewer"],
+                None, cfg["reviews_dir"],
+                rendered_request_digest=request["rendered_request_digest"])
+
+            binding, reason = review.ingest_round_binding(root, round_id, cfg)
+            self.assertEqual(reason, "pr-freeze-version-skew")
+            self.assertTrue(binding["pr_freeze_version_skew"])
+            self.assertEqual(binding["rendered_request_digest"],
+                             request["rendered_request_digest"])
+            row = next(item for item in improve._project_review_rows("demo", root, cfg)
+                       if item["round_id"] == round_id)
+            self.assertEqual(row["review_binding_reason"], "pr-freeze-version-skew")
+            self.assertEqual(row["review_request_binding_provenance"], "explicit")
+
+    def test_conflicting_same_cycle_pr_freeze_digests_fail_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / ".waystone.yml").write_text(
+                "version: 1\nproject: demo\nreviews_dir: docs/reviews\n"
+                "review:\n  mode: pr\n")
+            round_id = "2026-07-19-digest-conflict"
+            common.ensure_project_state_dir(root)
+            for digest in ("sha256:" + "a" * 64, "sha256:" + "b" * 64):
+                review.write_pr_freeze_binding(
+                    root, round_id, 7, 2, "a" * 40, "b" * 40,
+                    ["codex:test"], "sha256:abc", "docs/reviews",
+                    rendered_request_digest=digest)
+
+            binding, reason = review.ingest_round_binding(
+                root, round_id, common.load_config(root))
+            self.assertIsNone(binding)
+            self.assertEqual(reason, "conflicting-pr-freeze-sidecars")
+            sidecars = improve._round_review_sidecars(
+                root / "docs" / "reviews")[round_id]
+            projected = improve._review_binding(None, round_id, "pr", sidecars)
+            self.assertIsNone(projected["target_sha"])
+            self.assertEqual(projected["review_binding_reason"],
+                             "conflicting-pr-freeze-sidecars")
+
     def test_conflicting_same_cycle_pr_freeze_sidecars_fail_closed(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -19939,7 +20275,8 @@ class L3GapClosureAcceptanceTests(unittest.TestCase):
                 "version: 1\nproject: demo\nreviews_dir: docs/reviews\n")
             review.write_pr_freeze_binding(
                 root, "2026-07-15-r", 7, 2, "a" * 40, "b" * 40,
-                ["codex:test"], "sha256:abc", "docs/reviews")
+                ["codex:test"], "sha256:abc", "docs/reviews",
+                rendered_request_digest=TEST_RENDERED_REQUEST_DIGEST)
             sidecars = improve._round_review_sidecars(root / "docs" / "reviews")["2026-07-15-r"]
             binding = improve._review_binding(None, "2026-07-15-r", "pr", sidecars)
             self.assertEqual(binding["target_sha"], "a" * 40)
