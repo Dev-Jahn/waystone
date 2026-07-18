@@ -2,7 +2,7 @@
      Source of truth: tasks.yaml. Regenerated automatically on tasks.yaml edits. -->
 # Roadmap — waystone
 
-**Progress:** 53/69 done · 0 active · 0 blocked · 0 parked · generated 2026-07-18 19:46 UTC @ `5bf3f90`
+**Progress:** 53/69 done · 0 active · 0 blocked · 0 parked · generated 2026-07-18 19:48 UTC @ `b64b2f8`
 
 ```mermaid
 flowchart TD

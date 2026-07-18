@@ -631,3 +631,8 @@ tasks:
     status: done
     severity: "major"
     origin: "review-2026-07-19-evidence-authority"
+  - id: fix/reclose-diff-base-drift
+    title: "같은 round 재close 시 review diff base가 직전 라운드 tip이 아니라 같은 round의 이전 closeout 커밋으로 표기됨 — reclose는 원 previous-round tip을 보존해야 함 (2026-07-19 round-5 마감에서 실측)"
+    status: "pending"
+    severity: "minor"
+    origin: "round-2026-07-19-evidence-authority-fixes"
