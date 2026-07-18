@@ -152,6 +152,12 @@ def write_legacy_pr_freeze_binding(
     return path
 
 
+def set_binding_timestamp(path: Path, at: str) -> None:
+    row = _json.loads(path.read_text())
+    row["at"] = at
+    path.write_text(_json.dumps(row) + "\n")
+
+
 class ReleaseToMainTests(unittest.TestCase):
     def _repo(self, d: str, *, shipped_change: bool) -> tuple[Path, dict[str, str]]:
         import os
@@ -923,7 +929,48 @@ class MarkerTests(unittest.TestCase):
         c = review.classify(review.parse_bodies(bodies), head, operators=("owner",))
         self.assertFalse(c["cycle_conflict"])
         self.assertTrue(c["cycle_version_skew"])
+        self.assertIsNone(c["rendered_request_digest"])
+        self.assertEqual(c.get("cycle_version_skew_reason"), "latest-v1-supersedes-v2")
+        self.assertEqual(c["cycle_marker_version"], 1)
+        self.assertFalse(c["cycle_fresh"])
+
+    def test_cycle_v1_then_later_v2_keeps_digest_authority(self):
+        head = "e" * 40
+        bodies = [
+            {"body": review.emit_marker("review-cycle", {
+                "cycle": 2, "target_sha": head,
+            }), "author": "owner", "at": "2026-07-19T00:00:00Z"},
+            {"body": review.emit_marker("review-cycle", {
+                "cycle": 2, "target_sha": head,
+                "rendered_request_digest": TEST_RENDERED_REQUEST_DIGEST,
+            }, version=2), "author": "owner", "at": "2026-07-19T00:00:01Z"},
+        ]
+        c = review.classify(review.parse_bodies(bodies), head, operators=("owner",))
+        self.assertFalse(c["cycle_conflict"])
+        self.assertTrue(c["cycle_version_skew"])
+        self.assertIsNone(c.get("cycle_version_skew_reason"))
+        self.assertEqual(c["cycle_marker_version"], 2)
         self.assertEqual(c["rendered_request_digest"], TEST_RENDERED_REQUEST_DIGEST)
+        self.assertTrue(c["cycle_fresh"])
+
+    def test_cycle_v1_v2_same_timestamp_fails_closed(self):
+        head = "e" * 40
+        bodies = [
+            {"body": review.emit_marker("review-cycle", {
+                "cycle": 2, "target_sha": head,
+            }), "author": "owner", "at": "2026-07-19T00:00:00Z"},
+            {"body": review.emit_marker("review-cycle", {
+                "cycle": 2, "target_sha": head,
+                "rendered_request_digest": TEST_RENDERED_REQUEST_DIGEST,
+            }, version=2), "author": "owner", "at": "2026-07-19T00:00:00+00:00"},
+        ]
+        c = review.classify(review.parse_bodies(bodies), head, operators=("owner",))
+        self.assertTrue(c["cycle_conflict"])
+        self.assertTrue(c["cycle_version_skew"])
+        self.assertEqual(c.get("cycle_version_skew_reason"), "v1-v2-timestamp-tie")
+        self.assertIsNone(c["cycle_marker_version"])
+        self.assertIsNone(c["rendered_request_digest"])
+        self.assertFalse(c["cycle_fresh"])
 
     def test_cycle_marker_schema_requires_digest_exactly_in_v2(self):
         v1_with_digest = review.parse_markers(review.emit_marker("review-cycle", {
@@ -1410,7 +1457,8 @@ class MarkerTests(unittest.TestCase):
             err = io.StringIO()
             try:
                 with contextlib.redirect_stderr(err):
-                    rc = review.main(["freeze", "--pr", "3", str(root)])
+                    rc = review.main([
+                        "freeze", "--pr", "3", "--round", "2026-07-19-review", str(root)])
             finally:
                 review.pr_context = original
             self.assertEqual(rc, 1)
@@ -1442,6 +1490,14 @@ class MergeGateTests(unittest.TestCase):
             ok, fails = merge.merge_gate(g)
             self.assertFalse(ok, key)
             self.assertTrue(any(needle.lower() in f.lower() for f in fails), (key, fails))
+
+    def test_latest_v1_supersession_requires_new_cycle_v2_refreeze(self):
+        g = dict(PASS)
+        g["cycle_version_skew_reason"] = "latest-v1-supersedes-v2"
+        ok, fails = merge.merge_gate(g)
+        self.assertFalse(ok)
+        self.assertTrue(any("new cycle" in failure and "v2" in failure
+                            for failure in fails), fails)
 
     def test_ci_only_blocks_when_required(self):
         g = dict(PASS); g["ci"] = "failing"
@@ -18678,6 +18734,8 @@ class L2CAdversarialFixTests(unittest.TestCase):
         self.assertEqual(event["event"], "review-feedback")
         self.assertEqual(event["source"], "pr-marker")
         self.assertEqual(event["round_id"], "r1")
+        facts["cycle_version_skew_reason"] = "latest-v1-supersedes-v2"
+        self.assertIsNone(review.completed_pr_feedback_event(facts, 17))
 
     def test_f4_transition_phases_dedupe_evaluations_and_findings_by_round(self):
         with tempfile.TemporaryDirectory() as d:
@@ -20396,12 +20454,14 @@ class L3GapClosureAcceptanceTests(unittest.TestCase):
             request_path = next((common.project_state_path(root) / "review-requests").glob(
                 f"{round_id}-request.binding*.json"))
             request = review.read_round_request_binding(request_path)
-            write_legacy_pr_freeze_binding(
+            v1_path = write_legacy_pr_freeze_binding(
                 root, round_id, 9, 1, target, "b" * 40, ["macro-reviewer"])
-            review.write_pr_freeze_binding(
+            v2_path = review.write_pr_freeze_binding(
                 root, round_id, 9, 1, target, "b" * 40, ["macro-reviewer"],
                 None, cfg["reviews_dir"],
                 rendered_request_digest=request["rendered_request_digest"])
+            set_binding_timestamp(v1_path, "2026-07-19T00:00:00+00:00")
+            set_binding_timestamp(v2_path, "2026-07-19T00:00:01+00:00")
 
             binding, reason = review.ingest_round_binding(root, round_id, cfg)
             self.assertEqual(reason, "pr-freeze-version-skew")
@@ -20412,6 +20472,424 @@ class L3GapClosureAcceptanceTests(unittest.TestCase):
                        if item["round_id"] == round_id)
             self.assertEqual(row["review_binding_reason"], "pr-freeze-version-skew")
             self.assertEqual(row["review_request_binding_provenance"], "explicit")
+
+    def test_ingest_round_binding_later_v1_demotes_v2_generation(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, target, round_id = _pr_prepared_round(base, "macro-reviewer")
+            cfg = common.load_config(root)
+            request_path = next((common.project_state_path(root) / "review-requests").glob(
+                f"{round_id}-request.binding*.json"))
+            request = review.read_round_request_binding(request_path)
+            v1_path = write_legacy_pr_freeze_binding(
+                root, round_id, 9, 1, target, "b" * 40, ["macro-reviewer"])
+            v2_path = review.write_pr_freeze_binding(
+                root, round_id, 9, 1, target, "b" * 40, ["macro-reviewer"],
+                None, cfg["reviews_dir"],
+                rendered_request_digest=request["rendered_request_digest"])
+            set_binding_timestamp(v2_path, "2026-07-19T00:00:00+00:00")
+            set_binding_timestamp(v1_path, "2026-07-19T00:00:01+00:00")
+
+            binding, reason = review.ingest_round_binding(root, round_id, cfg)
+            self.assertEqual(reason, "latest-v1-supersedes-v2")
+            self.assertTrue(binding["pr_freeze_version_skew"])
+            self.assertEqual(binding["request_binding_provenance"], "unknown")
+            self.assertEqual(binding["request_binding_reason"],
+                             "latest-v1-supersedes-v2")
+            self.assertIsNone(binding["narrative_digest"])
+            self.assertIsNone(binding["rendered_request_digest"])
+
+    def test_improve_review_binding_later_v1_demotes_v2_generation(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, target, round_id = _pr_prepared_round(base, "macro-reviewer")
+            cfg = common.load_config(root)
+            request_path = next((common.project_state_path(root) / "review-requests").glob(
+                f"{round_id}-request.binding*.json"))
+            request = review.read_round_request_binding(request_path)
+            v1_path = write_legacy_pr_freeze_binding(
+                root, round_id, 9, 1, target, "b" * 40, ["macro-reviewer"])
+            v2_path = review.write_pr_freeze_binding(
+                root, round_id, 9, 1, target, "b" * 40, ["macro-reviewer"],
+                None, cfg["reviews_dir"],
+                rendered_request_digest=request["rendered_request_digest"])
+            set_binding_timestamp(v2_path, "2026-07-19T00:00:00+00:00")
+            set_binding_timestamp(v1_path, "2026-07-19T00:00:01+00:00")
+
+            sidecars = improve._round_review_sidecars(
+                root / cfg["reviews_dir"])[round_id]
+            row = improve._review_binding(None, round_id, "pr", sidecars)
+            self.assertEqual(row["review_binding_reason"],
+                             "latest-v1-supersedes-v2")
+            self.assertTrue(row["review_cycle_version_skew"])
+            self.assertEqual(row["review_request_binding_provenance"], "unknown")
+            self.assertEqual(row["review_request_binding_reason"],
+                             "latest-v1-supersedes-v2")
+            self.assertIsNone(row["narrative_digest"])
+            self.assertIsNone(row["rendered_request_digest"])
+
+    def test_same_timestamp_v1_v2_freeze_tie_fails_closed_across_projections(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, target, round_id = _pr_prepared_round(base, "macro-reviewer")
+            cfg = common.load_config(root)
+            request_path = next((common.project_state_path(root) / "review-requests").glob(
+                f"{round_id}-request.binding*.json"))
+            request = review.read_round_request_binding(request_path)
+            v1_path = write_legacy_pr_freeze_binding(
+                root, round_id, 9, 1, target, "b" * 40, ["macro-reviewer"])
+            v2_path = review.write_pr_freeze_binding(
+                root, round_id, 9, 1, target, "b" * 40, ["macro-reviewer"],
+                None, cfg["reviews_dir"],
+                rendered_request_digest=request["rendered_request_digest"])
+            set_binding_timestamp(v1_path, "2026-07-19T00:00:00Z")
+            set_binding_timestamp(v2_path, "2026-07-19T00:00:00+00:00")
+
+            binding, reason = review.ingest_round_binding(root, round_id, cfg)
+            self.assertEqual(reason, "v1-v2-timestamp-tie")
+            self.assertEqual(binding["request_binding_provenance"], "unknown")
+            self.assertIsNone(binding["rendered_request_digest"])
+            sidecars = improve._round_review_sidecars(
+                root / cfg["reviews_dir"])[round_id]
+            row = improve._review_binding(None, round_id, "pr", sidecars)
+            self.assertEqual(row["review_binding_reason"], "v1-v2-timestamp-tie")
+            self.assertEqual(row["review_request_binding_provenance"], "unknown")
+            self.assertIsNone(row["rendered_request_digest"])
+
+    def test_digest_era_pr_rejects_later_v1_only_cycle_even_with_fresh_evidence(self):
+        head, base_sha = "a" * 40, "b" * 40
+        bodies = [
+            {"body": review.emit_marker("review-cycle", {
+                "round_id": "2026-07-19-digest-era", "cycle": 1,
+                "target_sha": head, "base_sha": base_sha,
+                "reviewers": ["macro-reviewer"],
+                "rendered_request_digest": TEST_RENDERED_REQUEST_DIGEST,
+            }, version=2), "author": "owner", "at": "2026-07-19T00:00:00Z"},
+            {"body": review.emit_marker("review-cycle", {
+                "round_id": "(unset)", "cycle": 1, "target_sha": head,
+                "base_sha": base_sha, "reviewers": ["macro-reviewer"],
+            }), "author": "owner", "at": "2026-07-19T00:01:00Z"},
+            {"body": review.emit_marker("review-cycle", {
+                "round_id": "(unset)", "cycle": 2, "target_sha": head,
+                "base_sha": base_sha, "reviewers": ["macro-reviewer"],
+            }), "author": "owner", "at": "2026-07-19T00:02:00Z"},
+            {"body": review.emit_marker("review-result", {
+                "reviewer": "macro-reviewer", "review_cycle": 2,
+                "reviewed_sha": head, "verdict": "shipped", "decision_required": [],
+            }), "author": "owner", "at": "2026-07-19T00:03:00Z"},
+            {"body": review.emit_marker("findings", {
+                "cycle": 2, "resolved": True,
+            }), "author": "owner", "at": "2026-07-19T00:04:00Z"},
+            {"body": review.emit_marker("approval", {
+                "sha": head, "base_sha": base_sha, "cycle": 2, "by": "owner",
+            }), "author": "owner", "at": "2026-07-19T00:05:00Z"},
+        ]
+
+        facts = review.classify(
+            review.parse_bodies(bodies), head, macro_reviewers=("macro-reviewer",),
+            approvers=("owner",), operators=("owner",), current_base=base_sha)
+        self.assertEqual(facts["cycle_version_skew_reason"],
+                         "latest-v1-supersedes-v2")
+        self.assertTrue(facts["cycle_version_skew"])
+        self.assertIsNone(facts["rendered_request_digest"])
+        self.assertFalse(facts["cycle_fresh"])
+        self.assertTrue(facts["pro_result_at_head"])
+        self.assertTrue(facts["findings_resolved"])
+        self.assertTrue(facts["approved_at_head"])
+        gate = {**PASS, **facts, "want_codex": False}
+        ok, failures = merge.merge_gate(gate)
+        self.assertFalse(ok)
+        self.assertTrue(any("v2 marker" in failure for failure in failures), failures)
+
+    def test_pure_v1_only_pr_keeps_legacy_cycle_path(self):
+        head, base_sha = "a" * 40, "b" * 40
+        for round_id in ("2026-07-18-legacy", "(unset)", "legacy-round"):
+            with self.subTest(round_id=round_id):
+                markers = review.parse_bodies([
+                    {"body": review.emit_marker("review-cycle", {
+                        "round_id": round_id, "cycle": 1,
+                        "target_sha": head, "base_sha": base_sha,
+                    }), "author": "owner", "at": "2026-07-18T00:00:00Z"},
+                    {"body": review.emit_marker("review-cycle", {
+                        "round_id": round_id, "cycle": 2,
+                        "target_sha": head, "base_sha": base_sha,
+                    }), "author": "owner", "at": "2026-07-18T00:01:00Z"},
+                ])
+
+                facts = review.classify(
+                    markers, head, operators=("owner",), current_base=base_sha)
+                self.assertTrue(facts["cycle_fresh"])
+                self.assertEqual(facts["cycle_marker_version"], 1)
+                self.assertFalse(facts["cycle_version_skew"])
+                self.assertIsNone(facts["cycle_version_skew_reason"])
+
+    def test_roundless_freeze_in_new_worktree_cannot_mint_v1_gate_bypass(self):
+        from unittest import mock
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            target, base_sha = "a" * 40, "b" * 40
+            other_pr_v2 = review.parse_markers(review.emit_marker("review-cycle", {
+                "round_id": "2026-07-19-other-pr", "cycle": 1,
+                "target_sha": "c" * 40, "base_sha": base_sha,
+                "reviewers": ["macro-reviewer"],
+                "rendered_request_digest": TEST_RENDERED_REQUEST_DIGEST,
+            }, version=2), "review-cycle")[0]
+            self.assertEqual(other_pr_v2["_version"], 2)
+            self.assertEqual(list(root.rglob("*.binding*.json")), [])
+            policy = common.normalize_config({
+                "version": 1, "project": "demo", "reviews_dir": "docs/reviews",
+                "review": {"mode": "pr", "reviewers": ["macro-reviewer"]},
+            })
+            context = {
+                "repo": "owner/repo", "pr": 9,
+                "bundle": {"head": target, "base_sha": base_sha, "bodies": []},
+                "head": target, "base_sha": base_sha, "base": "main",
+                "policy": policy,
+            }
+            posted = []
+            err = io.StringIO()
+            with mock.patch.object(review, "pr_context", return_value=context), \
+                    mock.patch.object(
+                        review, "_gh",
+                        side_effect=lambda _root, *args: (posted.append(args) or (0, "ok"))), \
+                    contextlib.redirect_stderr(err):
+                rc = review.freeze(root, 9, None)
+            if rc == 0:
+                marker_body = posted[0][posted[0].index("--body") + 1]
+                marker = review.parse_markers(marker_body, "review-cycle")[0]
+                self.assertEqual(marker["_version"], 1)
+                bodies = [
+                    {"body": marker_body, "author": "owner",
+                     "at": "2026-07-19T00:00:00Z"},
+                    {"body": review.emit_marker("review-result", {
+                        "reviewer": "macro-reviewer", "review_cycle": 1,
+                        "reviewed_sha": target, "verdict": "shipped",
+                        "decision_required": [],
+                    }), "author": "owner", "at": "2026-07-19T00:01:00Z"},
+                    {"body": review.emit_marker("approval", {
+                        "sha": target, "base_sha": base_sha, "cycle": 1, "by": "owner",
+                    }), "author": "owner", "at": "2026-07-19T00:02:00Z"},
+                ]
+                facts = review.classify(
+                    review.parse_bodies(bodies), target,
+                    macro_reviewers=("macro-reviewer",), approvers=("owner",),
+                    operators=("owner",), current_base=base_sha)
+                gate = {**PASS, **facts, "want_codex": False}
+                self.assertTrue(merge.merge_gate(gate)[0], merge.merge_gate(gate)[1])
+            self.assertEqual(
+                rc, 1,
+                "roundless freeze minted a v1 marker whose completed cycle passed merge gate")
+            self.assertEqual(posted, [])
+            self.assertIn("--round", err.getvalue())
+            self.assertIn("prepare", err.getvalue())
+
+    def test_digest_capable_freeze_without_round_fails_before_minting_v1(self):
+        from unittest import mock
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, target, _round_id = _pr_prepared_round(Path(d), "macro-reviewer")
+            cfg = common.load_config(root)
+            context = {
+                "repo": "owner/repo", "pr": 9,
+                "bundle": {"head": target, "base_sha": "b" * 40, "bodies": []},
+                "head": target, "base_sha": "b" * 40, "base": "main",
+                "policy": cfg,
+            }
+            posted = []
+            err = io.StringIO()
+            with mock.patch.object(review, "pr_context", return_value=context), \
+                    mock.patch.object(
+                        review, "_gh",
+                        side_effect=lambda _root, *args: (posted.append(args) or (0, "ok"))), \
+                    contextlib.redirect_stderr(err):
+                self.assertEqual(review.freeze(root, 9, None), 1)
+            self.assertEqual(posted, [])
+            self.assertIn("--round", err.getvalue())
+            self.assertIn("digest", err.getvalue().lower())
+
+    def test_post_cutoff_v1_only_cycle_blocks_complete_fresh_pr(self):
+        head, base_sha = "a" * 40, "b" * 40
+        bodies = [
+            {"body": review.emit_marker("review-cycle", {
+                "round_id": "2026-07-19-old-host", "cycle": 1,
+                "target_sha": head, "base_sha": base_sha,
+                "reviewers": ["macro-reviewer"],
+            }), "author": "owner", "at": "2026-07-19T00:00:00Z"},
+            {"body": review.emit_marker("review-result", {
+                "reviewer": "macro-reviewer", "review_cycle": 1,
+                "reviewed_sha": head, "verdict": "shipped", "decision_required": [],
+            }), "author": "owner", "at": "2026-07-19T00:01:00Z"},
+            {"body": review.emit_marker("approval", {
+                "sha": head, "base_sha": base_sha, "cycle": 1, "by": "owner",
+            }), "author": "owner", "at": "2026-07-19T00:02:00Z"},
+        ]
+
+        facts = review.classify(
+            review.parse_bodies(bodies), head, macro_reviewers=("macro-reviewer",),
+            approvers=("owner",), operators=("owner",), current_base=base_sha)
+        self.assertEqual(facts["cycle_version_skew_reason"], "digest-era-v1-freeze")
+        self.assertFalse(facts["cycle_fresh"])
+        self.assertIsNone(facts["rendered_request_digest"])
+        gate = {**PASS, **facts, "want_codex": False}
+        ok, failures = merge.merge_gate(gate)
+        self.assertFalse(ok)
+        self.assertTrue(any("digest-era-v1-freeze" in failure for failure in failures), failures)
+
+    def test_status_persists_mixed_host_v1_demotion_for_offline_projections(self):
+        from unittest import mock
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, target, round_id = _pr_prepared_round(Path(d), "macro-reviewer")
+            cfg = common.load_config(root)
+            request_path = next((common.project_state_path(root) / "review-requests").glob(
+                f"{round_id}-request.binding*.json"))
+            request = review.read_round_request_binding(request_path)
+            review.write_pr_freeze_binding(
+                root, round_id, 9, 1, target, "b" * 40, ["macro-reviewer"],
+                None, cfg["reviews_dir"],
+                rendered_request_digest=request["rendered_request_digest"])
+            v2 = review.emit_marker("review-cycle", {
+                "round_id": round_id, "cycle": 1, "target_sha": target,
+                "base_sha": "b" * 40, "reviewers": ["macro-reviewer"],
+                "rendered_request_digest": request["rendered_request_digest"],
+            }, version=2)
+            later_v1 = review.emit_marker("review-cycle", {
+                "round_id": "(unset)", "cycle": 1, "target_sha": target,
+                "base_sha": "b" * 40, "reviewers": ["macro-reviewer"],
+            })
+            bundle = {
+                "bodies": [
+                    {"body": v2, "author": "owner", "at": "2026-07-19T00:00:00Z"},
+                    {"body": later_v1, "author": "owner", "at": "2026-07-19T00:01:00Z"},
+                ],
+                "reviews": [], "head": target, "base_sha": "b" * 40,
+                "state": "OPEN", "is_draft": False, "checks": [],
+                "base": "main", "merge_state": "CLEAN",
+            }
+            context = {"repo": "owner/repo", "pr": 9, "bundle": bundle,
+                       "head": target, "base_sha": "b" * 40, "base": "main",
+                       "policy": cfg}
+            with mock.patch.object(review, "pr_context", return_value=context), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(review.status(root, 9), 0)
+
+            demotions = list((root / cfg["reviews_dir"]).glob(
+                f"{round_id}-freeze-1.demotion*.json"))
+            self.assertEqual(len(demotions), 1)
+            demotion = review.read_pr_freeze_demotion(
+                demotions[0], expected_round_id=round_id, expected_cycle=1)
+            self.assertEqual(demotion["reason"], "latest-v1-supersedes-v2")
+            binding, reason = review.ingest_round_binding(root, round_id, cfg)
+            self.assertEqual(reason, "latest-v1-supersedes-v2")
+            self.assertEqual(binding["request_binding_provenance"], "unknown")
+            self.assertIsNone(binding["rendered_request_digest"])
+            sidecars = improve._round_review_sidecars(root / cfg["reviews_dir"])[round_id]
+            row = improve._review_binding(None, round_id, "pr", sidecars)
+            self.assertEqual(row["review_binding_reason"], "latest-v1-supersedes-v2")
+            self.assertEqual(row["review_request_binding_provenance"], "unknown")
+            self.assertIsNone(row["rendered_request_digest"])
+
+    def test_pr_freeze_demotion_reader_enforces_filename_identity(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            path = review.write_pr_freeze_demotion(
+                root, "2026-07-19-r1", 7, 2, "a" * 40, "b" * 40,
+                ["macro-reviewer"], None, "docs/reviews",
+                rendered_request_digest=TEST_RENDERED_REQUEST_DIGEST,
+                superseding_cycle=3,
+                superseding_marker_at="2026-07-19T00:01:00Z")
+            renamed = path.with_name(path.name.replace("freeze-2", "freeze-3"))
+            path.rename(renamed)
+            with self.assertRaisesRegex(common.WorkflowError, "does not match"):
+                review.read_pr_freeze_demotion(renamed)
+
+    def test_pr_freeze_demotion_write_is_atomic_and_preserves_immutable_sequences(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            directory = root / "docs/reviews"
+            kwargs = {
+                "rendered_request_digest": TEST_RENDERED_REQUEST_DIGEST,
+                "superseding_cycle": 3,
+                "superseding_marker_at": "2026-07-19T00:01:00Z",
+            }
+            with mock.patch.object(
+                    common.os, "replace", side_effect=OSError("injected rename failure")):
+                with self.assertRaisesRegex(OSError, "injected rename failure"):
+                    review.write_pr_freeze_demotion(
+                        root, "2026-07-19-r1", 7, 2, "a" * 40, "b" * 40,
+                        ["macro-reviewer"], None, "docs/reviews", **kwargs)
+            self.assertEqual(list(directory.iterdir()), [])
+
+            first = review.write_pr_freeze_demotion(
+                root, "2026-07-19-r1", 7, 2, "a" * 40, "b" * 40,
+                ["macro-reviewer"], None, "docs/reviews", **kwargs)
+            first_bytes = first.read_bytes()
+            duplicate = review.write_pr_freeze_demotion(
+                root, "2026-07-19-r1", 7, 2, "a" * 40, "b" * 40,
+                ["macro-reviewer"], None, "docs/reviews", **kwargs)
+            self.assertEqual(duplicate, first)
+            second = review.write_pr_freeze_demotion(
+                root, "2026-07-19-r1", 7, 2, "a" * 40, "b" * 40,
+                ["macro-reviewer"], None, "docs/reviews",
+                **{**kwargs, "superseding_cycle": 4})
+            self.assertEqual(second.name, "2026-07-19-r1-freeze-2.demotion-2.json")
+            self.assertEqual(first.read_bytes(), first_bytes)
+            self.assertEqual(list(directory.glob("*.tmp")), [])
+
+    def test_corrupt_pr_freeze_demotion_is_quarantined_as_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, target, round_id = _pr_prepared_round(Path(d), "macro-reviewer")
+            cfg = common.load_config(root)
+            request_path = next((common.project_state_path(root) / "review-requests").glob(
+                f"{round_id}-request.binding*.json"))
+            request = review.read_round_request_binding(request_path)
+            review.write_pr_freeze_binding(
+                root, round_id, 9, 1, target, "b" * 40, ["macro-reviewer"],
+                None, cfg["reviews_dir"],
+                rendered_request_digest=request["rendered_request_digest"])
+            demotion = review.write_pr_freeze_demotion(
+                root, round_id, 9, 1, target, "b" * 40, ["macro-reviewer"],
+                None, cfg["reviews_dir"],
+                rendered_request_digest=request["rendered_request_digest"],
+                superseding_cycle=1,
+                superseding_marker_at="2026-07-19T00:01:00Z")
+            demotion.write_text("{corrupt")
+
+            binding, reason = review.ingest_round_binding(root, round_id, cfg)
+            self.assertIsNone(binding)
+            self.assertEqual(reason, "corrupt-round-binding:WorkflowError")
+            sidecars = improve._round_review_sidecars(root / cfg["reviews_dir"])[round_id]
+            row = improve._review_binding(None, round_id, "pr", sidecars)
+            self.assertIsNone(row["rendered_request_digest"])
+            self.assertEqual(row["review_binding_provenance"], "unknown")
+            self.assertEqual(row["review_binding_reason"],
+                             "corrupt-pr-freeze-demotion-sidecar")
+
+    def test_unparseable_mixed_version_timestamp_fails_closed(self):
+        head = "a" * 40
+        rows = [
+            {"body": review.emit_marker("review-cycle", {
+                "cycle": 1, "target_sha": head,
+            }, version=1), "author": "owner", "at": "not-a-time"},
+            {"body": review.emit_marker("review-cycle", {
+                "cycle": 1, "target_sha": head,
+                "rendered_request_digest": TEST_RENDERED_REQUEST_DIGEST,
+            }, version=2), "author": "owner", "at": "2026-07-19T00:00:00Z"},
+        ]
+
+        facts = review.classify(review.parse_bodies(rows), head, operators=("owner",))
+        self.assertTrue(facts["cycle_conflict"])
+        self.assertEqual(facts["cycle_version_skew_reason"], "v1-v2-timestamp-tie")
+        self.assertFalse(facts["cycle_fresh"])
 
     def test_conflicting_same_cycle_pr_freeze_digests_fail_closed(self):
         with tempfile.TemporaryDirectory() as d:

@@ -25,7 +25,7 @@ Markers (HTML comments embedded in PR comment bodies):
   waystone-approval      : SHA-bound human approval — {sha, by}
 
 Subcommands (also `waystone review <sub>`):
-  freeze --pr N [--round ID] [root]   stamp the current PR head as a new review cycle + post request
+  freeze --pr N --round ID [root]     stamp the current PR head as a new review cycle + post request
   status [--pr N] [root]              show per-cycle review status (PR mode) or packet pairs (packet mode)
   pending [root]                       list packet requests still awaiting ingested feedback
   prepare --round ID --narrative PATH [root]
@@ -53,7 +53,7 @@ import yaml  # noqa: E402
 from common import (
     CONFIG_NAME, WorkflowError, ancestry_status, fetch_upstream_head, find_project_root,
     git_full_sha, hold_project_lock, load_config, migrate_project_state, normalize_config,
-    parse_iso_timestamp, project_state_path, write_bytes_atomic,
+    parse_iso_timestamp, project_state_path, write_bytes_atomic, write_text_atomic,
 )  # noqa: E402
 
 CODEX_BOT = "chatgpt-codex-connector[bot]"  # REST `user.login` form
@@ -68,8 +68,15 @@ ROUND_REQUEST_BINDING_SCHEMA = "waystone-round-request-binding-2"
 DIGEST_BINDING_ROUND_CUTOFF = date(2026, 7, 18)
 PR_FREEZE_BINDING_V1_SCHEMA = "waystone-pr-freeze-binding-1"
 PR_FREEZE_BINDING_SCHEMA = "waystone-pr-freeze-binding-2"
+PR_FREEZE_DEMOTION_SCHEMA = "waystone-pr-freeze-demotion-1"
+CYCLE_V1_SUPERSESSION_REASON = "latest-v1-supersedes-v2"
+CYCLE_VERSION_TIE_REASON = "v1-v2-timestamp-tie"
+CYCLE_DIGEST_ERA_V1_REASON = "digest-era-v1-freeze"
 _ROUND_REQUEST_BINDING_FILE_RE = re.compile(
     r"^(?P<round_id>.+)-request\.binding(?:-(?P<sequence>\d+))?\.json$")
+_PR_FREEZE_DEMOTION_FILE_RE = re.compile(
+    r"^(?P<round_id>.+)-freeze-(?P<cycle>[1-9]\d*)\.demotion"
+    r"(?:-(?P<sequence>[1-9]\d*))?\.json$")
 PACKET_REVIEWING_RE = re.compile(
     r"- Reviewing: ([0-9a-f]{40})   \(diff against ([0-9a-f]{40}|\(root\))\)")
 PACKET_REVIEWING_FORMAT = (
@@ -516,6 +523,53 @@ def latest_round_request_binding(
     return latest, row
 
 
+def _review_cycle_row_version(row: dict) -> int:
+    if row.get("_kind") == "review-cycle" or "_version" in row:
+        version = row.get("_version", 1)
+    elif row.get("schema") == PR_FREEZE_BINDING_V1_SCHEMA:
+        version = 1
+    elif row.get("schema") == PR_FREEZE_BINDING_SCHEMA:
+        version = 2
+    else:
+        raise WorkflowError("review cycle row has no recognized marker or freeze schema")
+    if version not in (1, 2):
+        raise WorkflowError("review cycle row has an invalid version")
+    return version
+
+
+def select_latest_review_cycle_row(rows: list[dict]) -> tuple[dict, int | None, str | None]:
+    """Select the newest same-cycle row and report unsafe mixed-version ordering."""
+    if not rows:
+        raise WorkflowError("review cycle selection requires at least one row")
+
+    def parsed_order(row: dict) -> float | None:
+        raw = row.get("_at") if "_at" in row else row.get("at")
+        parsed = parse_iso_timestamp(raw)
+        return parsed.timestamp() if parsed is not None else None
+
+    all_versions = {_review_cycle_row_version(row) for row in rows}
+    parsed = [(row, parsed_order(row)) for row in rows]
+    if len(all_versions) > 1 and any(value is None for _row, value in parsed):
+        latest = max(rows, key=lambda row: (
+            str(row.get("_id") or ""), str(row.get("_file") or "")))
+        return latest, None, CYCLE_VERSION_TIE_REASON
+    latest_at = max(
+        value if value is not None else float("-inf") for _row, value in parsed)
+    latest_rows = [
+        row for row, value in parsed
+        if (value if value is not None else float("-inf")) == latest_at
+    ]
+    latest_versions = {_review_cycle_row_version(row) for row in latest_rows}
+    latest = max(latest_rows, key=lambda row: (
+        str(row.get("_id") or ""), str(row.get("_file") or "")))
+    if len(latest_versions) > 1:
+        return latest, None, CYCLE_VERSION_TIE_REASON
+    latest_version = next(iter(latest_versions))
+    if latest_version == 1 and 2 in all_versions:
+        return latest, latest_version, CYCLE_V1_SUPERSESSION_REASON
+    return latest, latest_version, None
+
+
 def ingest_round_binding(root: Path, round_id: str, cfg: dict) -> tuple[dict | None, str | None]:
     """Return only publication-time sidecar evidence; never rebuild it from current config."""
     directory = Path(root) / cfg["reviews_dir"]
@@ -535,6 +589,12 @@ def ingest_round_binding(root: Path, round_id: str, cfg: dict) -> tuple[dict | N
             return None, "missing-pr-freeze-sidecar"
         rows = [(path, read_pr_freeze_binding(path, expected_round_id=round_id))
                 for path in paths]
+        demotion_paths = sorted(directory.glob(
+            f"{round_id}-freeze-*.demotion*.json"))
+        demotions = [
+            (path, read_pr_freeze_demotion(path, expected_round_id=round_id))
+            for path in demotion_paths
+        ]
         latest_cycle = max(row["cycle"] for _path, row in rows)
         latest = [(path, row) for path, row in rows if row["cycle"] == latest_cycle]
         core_contracts = {(
@@ -546,9 +606,44 @@ def ingest_round_binding(root: Path, round_id: str, cfg: dict) -> tuple[dict | N
         v2_digests = {row["rendered_request_digest"] for _path, row in v2_rows}
         if len(core_contracts) != 1 or len(v2_digests) > 1:
             return None, "conflicting-pr-freeze-sidecars"
-        version_skew = len({row["schema"] for _path, row in latest}) > 1
-        path, row = max(v2_rows or latest, key=lambda item: (item[1]["at"], str(item[0])))
+        cycle_demotions = [
+            (path, demotion) for path, demotion in demotions
+            if demotion["cycle"] == latest_cycle
+        ]
+        v2_contracts = {
+            _pr_freeze_demotion_contract(candidate)
+            for _candidate_path, candidate in v2_rows
+        }
+        demotion_contracts = {
+            _pr_freeze_demotion_contract(demotion)
+            for _path, demotion in cycle_demotions
+        }
+        if not demotion_contracts.issubset(v2_contracts):
+            return None, "conflicting-pr-freeze-demotion-sidecars"
+        persisted_demotion = bool(demotion_contracts)
+        version_skew = (len({row["schema"] for _path, row in latest}) > 1
+                        or persisted_demotion)
+        row, _latest_version, version_reason = select_latest_review_cycle_row(
+            [candidate for _path, candidate in latest])
+        path = next(candidate_path for candidate_path, candidate in latest
+                    if candidate is row)
         request_directory = project_state_path(root) / "review-requests"
+        if version_reason is None and persisted_demotion:
+            version_reason = CYCLE_V1_SUPERSESSION_REASON
+        if version_reason is not None:
+            return {
+                **row,
+                "request_binding_schema": None,
+                "narrative_digest": None,
+                "rendered_request_digest": None,
+                "request_binding_provenance": "unknown",
+                "request_binding_reason": version_reason,
+                "pr_freeze_version_skew": version_skew,
+                "source": str(path),
+                "request_binding_source": None,
+                "demotion_source": (
+                    str(cycle_demotions[-1][0]) if cycle_demotions else None),
+            }, version_reason
         if row["schema"] == PR_FREEZE_BINDING_V1_SCHEMA:
             return {
                 **row,
@@ -1069,6 +1164,124 @@ def write_pr_freeze_binding(root: Path, round_id: str, pr: int, cycle: int,
             number += 1
 
 
+def pr_freeze_demotion_identity(path: Path) -> tuple[str, int, int] | None:
+    """Return the immutable round/cycle/sequence identity encoded by a demotion filename."""
+    match = _PR_FREEZE_DEMOTION_FILE_RE.fullmatch(Path(path).name)
+    if match is None:
+        return None
+    return (
+        match.group("round_id"), int(match.group("cycle")),
+        int(match.group("sequence") or 1),
+    )
+
+
+def read_pr_freeze_demotion(path: Path, *, expected_round_id: str | None = None,
+                            expected_cycle: int | None = None) -> dict:
+    """Strictly load one locally observed loss of v2 digest authority."""
+    identity = pr_freeze_demotion_identity(path)
+    if identity is None:
+        raise WorkflowError(f"corrupt review binding {path}: invalid demotion filename")
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise WorkflowError(f"corrupt review binding {path}: {type(e).__name__}") from e
+    if (not isinstance(data, dict) or data.get("schema") != PR_FREEZE_DEMOTION_SCHEMA
+            or not isinstance(data.get("round_id"), str) or not data["round_id"]
+            or _round_request_binding_date(data.get("round_id")) is None
+            or type(data.get("pr")) is not int or data["pr"] < 1
+            or not _is_cycle(data.get("cycle"))
+            or not _is_sha(data.get("target_sha")) or not _is_sha(data.get("base_sha"))
+            or not _is_strlist(data.get("reviewers"))
+            or (data.get("profile_fingerprint") is not None
+                and not _nonempty_str(data.get("profile_fingerprint")))
+            or not _is_sha256_digest(data.get("rendered_request_digest"))
+            or data.get("reason") != CYCLE_V1_SUPERSESSION_REASON
+            or not _is_cycle(data.get("superseding_cycle"))
+            or data["superseding_cycle"] < data["cycle"]
+            or parse_iso_timestamp(data.get("superseding_marker_at")) is None
+            or data.get("mode") != "pr"
+            or data.get("canonical_store") != "local-freeze-demotion-evidence"
+            or parse_iso_timestamp(data.get("at")) is None):
+        raise WorkflowError(f"corrupt review binding {path}: invalid schema or fields")
+    filename_round, filename_cycle, _sequence = identity
+    if data["round_id"] != filename_round:
+        raise WorkflowError(
+            f"corrupt review binding {path}: round_id {data['round_id']!r} does not match "
+            f"filename identity {filename_round!r}")
+    if data["cycle"] != filename_cycle:
+        raise WorkflowError(
+            f"corrupt review binding {path}: cycle {data['cycle']!r} does not match "
+            f"filename identity {filename_cycle!r}")
+    if expected_round_id is not None and data["round_id"] != expected_round_id:
+        raise WorkflowError(
+            f"corrupt review binding {path}: round_id {data['round_id']!r} does not match "
+            f"{expected_round_id!r}")
+    if expected_cycle is not None and data["cycle"] != expected_cycle:
+        raise WorkflowError(
+            f"corrupt review binding {path}: cycle {data['cycle']!r} does not match "
+            f"{expected_cycle!r}")
+    return data
+
+
+def _pr_freeze_demotion_contract(row: dict) -> tuple:
+    return (
+        row["round_id"], row["pr"], row["cycle"], row["target_sha"], row["base_sha"],
+        tuple(row["reviewers"]), row.get("profile_fingerprint"),
+        row["rendered_request_digest"],
+    )
+
+
+def write_pr_freeze_demotion(root: Path, round_id: str, pr: int, cycle: int,
+                             target_sha: str, base_sha: str, reviewers: list[str],
+                             profile_fingerprint: str | None, reviews_dir: str, *,
+                             rendered_request_digest: str, superseding_cycle: int,
+                             superseding_marker_at: str) -> Path:
+    """Persist a trusted GitHub v1 supersession as immutable local projection evidence."""
+    if (not isinstance(round_id, str) or _round_request_binding_date(round_id) is None
+            or type(pr) is not int or pr < 1 or not _is_cycle(cycle)
+            or not _is_sha(target_sha) or not _is_sha(base_sha)
+            or not _is_strlist(reviewers)
+            or (profile_fingerprint is not None and not _nonempty_str(profile_fingerprint))
+            or not _is_sha256_digest(rendered_request_digest)
+            or not _is_cycle(superseding_cycle) or superseding_cycle < cycle
+            or parse_iso_timestamp(superseding_marker_at) is None
+            or not _nonempty_str(reviews_dir)):
+        raise WorkflowError(
+            "PR freeze demotion requires round, PR, cycle, SHAs, reviewers, digest, and "
+            "superseding marker identity")
+    directory = Path(root) / reviews_dir
+    directory.mkdir(parents=True, exist_ok=True)
+    row = {
+        "schema": PR_FREEZE_DEMOTION_SCHEMA, "round_id": round_id, "pr": pr,
+        "cycle": cycle, "target_sha": target_sha, "base_sha": base_sha,
+        "reviewers": reviewers, "profile_fingerprint": profile_fingerprint,
+        "rendered_request_digest": rendered_request_digest,
+        "reason": CYCLE_V1_SUPERSESSION_REASON,
+        "superseding_cycle": superseding_cycle,
+        "superseding_marker_at": superseding_marker_at,
+        "mode": "pr", "canonical_store": "local-freeze-demotion-evidence",
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    contract = {key: value for key, value in row.items() if key != "at"}
+    for existing in sorted(directory.glob(
+            f"{round_id}-freeze-{cycle}.demotion*.json")):
+        previous = read_pr_freeze_demotion(
+            existing, expected_round_id=round_id, expected_cycle=cycle)
+        if {key: value for key, value in previous.items() if key != "at"} == contract:
+            return existing
+    base = directory / f"{round_id}-freeze-{cycle}.demotion.json"
+    path = base
+    number = 2
+    content = json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+    while path.exists():
+        path = base.with_name(f"{base.stem}-{number}{base.suffix}")
+        number += 1
+    # The existence scan preserves immutable sequence files despite write_text_atomic's
+    # replace semantics; the helper prevents a failed write from exposing truncated JSON.
+    write_text_atomic(path, content)
+    return path
+
+
 def parse_packet_request_binding(path: Path) -> tuple[str, str | None] | None:
     """Read the packet template's one byte-shape-exact structured Reviewing line."""
     try:
@@ -1583,7 +1796,12 @@ def latest_cycle(markers: list[dict], operators: tuple = ()) -> dict | None:
     the frozen target."""
     cycles = [m for m in markers if m.get("_kind") == "review-cycle" and marker_valid(m)
               and (not operators or m.get("_author") in operators)]
-    return max(cycles, key=lambda m: (m["cycle"], m.get("_at") or "")) if cycles else None
+    if not cycles:
+        return None
+    max_cycle = max(m["cycle"] for m in cycles)
+    latest, _version, _reason = select_latest_review_cycle_row(
+        [m for m in cycles if m["cycle"] == max_cycle])
+    return latest
 
 
 def next_cycle_number(markers: list[dict], operators: tuple = ()) -> int:
@@ -1631,17 +1849,33 @@ def classify(markers: list[dict], current_head: str, macro_reviewers: tuple = ()
         ) for m in same_cycle}
         v2_cycles = [m for m in same_cycle if m.get("_version", 1) == 2]
         v2_digests = {m["rendered_request_digest"] for m in v2_cycles}
-        conflict = len(core_contracts) > 1 or len(v2_digests) > 1
-        version_skew = len({m.get("_version", 1) for m in same_cycle}) > 1
-        lc = max(v2_cycles or same_cycle, key=at)
-        freeze_at = max((at(m) for m in same_cycle), default="")
+        stream_versions = {m.get("_version", 1) for m in trusted_cycles}
+        version_skew = len(stream_versions) > 1
+        lc, latest_version, version_reason = select_latest_review_cycle_row(same_cycle)
+        if version_reason is None and latest_version == 1:
+            try:
+                digest_era_v1 = _round_requires_digest_binding(lc.get("round_id"))
+            except WorkflowError:
+                # Genuine old hosts emitted roundless v1 markers. An `(unset)` or unparseable
+                # round id remains the explicit legacy residual because no durable cutoff can be
+                # inferred from it; parseable post-cutoff rounds fail closed below.
+                digest_era_v1 = False
+            if digest_era_v1:
+                version_reason = CYCLE_DIGEST_ERA_V1_REASON
+            elif 2 in stream_versions:
+                version_reason = CYCLE_V1_SUPERSESSION_REASON
+        conflict = (len(core_contracts) > 1 or len(v2_digests) > 1
+                    or version_reason == CYCLE_VERSION_TIE_REASON)
+        freeze_at = at(lc)
     else:
-        conflict, version_skew, lc, freeze_at = False, False, None, ""
+        conflict, version_skew, version_reason = False, False, None
+        latest_version, lc, freeze_at = None, None, ""
     cyc = lc["cycle"] if lc else None
     frozen = (lc or {}).get("target_sha")
     frozen_base = (lc or {}).get("base_sha")
     base_ok = current_base is None or str(frozen_base) == current_base
-    head_matches = bool(lc) and not conflict and str(frozen) == current_head and base_ok
+    head_matches = (bool(lc) and not conflict and version_reason is None
+                    and str(frozen) == current_head and base_ok)
 
     def latest_group(items: list[dict]) -> list[dict]:
         """All markers sharing the newest timestamp — so a same-timestamp conflict fails closed
@@ -1703,9 +1937,12 @@ def classify(markers: list[dict], current_head: str, macro_reviewers: tuple = ()
         "latest_cycle": cyc,
         "round_id": (lc or {}).get("round_id"),
         "profile_fingerprint": (lc or {}).get("profile_fingerprint"),
-        "rendered_request_digest": (lc or {}).get("rendered_request_digest"),
-        "cycle_marker_version": (lc or {}).get("_version", 1) if lc else None,
+        "rendered_request_digest": (
+            (lc or {}).get("rendered_request_digest")
+            if latest_version == 2 and version_reason is None else None),
+        "cycle_marker_version": latest_version,
         "cycle_version_skew": version_skew,
+        "cycle_version_skew_reason": version_reason,
         "frozen_sha": frozen,
         "frozen_base": frozen_base,
         "cycle_conflict": conflict,
@@ -1728,6 +1965,7 @@ def completed_pr_feedback_event(facts: dict, pr: int) -> dict | None:
     head = facts.get("current_head")
     if (not isinstance(round_id, str) or not round_id or round_id == "(unset)"
             or type(cycle) is not int or not _is_sha(head)
+            or facts.get("cycle_version_skew_reason") is not None
             or facts.get("cycle_fresh") is not True or facts.get("approved_at_head") is not True):
         return None
     if "codex" in reviewers and (facts.get("codex_fresh") is not True
@@ -2027,6 +2265,14 @@ def _root(argv: list[str]) -> Path | None:
 
 
 def freeze(root: Path, pr: int, round_id: str | None) -> int:
+    if round_id is None:
+        print(
+            "review freeze: --round ID is required; new freezes are digest-bound and never "
+            "publish legacy v1 markers. Run `waystone review prepare --round ID --narrative "
+            "PATH` first, then re-run freeze with that --round.",
+            file=sys.stderr,
+        )
+        return 1
     ctx = pr_context(root, pr)
     if ctx is None:
         return 1
@@ -2049,67 +2295,61 @@ def freeze(root: Path, pr: int, round_id: str | None) -> int:
     n = next_cycle_number(markers, operators)
     reviewers, profile_fingerprint = resolve_reviewer_set(
         root, policy["review"]["reviewers"])
-    request_text = None
-    request_sidecar = None
-    if round_id is not None:
-        request = prepared_request_path(root, round_id, mode="pr")
-        sidecar_paths = sorted(request.parent.glob(f"{round_id}-request.binding*.json"))
-        if not request.is_file() or not sidecar_paths:
-            print(
-                "review freeze: prepared PR request or its binding is missing; run "
-                f"waystone review prepare --round {round_id} --narrative PATH first",
-                file=sys.stderr)
-            return 1
-        try:
-            _binding_path, request_sidecar = latest_round_request_binding(
-                sidecar_paths, expected_round_id=round_id)
-            if _binding_path is None or request_sidecar is None:
-                raise WorkflowError("latest request binding is corrupt")
-            # The published carrier is re-rendered from prepare's inputs, checked against the
-            # digest prepare stored, and appended without transforming those verified bytes.
-            _exposure_path, exposure = read_round_closeout_exposure(root, round_id)
-            narrative = _read_review_narrative(stored_narrative_path(root, round_id))
-            if request_sidecar["schema"] == ROUND_REQUEST_BINDING_V1_SCHEMA:
-                raise WorkflowError("latest request binding is legacy-pre-digest")
-            if (_canonical_narrative_digest(narrative)
-                    != request_sidecar["narrative_digest"]):
-                raise WorkflowError(
-                    "stored narrative digest does not match the latest request binding")
-            if not _binding_matches_exposure(request_sidecar, exposure):
-                raise WorkflowError(
-                    "round exposure does not match the latest request binding")
-            request_text = _render_review_request(round_id, exposure, narrative)
-            if (_canonical_rendered_request_digest(request_text)
-                    != request_sidecar["rendered_request_digest"]):
-                raise WorkflowError(
-                    "rendered request digest does not match the latest request binding")
-        except (OSError, UnicodeDecodeError, WorkflowError) as e:
-            print(
-                f"review freeze: prepared PR request is not reproducible ({e}); re-run "
-                f"waystone review prepare --round {round_id} --narrative PATH",
-                file=sys.stderr)
-            return 1
-        request_binding = (exposure["head_sha"], exposure.get("base_sha"))
-        if (request_sidecar["mode"] != "pr"
-                or (request_sidecar["target_sha"], request_sidecar.get("base_sha"))
-                != request_binding
-                or request_sidecar["target_sha"] != head
-                or request_sidecar["reviewers"] != reviewers):
-            print(
-                "review freeze: prepared PR request does not match the current PR head/reviewer "
-                "binding; reclose and prepare again with a new round id",
-                file=sys.stderr)
-            return 1
+    request = prepared_request_path(root, round_id, mode="pr")
+    sidecar_paths = sorted(request.parent.glob(f"{round_id}-request.binding*.json"))
+    if not request.is_file() or not sidecar_paths:
+        print(
+            "review freeze: prepared PR request or its binding is missing; run "
+            f"waystone review prepare --round {round_id} --narrative PATH first",
+            file=sys.stderr)
+        return 1
+    try:
+        _binding_path, request_sidecar = latest_round_request_binding(
+            sidecar_paths, expected_round_id=round_id)
+        if _binding_path is None or request_sidecar is None:
+            raise WorkflowError("latest request binding is corrupt")
+        # The published carrier is re-rendered from prepare's inputs, checked against the
+        # digest prepare stored, and appended without transforming those verified bytes.
+        _exposure_path, exposure = read_round_closeout_exposure(root, round_id)
+        narrative = _read_review_narrative(stored_narrative_path(root, round_id))
+        if request_sidecar["schema"] == ROUND_REQUEST_BINDING_V1_SCHEMA:
+            raise WorkflowError("latest request binding is legacy-pre-digest")
+        if (_canonical_narrative_digest(narrative)
+                != request_sidecar["narrative_digest"]):
+            raise WorkflowError(
+                "stored narrative digest does not match the latest request binding")
+        if not _binding_matches_exposure(request_sidecar, exposure):
+            raise WorkflowError(
+                "round exposure does not match the latest request binding")
+        request_text = _render_review_request(round_id, exposure, narrative)
+        if (_canonical_rendered_request_digest(request_text)
+                != request_sidecar["rendered_request_digest"]):
+            raise WorkflowError(
+                "rendered request digest does not match the latest request binding")
+    except (OSError, UnicodeDecodeError, WorkflowError) as e:
+        print(
+            f"review freeze: prepared PR request is not reproducible ({e}); re-run "
+            f"waystone review prepare --round {round_id} --narrative PATH",
+            file=sys.stderr)
+        return 1
+    request_binding = (exposure["head_sha"], exposure.get("base_sha"))
+    if (request_sidecar["mode"] != "pr"
+            or (request_sidecar["target_sha"], request_sidecar.get("base_sha"))
+            != request_binding
+            or request_sidecar["target_sha"] != head
+            or request_sidecar["reviewers"] != reviewers):
+        print(
+            "review freeze: prepared PR request does not match the current PR head/reviewer "
+            "binding; reclose and prepare again with a new round id",
+            file=sys.stderr)
+        return 1
     marker_fields = {
-        "round_id": round_id or "(unset)", "cycle": n, "target_sha": head,
+        "round_id": round_id, "cycle": n, "target_sha": head,
         "base_sha": base_sha, "reviewers": reviewers,
         "profile_fingerprint": profile_fingerprint,
+        "rendered_request_digest": request_sidecar["rendered_request_digest"],
     }
-    if request_sidecar is not None:
-        marker_fields["rendered_request_digest"] = request_sidecar[
-            "rendered_request_digest"]
-    marker = emit_marker(
-        "review-cycle", marker_fields, version=2 if request_sidecar is not None else 1)
+    marker = emit_marker("review-cycle", marker_fields, version=2)
     macro = [r for r in reviewers if r != "codex"]
     body = (f"## Review cycle {n} — frozen at `{head[:12]}` (base `{base_sha[:12]}`)\n\n"
             f"Immutable review target for cycle {n}. A new push — or a base advance — makes this "
@@ -2118,24 +2358,23 @@ def freeze(root: Path, pr: int, round_id: str | None) -> int:
             + (f"Macro reviewer(s) — {', '.join(macro)}: review at the SHA above; end your reply with "
                f"a `waystone-review-result` footer carrying `reviewed_sha: {head}` and `review_cycle: {n}`.\n\n"
                if macro else "")
-            + ((request_text + "\n") if request_text is not None else "")
+            + request_text + "\n"
             + marker + "\n")
     rc, out = _gh(root, "pr", "comment", str(pr), "--body", body)
     if rc != 0:
         print(f"review freeze: gh pr comment failed: {out}", file=sys.stderr)
         return 1
-    if round_id is not None:
-        try:
-            write_pr_freeze_binding(
-                root, round_id, pr, n, head, base_sha, reviewers, profile_fingerprint,
-                policy["reviews_dir"],
-                rendered_request_digest=request_sidecar["rendered_request_digest"])
-        except (OSError, WorkflowError) as e:
-            print(
-                f"review freeze: PR comment posted but local freeze binding was not recorded: {e}",
-                file=sys.stderr,
-            )
-            return 1
+    try:
+        write_pr_freeze_binding(
+            root, round_id, pr, n, head, base_sha, reviewers, profile_fingerprint,
+            policy["reviews_dir"],
+            rendered_request_digest=request_sidecar["rendered_request_digest"])
+    except (OSError, WorkflowError) as e:
+        print(
+            f"review freeze: PR comment posted but local freeze binding was not recorded: {e}",
+            file=sys.stderr,
+        )
+        return 1
     print(f"review cycle {n} frozen at {head[:12]} on PR #{pr} (reviewers: {', '.join(reviewers)})")
     return 0
 
@@ -2160,6 +2399,47 @@ def status(root: Path, pr: int | None) -> int:
         print(f"  pro result@head:{facts['pro_result_at_head']}  ({facts['n_results']} result(s))")
         print(f"  findings resolved: {facts['findings_resolved']}")
         print(f"  approved@head:  {facts['approved_at_head']}  ({facts['n_approvals']} approval(s))")
+        if (facts.get("cycle_version_skew_reason") == CYCLE_V1_SUPERSESSION_REASON
+                and facts.get("cycle_conflict") is False):
+            owner = (ctx["repo"].split("/", 1)[0] if ctx.get("repo") else "")
+            operators = tuple({
+                owner, *ctx["policy"]["review"].get("operators", []),
+            } - {""})
+            trusted_cycles = [
+                marker for marker in parse_bodies(ctx["bundle"]["bodies"])
+                if marker.get("_kind") == "review-cycle" and marker_valid(marker)
+                and (not operators or marker.get("_author") in operators)
+            ]
+            latest_cycle_number = facts.get("latest_cycle")
+            latest_rows = [
+                marker for marker in trusted_cycles
+                if marker.get("cycle") == latest_cycle_number
+            ]
+            superseding_marker, _version, _reason = select_latest_review_cycle_row(
+                latest_rows)
+            superseding_marker_at = superseding_marker.get("_at")
+            for marker in trusted_cycles:
+                marker_round = marker.get("round_id")
+                if (marker.get("_version", 1) != 2
+                        or not isinstance(marker_round, str)
+                        or _round_request_binding_date(marker_round) is None
+                        or not _is_sha(marker.get("base_sha"))
+                        or not _is_strlist(marker.get("reviewers"))):
+                    continue
+                try:
+                    write_pr_freeze_demotion(
+                        root, marker_round, pr, marker["cycle"], marker["target_sha"],
+                        marker["base_sha"], marker["reviewers"],
+                        marker.get("profile_fingerprint"), ctx["policy"]["reviews_dir"],
+                        rendered_request_digest=marker["rendered_request_digest"],
+                        superseding_cycle=latest_cycle_number,
+                        superseding_marker_at=superseding_marker_at,
+                    )
+                except (OSError, WorkflowError) as e:
+                    print(
+                        f"review status: trusted PR cycle demotion could not be recorded "
+                        f"locally: {e}", file=sys.stderr)
+                    return 1
         round_id = facts.get("round_id")
         if (isinstance(round_id, str) and round_id and round_id != "(unset)"
                 and _is_cycle(facts.get("latest_cycle"))

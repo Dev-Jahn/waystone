@@ -57,6 +57,10 @@ def merge_gate(g: dict) -> tuple[bool, list[str]]:
         f.append(f"PR base is {g['base']!r}, expected {g['expected_base']!r}")
     if not g.get("cycle_fresh"):
         f.append("review cycle is stale: head or base advanced past the frozen SHAs — re-freeze (waystone review freeze)")
+    if g.get("cycle_version_skew_reason"):
+        f.append(
+            "review request digest authority is unknown after mixed-version cycle ordering "
+            f"({g['cycle_version_skew_reason']}); freeze a new cycle with a v2 marker")
     if g.get("require_ci"):
         if g.get("ci") == "failing":
             f.append("CI is failing")

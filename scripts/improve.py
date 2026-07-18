@@ -973,6 +973,12 @@ def _review_binding(request_file: Path | None, round_id: str, mode: str,
         }
 
     if mode == "pr":
+        demotion_sidecars = [
+            row for row in sidecars
+            if row.get("_binding_kind") == "demotion"
+        ]
+        if any(row.get("_binding_error") is not None for row in demotion_sidecars):
+            return result(reason="corrupt-pr-freeze-demotion-sidecar")
         freeze_sidecars = [
             row for row in sidecars
             if row.get("schema") in (
@@ -991,13 +997,35 @@ def _review_binding(request_file: Path | None, round_id: str, mode: str,
         v2_digests = {row["rendered_request_digest"] for row in v2_rows}
         if len(core_bindings) != 1 or len(v2_digests) > 1:
             return result(reason="conflicting-pr-freeze-sidecars")
-        version_skew = len({row["schema"] for row in cycle_rows}) > 1
-        latest = max(v2_rows or cycle_rows, key=lambda row: (row["at"], row["_file"]))
+        cycle_demotions = [
+            row for row in demotion_sidecars
+            if row["cycle"] == latest_cycle
+        ]
+        v2_contracts = {
+            review._pr_freeze_demotion_contract(row) for row in v2_rows
+        }
+        demotion_contracts = {
+            review._pr_freeze_demotion_contract(row) for row in cycle_demotions
+        }
+        if not demotion_contracts.issubset(v2_contracts):
+            return result(reason="conflicting-pr-freeze-demotion-sidecars")
+        persisted_demotion = bool(demotion_contracts)
+        version_skew = (len({row["schema"] for row in cycle_rows}) > 1
+                        or persisted_demotion)
+        latest, _latest_version, version_reason = review.select_latest_review_cycle_row(
+            cycle_rows)
+        if version_reason is None and persisted_demotion:
+            version_reason = review.CYCLE_V1_SUPERSESSION_REASON
         request_sidecars = [
             row for row in sidecars
             if row.get("_binding_kind") == "request"
         ]
-        if latest["schema"] == review.PR_FREEZE_BINDING_V1_SCHEMA:
+        if version_reason is not None:
+            request_kwargs = {
+                "request_provenance": "unknown",
+                "request_reason": version_reason,
+            }
+        elif latest["schema"] == review.PR_FREEZE_BINDING_V1_SCHEMA:
             request_kwargs = {
                 "request_provenance": "legacy-pre-digest",
                 "request_reason": "legacy-pre-digest",
@@ -1039,7 +1067,7 @@ def _review_binding(request_file: Path | None, round_id: str, mode: str,
                     }
         return result(
             latest["target_sha"], latest["base_sha"], "explicit",
-            "pr-freeze-version-skew" if version_skew else None,
+            version_reason or ("pr-freeze-version-skew" if version_skew else None),
             "pr-freeze-sidecar", cycle=latest_cycle, reviewers=list(latest["reviewers"]),
             profile_fingerprint=latest.get("profile_fingerprint"),
             cycle_version_skew=version_skew, **request_kwargs)
@@ -1136,6 +1164,26 @@ def _round_review_sidecars(
             print(f"improve: warning: {e}; excluded from projection", file=sys.stderr)
             continue
         rows.setdefault(data["round_id"], []).append({**data, "_file": str(path)})
+    demotion_paths = sorted(
+        rdir.glob("*-freeze-*.demotion*.json")) if rdir.is_dir() else []
+    for path in demotion_paths:
+        identity = review.pr_freeze_demotion_identity(path)
+        if identity is None:
+            continue
+        try:
+            data = review.read_pr_freeze_demotion(
+                path, expected_round_id=identity[0], expected_cycle=identity[1])
+        except WorkflowError as e:
+            print(f"improve: warning: {e}; quarantined as unknown", file=sys.stderr)
+            rows.setdefault(identity[0], []).append({
+                "round_id": identity[0], "cycle": identity[1], "_file": str(path),
+                "_binding_error": "corrupt-pr-freeze-demotion-sidecar",
+                "_binding_kind": "demotion",
+            })
+            continue
+        rows.setdefault(data["round_id"], []).append({
+            **data, "_file": str(path), "_binding_kind": "demotion",
+        })
     return rows
 
 
