@@ -513,6 +513,7 @@ tasks:
     severity: "minor"
     deps: ["fix/remote-verify-live-ref"]
   - id: fix/binding-schema-v2-digests
+    accept: ["digest-capable binding은 새 schema(waystone-round-request-binding-2)로 발행되고 narrative_digest·rendered_request_digest가 필수다 — v2에서 어느 하나라도 부재/무효면 corrupt로 fail-loud", "binding-1은 genuine legacy 읽기 전용으로만 수용된다 — 신규 발행은 항상 v2, digest-capable round의 digestless binding은 ingest가 거부한다 (RED: 게시 후 ingest 전에 binding에서 digest만 제거 → 완료로 오판되지 않고 legacy-pre-digest 위장 불가)", "publication 게이트와 freeze는 게시 내용을 stored rendered_request_digest와 대조한다 — template 정적 텍스트나 exposure의 미결속 필드(project/branch)만 변조해 기존 feedback이 완료를 유지한 채 다른 내용이 게시될 수 없다 (RED: template 또는 exposure 변조 후 게이트 거부)", "improve 투영이 v2 digest 필드를 보존하고 v1/v2 provenance를 정직하게 구분한다", "전체 테스트 스위트 green + ruff F401,F841 clean — 기존 digest 계약(narrative-only 재-prepare pending 재개, 도장-후-strip 차단, 재렌더 대조) 무회귀"]
     scope: ["scripts/review.py", "scripts/improve.py", "scripts/tests/run_tests.py"]
     title: "binding schema v2 분리 — narrative_digest·rendered_request_digest를 필수 필드로 하는 waystone-round-request-binding-2 도입, binding-1은 genuine legacy 전용(digest 부재=corrupt는 v2만), digest-capable round의 digestless binding은 ingest가 거부, publication/freeze는 stored rendered digest 대조로 template·exposure 미결속 필드(project/branch)까지 간접 결속 (JW-GPT-006 + JW-GPT-004 메커니즘 B)"
     status: "pending"
@@ -526,6 +527,7 @@ tasks:
     deps: ["fix/binding-schema-v2-digests"]
     origin: "review-2026-07-18-carrier-lanes-fixes"
   - id: fix/probe-proof-runtime-fingerprint
+    accept: ["프로브 증명 마커가 versioned JSON 계약이 된다 — proof schema 버전, resolved codex 실행 파일 경로·버전, platform/kernel, sandbox 정책 식별자, worktree cache mount/device identity를 기록", "프로브 생략은 현재 환경 fingerprint와 exact-match일 때만이다 — 불일치는 무시+어느 축이 달라졌는지 정직한 안내 후 재프로브 (RED: 타 환경 fingerprint로 기록된 마커·codex 버전만 달라진 마커 각각에서 프로브 실행)", "legacy 고정 문자열(verified) 마커는 조용히 수용되지 않는다 — 무시+안내 후 재프로브하고 성공 시 신 계약으로 원자 재기록 (RED)", "기존 계약 무회귀: untracked-만 인정, probe-once 동시성(lock 하 재확인), 복원적·원자적 self-ignore, legacy config 키 안내 전부 유지", "전체 테스트 스위트 green + ruff F401,F841 clean"]
     scope: ["scripts/delegate.py", "scripts/common.py", "scripts/tests/run_tests.py"]
     title: "probe proof 마커를 machine/runtime fingerprint 결속 versioned JSON 계약으로 — resolved codex path·version, platform/kernel, sandbox policy, worktree cache mount identity를 기록하고 exact-match일 때만 프로브 생략 (NFS/checkout 복사 전파·runtime drift 차단; Q1 잔여)"
     status: "pending"
