@@ -1,6 +1,6 @@
 {
   "name": "waystone",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "SSOT-anchored agentic development workflow harness for ideation, setup, task registries, rounds, reviews, delegation, status, and evidence-grounded workflow improvement.",
   "author": {
     "name": "Jahn",

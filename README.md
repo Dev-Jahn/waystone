@@ -21,7 +21,7 @@
 
 Waystone is a Claude Code and Codex plugin that gives a project a durable source of direction, a validated task list, bounded work cycles, independent review, and a way to learn from past agent sessions. It is built for research and software projects that span many sessions or agents — where context, decisions, and verification evidence would otherwise scatter across chats and memory files.
 
-> **Status:** The v0.10 Bind & Compose capability set is implemented; the distributable manifest version bump is intentionally separate. Waystone now consumes role/execution/backend bindings across host and external execution, composes four policy layers, and records longitudinal workflow metrics. Next: enforceable guards, recorded waivers, and larger-scale orchestration.
+> **Status:** v0.11 Anchor & Attest is the current release. Completion judgments — review receipts, delegation verdicts, round closeouts — now derive only from immutable, re-derivable evidence: digest-bound request generations, read-time re-derivation of reviewer replies, and identity-attested runner probes, with honest failure modes across mixed-version and mixed-machine states. Next: enforceable guards, recorded waivers, and larger-scale orchestration.
 
 <br>
 
@@ -410,7 +410,8 @@ remain visible but never block until the enforcement arc lands.
 | **v0.7 — Observe & Advise** | Organize projects, run review-centered work cycles, analyze past sessions, and make evidence-backed recommendations. | Implemented |
 | **v0.8 — Delegate & Verify** | Run coding tasks through an isolated, reproducible delegation flow; verify results independently; begin project-specific observation and warning rules. | Implemented |
 | **v0.9 — Unify & Automate** | Share one project state across Claude Code and Codex with cross-process locking; let the main session run delegation end-to-end behind harness-enforced acceptance gates; scope improve analysis to the project by default. | Implemented |
-| **v0.10 — Bind & Compose** | Complete consumption of role, execution, and backend bindings; compose four policy layers with consent-gated sharing; complete observation lenses and longitudinal metrics. | Implemented — current release |
+| **v0.10 — Bind & Compose** | Complete consumption of role, execution, and backend bindings; compose four policy layers with consent-gated sharing; complete observation lenses and longitudinal metrics. | Implemented |
+| **v0.11 — Anchor & Attest** | Bind every completion judgment to immutable, re-derivable evidence: digest-bound review generations, read-time receipt re-derivation, identity-attested delegation probes, and honest failure modes across mixed-version hosts. | Implemented — current release |
 | **Next — Adapt & Enforce** | Promote proven checks to enforceable guards with recorded waivers, and support larger parallel task groups. | Planned |
 
 <details>
