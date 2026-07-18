@@ -2,6 +2,22 @@
 
 round 단위 작업 이력이 이 파일에 축적된다. 활성 task와 의존성은 `tasks.yaml`(CLI: `waystone task`)과 생성 파일 `ROADMAP.md` 참조.
 
+## 2026-07-18-generation-binding
+
+- **Goal**: carrier-lanes-fixes 재리뷰(gpt-5.6-pro/xhigh, CHANGES REQUESTED — major 4)를 전량 해소: request generation 정체성 결속과 프로브 증명의 runtime 결속.
+- **Shipped** (전부 implementer=external-runner/codex:gpt-5.6-sol xhigh; 매 attempt 호스트 스위트+ruff 실측, 설계 회전엔 raw codex 적대 리뷰(xhigh)·재량 0 기계 델타엔 main 직접 검증 — 근거는 각 delegation record verdict artifact):
+  - fix/binding-schema-v2-digests — binding-2 schema: narrative+rendered request digest 필수(부재=corrupt), digest-capability를 round 날짜 cutoff(> 2026-07-18)로 sidecar 밖 앵커(다운그레이드 위장 차단, same-day 정품 v1 보호), 비실재 날짜 corrupt(packet·PR 패리티), 게이트·freeze의 stored rendered digest 대조+byte-동일 게시, round close 신규 mint 현재일 검증(기존 round 익일 확장 허용) (attempt-5 인수 @ a8f208a; attempt-4가 verdict 인수 후 병렬 병합 base drift로 hash-동일 재적용 — 같은 파일 lane 순차 병합 교훈 기록)
+  - fix/probe-proof-runtime-fingerprint — 프로브 증명 마커를 versioned JSON fingerprint 계약으로: host identity(machine-id 정규형/IOPlatformUUID)·resolved codex 경로+stat·stdout version(stderr 기록 전용)·sandbox 관측 정직화·mount 정체성, exact-match만 생략+축별 안내, 전 실행 표면 resolved 경로 통일, codex 부재 CI-동등 스위트 green (attempt-4 인수 @ 84c1293)
+  - fix/reprepare-generation-atomicity — reprepare를 binding 선발행 fail-closed 순서로(어느 지점 중단도 구 완료 은닉 불가), pending이 request·narrative의 최신 binding 재현성 확인 (attempt-1 인수 @ 79f241e)
+  - fix/reply-narrative-echo — request가 자기 rendered digest 노출(sentinel 순환 해소), 회신 request-digest 에코가 도장 근거(echo-era 라운드는 에코 필수, 폴백은 legacy 한정), receipt는 명명된 generation 일관+읽기 시점 재대조, stale/미상/no-echo 구분 (attempt-3 인수 @ cc5ae84) — JW-GPT-004 메커니즘 A 폐쇄
+- **리뷰 finding 처분**: JW-GPT-004(A+B)·005·006·Q1 전량 폐쇄. 반박·이관 판정은 각 verdict artifact에 기록 — 유한 잔여 2건(전환일 다운그레이드 창·정적 stderr-only shim 아래 child 교체)은 코드 주석 문서화 + chore/pre-header-feedback-settlement 확장 예정.
+- **Gates**: live 전체 스위트 748→777 green(각 lane 병합 후 재실측, F-lane은 codex 부재 PATH 이중 게이트) + ruff F401/F841 clean. 0.10.0 ingest가 남긴 중복 v1 sidecar 1건 제거(계약 동일, canonical 보존).
+- **SSOT**: unchanged.
+- **Decisions pending**: chore/pre-header-feedback-settlement(역사 라운드 정착 방식 — 전환일 잔여 흡수 확장 포함).
+- **Review**: requested (docs/reviews/2026-07-18-generation-binding-request.md) — 3차 검토.
+- **Adaptive rules**: unevaluable (활성 overlay 규칙 0개).
+- **Next**: 3차 리뷰 통과 시 릴리스 0.11 → /plugin update → hooks 마커 → verifier binding 복원 → carrier 라이브 검증 → migration-sunset. minor 큐: marker-diagnostics-polish · shallow-ancestry-honesty · hook-matrix-color-env · legacy-name-residue(사용자 지시).
+
 ## 2026-07-18-carrier-lanes-fixes
 
 - **Goal**: carrier-lanes 리뷰(gpt-5.6-pro/xhigh, CHANGES REQUESTED)의 잔여 major 3건을 병렬 lane으로 해소하고 재검토 요청 — 신뢰 표면(프로브 증명·narrative 결속·publication 증명) 경화.
