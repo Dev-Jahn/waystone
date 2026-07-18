@@ -573,11 +573,12 @@ tasks:
     severity: "major"
     origin: "review-2026-07-18-generation-binding"
   - id: fix/probe-proof-principal-binding
+    result: "@ 69036c1 (attempt-2, 위임 20260718T140704Z): principal/config-root/process-context 축 + not-observed 상태 동등. live 783 green"
     notes: "JW-GPT-010. [attempt-2] attempt-1(위임 20260718T134047Z, discard) 인수분: principal(euid/gid/groups)·config root(present/not-present 정직 기록)·Linux process context 수집·fail-closed·기존 계약 무회귀. 기각 사유 1건: _codex_runner_reuse_blockers가 process 축 전부에 status==observed를 요구 — macOS는 전 축 not-observed라 marker가 영구 advisory(probe-once 파괴). 수정: 상태 동등 의미론 — 동일 not-observed는 match, 비대칭 전이만 재프로브(Linux 관측 저하 공격은 marker=observed라 비대칭 유지 — 안전). 컨테이너 namespace 축은 decision/trust-threat-model-boundary 위양 — 추가 금지. tempdir 격리·env -u FORCE_COLOR."
     accept: ["fingerprint에 실행 principal 축이 추가된다 — effective UID/GID·supplementary groups(portable), 획득 실패는 fail-closed (RED: principal 축만 다른 마커에서 프로브 실행)", "codex config root 정체성이 결속된다 — CODEX_HOME(기본 ~/.codex) resolve+stat identity, 부재는 정직하게 기록", "Linux best-effort process context를 기록한다 — /proc/self/status의 Seccomp·NoNewPrivs·CapEff, /proc/self/attr/current(존재 시); 관측 불가 축은 명시적 not-observed(조용한 생략 금지)", "기존 계약 무회귀 — exact-match 생략·축별 안내·resolved 경로 실행 통일·codex 부재 CI-동등 스위트 green 전부 유지", "전체 테스트 스위트 green + ruff F401,F841 clean", "not-observed 축은 상태 동등으로 대조된다 — marker와 현재가 동일 축에서 똑같이 not-observed면 재사용을 막지 않는다(macOS에서 probe-once 유지); observed↔not-observed 비대칭 전이는 재프로브 (RED: Darwin-형 전 축 not-observed 마커 재사용 성공 + 비대칭 전이 재프로브)"]
     scope: ["scripts/delegate.py", "scripts/tests/run_tests.py"]
     title: "probe fingerprint에 실행 principal·process context 결속 — effective UID/GID/groups, codex config root 정체성(CODEX_HOME/~/.codex resolve+stat), Linux best-effort process context(/proc/self/status의 Seccomp·NoNewPrivs·CapEff, /proc/self/attr/current) — 공유 checkout의 타 사용자/컨테이너 marker 적중 차단, 관측 불가 환경은 fail-toward-probe (JW-GPT-010)"
-    status: "pending"
+    status: "done"
     severity: "major"
     origin: "review-2026-07-18-generation-binding"
   - id: decision/trust-threat-model-boundary
