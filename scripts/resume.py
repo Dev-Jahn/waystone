@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
-    find_project_root, git, git_branch_info, git_full_sha, load_tasks,
-    next_actionable, resume_path, start_here_path, write_text_atomic,
+    WorkflowError, ensure_project_state_dir, find_project_root, git, git_branch_info,
+    git_full_sha, load_tasks, next_actionable, resume_path, start_here_path, write_text_atomic,
 )
 
 
@@ -55,8 +55,8 @@ def snapshot(root: Path) -> str:
 
 
 def write(root: Path) -> int:
-    p = resume_path(root)
-    write_text_atomic(p, snapshot(root))
+    ensure_project_state_dir(root)  # the gated primitive — never a bare mkdir under root
+    write_text_atomic(resume_path(root), snapshot(root))
     return 0
 
 
@@ -68,15 +68,20 @@ def main() -> int:
     root = Path(positional[0]).resolve() if positional else find_project_root(Path.cwd())
     if root is None:
         return 0  # silent no-op outside a project (hook fast-path safety)
-    if want_start_here:
-        sh = start_here_path(root)
-        sh.parent.mkdir(parents=True, exist_ok=True)  # so the model can Write to it directly
-        print(sh)
-        return 0
-    if want_path:
-        print(resume_path(root))
-        return 0
-    return write(root)
+    try:
+        if want_start_here:
+            ensure_project_state_dir(root)  # so the model can Write to it directly
+            print(start_here_path(root))
+            return 0
+        if want_path:
+            print(resume_path(root))  # pure read — no state creation
+            return 0
+        return write(root)
+    except WorkflowError as e:
+        # An explicit positional root is a caller assertion — refuse it loudly instead of
+        # scaffolding .waystone at an arbitrary path.
+        print(e, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

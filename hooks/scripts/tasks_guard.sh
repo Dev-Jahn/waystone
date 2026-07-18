@@ -2,6 +2,9 @@
 # PostToolUse fast-path: only act when the edited file is a tasks.yaml.
 set -uo pipefail
 
+. "$(cd "$(dirname "$0")" && pwd)/verifier_guard.sh"
+waystone_verifier_hook_guard && exit 0
+
 if [ -n "${PLUGIN_ROOT:-}" ]; then
   export WAYSTONE_HOST=codex
 fi

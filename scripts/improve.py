@@ -769,7 +769,7 @@ def _finding_evidence(value: str) -> tuple[list[str], list[str]]:
     without_urls = re.sub(r"\b[a-z][a-z0-9+.-]*://\S+", "", value, flags=re.I)
     for match in _FINDING_PATH_RE.finditer(without_urls):
         path = match.group(1).removeprefix("./")
-        if "://" not in path and ".." not in path.split("/"):
+        if "://" not in path:
             paths.add(path)
             if match.group(2):
                 pointers.add(f"{path}:{match.group(2)}")
@@ -949,53 +949,124 @@ def _round_session_binding(round_id: str, exposures: list[dict] | dict[str, dict
 
 def _review_binding(request_file: Path | None, round_id: str, mode: str,
                     sidecars: list[dict]) -> dict:
+    import review
+
     def result(target_sha=None, base_sha=None, provenance="unknown", reason=None, source=None,
-               *, cycle=None, reviewers=None, profile_fingerprint=None) -> dict:
+               *, cycle=None, reviewers=None, profile_fingerprint=None,
+               narrative_digest=None, rendered_request_digest=None,
+               binding_schema=None, request_provenance="unknown",
+               request_reason=None, request_source=None,
+               cycle_version_skew=False) -> dict:
         return {
             "target_sha": target_sha, "base_sha": base_sha,
+            "narrative_digest": narrative_digest,
+            "rendered_request_digest": rendered_request_digest,
             "review_cycle": cycle, "reviewers": reviewers,
             "review_profile_fingerprint": profile_fingerprint,
+            "review_cycle_version_skew": cycle_version_skew,
+            "review_binding_schema": binding_schema,
             "review_binding_provenance": provenance,
             "review_binding_reason": reason, "review_binding_source": source,
+            "review_request_binding_provenance": request_provenance,
+            "review_request_binding_reason": request_reason,
+            "review_request_binding_source": request_source,
         }
 
     if mode == "pr":
-        pr_sidecars = [row for row in sidecars if row.get("mode") == "pr"]
-        if not pr_sidecars:
+        freeze_sidecars = [
+            row for row in sidecars
+            if row.get("schema") in (
+                review.PR_FREEZE_BINDING_V1_SCHEMA, review.PR_FREEZE_BINDING_SCHEMA)
+        ]
+        if not freeze_sidecars:
             return result(reason="missing-pr-freeze-sidecar")
-        latest_cycle = max(row["cycle"] for row in pr_sidecars)
-        cycle_rows = [row for row in pr_sidecars if row["cycle"] == latest_cycle]
-        bindings = {(
+        latest_cycle = max(row["cycle"] for row in freeze_sidecars)
+        cycle_rows = [row for row in freeze_sidecars if row["cycle"] == latest_cycle]
+        core_bindings = {(
             row["target_sha"], row["base_sha"], tuple(row["reviewers"]),
             row.get("profile_fingerprint"), row["pr"],
         ) for row in cycle_rows}
-        if len(bindings) != 1:
+        v2_rows = [row for row in cycle_rows
+                   if row["schema"] == review.PR_FREEZE_BINDING_SCHEMA]
+        v2_digests = {row["rendered_request_digest"] for row in v2_rows}
+        if len(core_bindings) != 1 or len(v2_digests) > 1:
             return result(reason="conflicting-pr-freeze-sidecars")
-        latest = max(cycle_rows, key=lambda row: (row["at"], row["_file"]))
+        version_skew = len({row["schema"] for row in cycle_rows}) > 1
+        latest = max(v2_rows or cycle_rows, key=lambda row: (row["at"], row["_file"]))
+        request_sidecars = [
+            row for row in sidecars
+            if row.get("_binding_kind") == "request"
+        ]
+        if latest["schema"] == review.PR_FREEZE_BINDING_V1_SCHEMA:
+            request_kwargs = {
+                "request_provenance": "legacy-pre-digest",
+                "request_reason": "legacy-pre-digest",
+            }
+        else:
+            cycle_digest = latest["rendered_request_digest"]
+            generation_rows = [
+                row for row in request_sidecars
+                if row.get("_binding_error") is None
+                and row.get("rendered_request_digest") == cycle_digest
+            ]
+            request_kwargs = {
+                "rendered_request_digest": cycle_digest,
+                "request_reason": "missing-pr-request-generation",
+            }
+            generation_contracts = {(
+                row.get("schema"), row.get("mode"), row.get("target_sha"),
+                row.get("base_sha"), tuple(row.get("reviewers") or ()),
+                row.get("narrative_digest"),
+            ) for row in generation_rows}
+            if len(generation_contracts) > 1:
+                request_kwargs["request_reason"] = (
+                    "conflicting-pr-request-generation-sidecars")
+            elif generation_rows:
+                request = max(generation_rows, key=lambda row: (
+                    review.round_request_binding_order(Path(row["_file"]), row)))
+                if (request.get("mode") != "pr"
+                        or request.get("target_sha") != latest["target_sha"]
+                        or request.get("reviewers") != latest["reviewers"]):
+                    request_kwargs["request_reason"] = "pr-request-freeze-mismatch"
+                else:
+                    request_kwargs = {
+                        "narrative_digest": request.get("narrative_digest"),
+                        "rendered_request_digest": request.get("rendered_request_digest"),
+                        "binding_schema": request.get("schema"),
+                        "request_provenance": "explicit",
+                        "request_reason": None,
+                        "request_source": request.get("_file"),
+                    }
         return result(
-            latest["target_sha"], latest["base_sha"], "explicit", None,
+            latest["target_sha"], latest["base_sha"], "explicit",
+            "pr-freeze-version-skew" if version_skew else None,
             "pr-freeze-sidecar", cycle=latest_cycle, reviewers=list(latest["reviewers"]),
-            profile_fingerprint=latest.get("profile_fingerprint"))
+            profile_fingerprint=latest.get("profile_fingerprint"),
+            cycle_version_skew=version_skew, **request_kwargs)
     if request_file is None:
         return result(reason="missing-review-request")
-    import review
-
     packet_binding = review.parse_packet_request_binding(request_file)
-    if sidecars:
-        def sidecar_order(row: dict) -> tuple[str, int, str]:
-            path = Path(row["_file"])
-            match = re.search(r"-request\.binding(?:-(\d+))?\.json$", path.name)
-            sequence = int(match.group(1)) if match and match.group(1) else 1
-            return row["at"], sequence, str(path)
-
-        latest = max(sidecars, key=sidecar_order)
+    packet_sidecars = [
+        row for row in sidecars
+        if row.get("mode") == "packet" or row.get("_binding_error") is not None
+    ]
+    if packet_sidecars:
+        latest = max(packet_sidecars, key=lambda row: (
+            (review.round_request_binding_identity(Path(row["_file"]))
+             or ("", 1))[1], row["_file"]))
+        if latest.get("_binding_error") is not None:
+            return result(reason=latest["_binding_error"])
         if packet_binding is None:
             return result(reason="missing-structured-reviewing-line")
         if packet_binding != (latest["target_sha"], latest.get("base_sha")):
             return result(reason="request-binding-sidecar-mismatch")
         return result(
             latest["target_sha"], latest.get("base_sha"), "explicit", None,
-            "round-request-sidecar", reviewers=list(latest.get("reviewers") or []))
+            "round-request-sidecar", reviewers=list(latest.get("reviewers") or []),
+            narrative_digest=latest.get("narrative_digest"),
+            rendered_request_digest=latest.get("rendered_request_digest"),
+            binding_schema=latest.get("schema"), request_provenance="explicit",
+            request_source=latest.get("_file"))
     try:
         text = request_file.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -1021,45 +1092,48 @@ def _review_binding(request_file: Path | None, round_id: str, mode: str,
         profile_fingerprint=latest.get("profile_fingerprint"))
 
 
-def _review_sha_binding(request_file: Path | None, round_id: str, mode: str,
-                        sidecars: list[dict]) -> tuple[str | None, str | None, str, str | None, str | None]:
-    """Compatibility projection for callers that only consume the historical SHA tuple."""
-    binding = _review_binding(request_file, round_id, mode, sidecars)
-    return tuple(binding[key] for key in (
-        "target_sha", "base_sha", "review_binding_provenance",
-        "review_binding_reason", "review_binding_source"))
-
-
-def _round_review_sidecars(rdir: Path) -> dict[str, list[dict]]:
+def _round_review_sidecars(
+        rdir: Path, request_binding_dir: Path | None = None,
+) -> dict[str, list[dict]]:
     import review
 
     rows: dict[str, list[dict]] = {}
-    if not rdir.is_dir():
+    request_directories = {rdir}
+    if request_binding_dir is not None:
+        request_directories.add(request_binding_dir)
+    if not any(directory.is_dir() for directory in request_directories):
         return rows
-    for path in sorted(rdir.glob("*-request.binding*.json")):
-        data = _load_record_mapping(path, "json")
-        if (data is None or data.get("schema") != review.ROUND_REQUEST_BINDING_SCHEMA
-                or not isinstance(data.get("round_id"), str)
-                or not review._is_sha(data.get("target_sha"))
-                or (data.get("base_sha") is not None and not review._is_sha(data.get("base_sha")))
-                or data.get("mode") != "packet" or data.get("canonical_store") != "local-packet"
-                or not isinstance(data.get("at"), str)):
+    request_paths: dict[str, list[Path]] = {}
+    for directory in sorted(request_directories, key=str):
+        if not directory.is_dir():
             continue
-        rows.setdefault(data["round_id"], []).append({**data, "_file": str(path)})
-    for path in sorted(rdir.glob("*-freeze-*.binding*.json")):
-        data = _load_record_mapping(path, "json")
-        if (data is None or data.get("schema") != review.PR_FREEZE_BINDING_SCHEMA
-                or not isinstance(data.get("round_id"), str)
-                or type(data.get("pr")) is not int or data["pr"] < 1
-                or not review._is_cycle(data.get("cycle"))
-                or not review._is_sha(data.get("target_sha"))
-                or not review._is_sha(data.get("base_sha"))
-                or not review._is_strlist(data.get("reviewers"))
-                or (data.get("profile_fingerprint") is not None
-                    and not review._nonempty_str(data.get("profile_fingerprint")))
-                or data.get("mode") != "pr"
-                or data.get("canonical_store") != "local-freeze-evidence"
-                or parse_iso_timestamp(data.get("at")) is None):
+        for path in sorted(directory.glob("*-request.binding*.json")):
+            identity = review.round_request_binding_identity(path)
+            if identity is None:
+                continue
+            request_paths.setdefault(identity[0], []).append(path)
+    for round_id, paths in sorted(request_paths.items()):
+        for path in paths:
+            try:
+                data = review.read_round_request_binding(path, expected_round_id=round_id)
+            except WorkflowError:
+                print(f"improve: warning: corrupt review binding {path}; preserved as unknown",
+                      file=sys.stderr)
+                rows.setdefault(round_id, []).append({
+                    "round_id": round_id, "_file": str(path),
+                    "_binding_error": "corrupt-round-request-sidecar",
+                    "_binding_kind": "request",
+                })
+                continue
+            rows.setdefault(round_id, []).append({
+                **data, "_file": str(path), "_binding_kind": "request",
+            })
+    freeze_paths = sorted(rdir.glob("*-freeze-*.binding*.json")) if rdir.is_dir() else []
+    for path in freeze_paths:
+        try:
+            data = review.read_pr_freeze_binding(path)
+        except WorkflowError as e:
+            print(f"improve: warning: {e}; excluded from projection", file=sys.stderr)
             continue
         rows.setdefault(data["round_id"], []).append({**data, "_file": str(path)})
     return rows
@@ -1074,7 +1148,8 @@ def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
             request_files[p.stem[: -len("-request")]] = p
         for p in sorted(rdir.glob("*-feedback.md")):
             feedback_files[p.stem[: -len("-feedback")]] = p
-    request_sidecars = _round_review_sidecars(rdir)
+    request_sidecars = _round_review_sidecars(
+        rdir, project_state_path(root) / "review-requests")
     tasks_by_round = _finding_tasks_by_round(root)
     round_exposures, _exposures_skipped = _round_exposure_rows(root)
     latest_round_exposures = _latest_round_exposures(round_exposures)
@@ -1084,11 +1159,33 @@ def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
     rows: list[dict] = []
     for rid in round_ids:
         findings: list[dict] = []
+        reply_metadata = {
+            "metadata": {}, "model": None, "effort": None, "review_target": None,
+            "review_target_matches": None, "reviewer_configured": None,
+            "reviewer_coverage_reason": "reply-metadata-unavailable",
+            "narrative_digest": None, "narrative_digest_matches": None,
+            "narrative_coverage_reason": None,
+            "rendered_request_digest": None,
+            "rendered_request_digest_matches": None,
+            "rendered_request_coverage_reason": None,
+        }
         round_tasks = tasks_by_round.get(rid, [])
         tasks_by_id = {t["id"]: t for t in round_tasks if t.get("id")}
         referenced_task_ids: set[str] = set()
+        req = request_files.get(rid)
+        mode = (cfg.get("review") or {}).get("mode", "packet")
+        review_binding = _review_binding(req, rid, mode, request_sidecars.get(rid, []))
+        projection_binding = (review_binding
+                              if review_binding["review_binding_provenance"] == "explicit"
+                              else None)
         fb = feedback_files.get(rid)
         if fb is not None:
+            import review
+
+            reply_metadata = review.read_feedback_reply_metadata(
+                fb, expected_round_id=rid, binding=projection_binding,
+                request_generation_dir=(project_state_path(root) / "review-requests"
+                                        if mode == "pr" else rdir))
             try:
                 text = fb.read_text(encoding="utf-8", errors="replace")
             except OSError:
@@ -1125,9 +1222,6 @@ def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
         counts = {"blocker": 0, "major": 0, "minor": 0, "unknown": 0}
         for f in findings:
             counts[f["severity"] if f["severity"] in SEVERITIES else "unknown"] += 1
-        req = request_files.get(rid)
-        mode = (cfg.get("review") or {}).get("mode", "packet")
-        review_binding = _review_binding(req, rid, mode, request_sidecars.get(rid, []))
         session_id, session_provenance, session_reason = _round_session_binding(
             rid, latest_round_exposures)
         rows.append({
@@ -1137,6 +1231,21 @@ def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
             "round_at": (latest_round_exposures.get(rid) or {}).get("at"),
             "request_file": str(req) if req else None,
             "feedback_file": str(fb) if fb else None,
+            "reviewer": reply_metadata["model"],
+            "reviewer_effort": reply_metadata["effort"],
+            "review_target": reply_metadata["review_target"],
+            "review_target_matches": reply_metadata["review_target_matches"],
+            "reviewer_configured": reply_metadata["reviewer_configured"],
+            "reviewer_coverage_reason": reply_metadata["reviewer_coverage_reason"],
+            "reply_narrative_digest": reply_metadata["narrative_digest"],
+            "narrative_digest_matches": reply_metadata["narrative_digest_matches"],
+            "narrative_coverage_reason": reply_metadata["narrative_coverage_reason"],
+            "reply_rendered_request_digest": reply_metadata["rendered_request_digest"],
+            "rendered_request_digest_matches": reply_metadata[
+                "rendered_request_digest_matches"],
+            "rendered_request_coverage_reason": reply_metadata[
+                "rendered_request_coverage_reason"],
+            "reply_metadata": reply_metadata["metadata"],
             **review_binding,
             "session_id": session_id,
             "round_session_provenance": session_provenance,

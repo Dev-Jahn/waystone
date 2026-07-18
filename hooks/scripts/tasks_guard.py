@@ -19,9 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import yaml  # noqa: E402
 
 import roadmap  # noqa: E402
-from common import (  # noqa: E402
-    WorkflowError, find_project_root, hold_lock, project_lock_path, write_text_atomic,
-)
+from common import (
+    WorkflowError, find_project_root, hold_project_lock, write_text_atomic,
+)  # noqa: E402
 from validate import validate  # noqa: E402
 
 
@@ -87,7 +87,7 @@ def main() -> int:
         return 0
     p, root = matched
     try:
-        with hold_lock(project_lock_path(root), timeout=3):
+        with hold_project_lock(root, timeout=3):
             return _validate_and_regenerate(p, root)
     except (WorkflowError, OSError) as e:
         print(f"[waystone] project lock unavailable ({e}); skipping ROADMAP regeneration",

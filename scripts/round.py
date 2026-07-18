@@ -13,8 +13,12 @@
 
 The text-surgery helpers (set_task_field, set_config_scalar) are pure and tested.
 
+`reclose` records only a new immutable exposure at the current committed HEAD. It is the PR-mode
+self-reference break: the request is rendered after the closeout commit without mutating that HEAD.
+
 Usage (also `waystone round close`):
   round.py close [root] --round <id> [--done id,id] [--touched id,id] [--commit HEAD]
+  round.py reclose [root] --round <id>
 """
 from __future__ import annotations
 
@@ -22,14 +26,15 @@ import json
 import os
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
-    ROUND_RE, WorkflowError, canonical_scope_prefixes, find_project_root, git_full_sha, hold_lock, load_config,
-    migrate_project_state, project_lock_path, write_text_atomic,
+    ROUND_RE, WorkflowError, canonical_scope_prefixes, find_project_root, git_full_sha, git_rc,
+    hold_project_lock, is_ancestor, load_config, migrate_project_state, write_text_atomic,
 )
 
 
@@ -199,6 +204,20 @@ def _validate_recorded_routes(root: Path, routes: list[dict]) -> None:
                 f"--route-note {route['role']} route does not match the current profile binding")
 
 
+def _current_date() -> date:
+    """Local calendar clock seam; tests pin it so close contracts cannot race midnight."""
+    return date.today()
+
+
+def _round_has_existing_closeout(root: Path, round_id: str, review) -> bool:
+    """Recognize a previously minted round from its validated immutable exposure."""
+    try:
+        review.read_round_closeout_exposure(root, round_id)
+        return True
+    except WorkflowError:
+        return False
+
+
 def close(root: Path, round_id: str, done: list[str], touched: list[str], commit: str,
           routes: list[dict] | None = None) -> int:
     """Fail-closed: resolve the commit and confirm the watermark slot up front, apply edits in
@@ -213,7 +232,20 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     if not ROUND_RE.match(round_id):
         print(f"round close: --round must match YYYY-MM-DD-<slug>, got {round_id!r}", file=sys.stderr)
         return 1
+    try:
+        round_date = date.fromisoformat(round_id[:10])
+    except ValueError:
+        print(f"round close: --round has no real calendar date, got {round_id!r}",
+              file=sys.stderr)
+        return 1
     cfg = load_config(root)
+    current_date = _current_date()
+    if (round_date != current_date
+            and not _round_has_existing_closeout(root, round_id, review)):
+        print(
+            f"round close: --round date must be today ({current_date.isoformat()}), "
+            f"got {round_date.isoformat()}", file=sys.stderr)
+        return 1
     routes = list(routes or [])
     try:
         _validate_recorded_routes(root, routes)
@@ -335,14 +367,10 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
                 root, round_id, head_sha, full, session_id=session_id,
                 base_sha=prev_wm, task_scopes=task_scopes,
                 task_scope_coverage=task_scope_coverage, done_task_ids=done_transitions,
-                routes=routes)
+                routes=routes, reviewers=review_reviewers)
             created_event_paths.append(exposure_path)
-            binding_path = review.write_round_request_binding(
-                root, round_id, full, prev_wm, review_reviewers,
-                mode=(cfg.get("review") or {}).get("mode", "packet"))
-            created_event_paths.append(binding_path)
         except Exception as e:  # noqa: BLE001 — exposure is part of the close transaction
-            raise WorkflowError(f"round exposure/request binding not recorded: {e}") from e
+            raise WorkflowError(f"round exposure not recorded: {e}") from e
     except Exception as e:  # noqa: BLE001 — any failure must roll every written artifact back
         write_text_atomic(tasks_path, orig_tasks_text)
         write_text_atomic(cfg_path, ctext)
@@ -387,15 +415,72 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     except Exception as e:  # noqa: BLE001
         print(f"round close: overlay warning/override expiry unavailable ({e}) — close still succeeded",
               file=sys.stderr)
+    try:
+        pending = review.pending_reviews(root)
+        if pending:
+            print(f"round close: reminder: {len(pending)} pending review(s) remain",
+                  file=sys.stderr)
+            for row in pending:
+                print(f"  {review.format_pending_review(row)}", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001 — reminders never invalidate a durable close
+        print(f"round close: pending review reminder unavailable ({e}) — close still succeeded",
+              file=sys.stderr)
+    return 0
+
+
+def reclose(root: Path, round_id: str) -> int:
+    """Record a host-local exposure at a clean descendant HEAD, preserving the round diff base."""
+    import overlay
+    import review
+
+    if not ROUND_RE.match(round_id):
+        print(f"round reclose: --round must match YYYY-MM-DD-<slug>, got {round_id!r}",
+              file=sys.stderr)
+        return 1
+    try:
+        previous_path, previous = review.read_round_closeout_exposure(root, round_id)
+        head = git_full_sha(root, "HEAD")
+        if head is None:
+            raise WorkflowError("current HEAD does not resolve to a commit")
+        status_rc, status, status_error = git_rc(
+            root, "status", "--porcelain=v1", "--untracked-files=no")
+        if status_rc != 0:
+            raise WorkflowError(f"cannot inspect tracked worktree state: {status_error or 'git failed'}")
+        if status:
+            # Checked before the same-HEAD no-op: a dirty tree means the closeout is not yet
+            # committed, so "already matches" would be a false success.
+            raise WorkflowError("tracked worktree changes remain; commit the closeout before reclose")
+        if head == previous["head_sha"]:
+            print(f"round {round_id} exposure already matches HEAD {head[:12]}")
+            return 0
+        if not is_ancestor(root, previous["head_sha"], head):
+            raise WorkflowError(
+                f"current HEAD {head} is not a descendant of prior closeout "
+                f"{previous['head_sha']}; close with a new round id")
+        mode = previous["review_mode"]
+        request = review.prepared_request_path(root, round_id, mode=mode)
+        if any(request.parent.glob(f"{round_id}-request.binding*.json")):
+            raise WorkflowError(
+                "an immutable request sidecar already exists; close with a new round id")
+        current_mode = (load_config(root).get("review") or {}).get("mode", "packet")
+        if current_mode != mode:
+            raise WorkflowError(
+                f"review.mode changed from {mode!r} to {current_mode!r}; close with a new round id")
+        _path, exposure = overlay.reclose_round_exposure(root, previous_path, previous, head)
+    except (OSError, WorkflowError, ValueError) as e:
+        print(f"round reclose: {e}", file=sys.stderr)
+        return 1
+    print(f"round {round_id} reclosed at {head[:12]} (diff base "
+          f"{(exposure.get('base_sha') or '(root)')})")
     return 0
 
 
 def main() -> int:
     argv = sys.argv[1:]
-    if not argv or argv[0] != "close":
+    if not argv or argv[0] not in ("close", "reclose"):
         print(__doc__, file=sys.stderr)
         return 1
-    rest = argv[1:]
+    sub, rest = argv[0], argv[1:]
 
     def opt(name):
         return rest[rest.index(name) + 1] if name in rest and rest.index(name) < len(rest) - 1 else None
@@ -421,12 +506,14 @@ def main() -> int:
         print("round close: --round <id> is required", file=sys.stderr)
         return 1
     try:
-        routes = _parse_route_notes(repeated("--route-note"))
+        routes = _parse_route_notes(repeated("--route-note")) if sub == "close" else []
         # Phase-2 migration is a separate pre-verb span; close then owns one project-lock span from
         # preflight through exposure/warn recording. Nested libraries must not acquire it again.
-        with hold_lock(project_lock_path(root)):
+        with hold_project_lock(root):
             migrate_project_state(root)
-        with hold_lock(project_lock_path(root)):
+        with hold_project_lock(root):
+            if sub == "reclose":
+                return reclose(root, round_id)
             return close(root, round_id, _parse_ids(opt("--done")),
                          _parse_ids(opt("--touched")), opt("--commit") or "HEAD", routes)
     except WorkflowError as e:

@@ -140,9 +140,11 @@ the managed block. Do not touch anything outside the markers. If the selected ho
 currently carries a running status log (acting as a de-facto PROGRESS), propose moving that content
 into PROGRESS.md and leaving a pointer — show the user the move before applying it.
 
-## Step 7 — Reorganize Claude Code agent memory
+## Step 7 — Reorganize host agent memory
 
-In Codex, skip this step; do not reorganize Codex memory. In Claude Code, check
+Waystone project and machine state have been shared since v0.9; this step concerns only a host's own agent
+memory, not separate Waystone storage. Codex does not expose Claude Code's project-memory layout, so
+skip this host-memory cleanup in Codex. In Claude Code, check
 `~/.claude/projects/<dash-escaped-project-path>/memory/` — the directory name is the
 absolute project path with `/` (and other separators) replaced by `-`, e.g.
 `/home/u/work/proj` → `-home-u-work-proj`; when in doubt, glob `~/.claude/projects/*<repo-name>*/memory/`. For each memory file that
@@ -162,15 +164,21 @@ waystone project register <project-root>
 
 This feeds `/waystone:status` in Claude Code or `$waystone:status` in Codex.
 
-## Step 8.5 — Optionally install managed agents or hooks
+## Step 8.5 — Optionally install managed agents, hooks, or the status line
 
-Ask one host-native question offering the managed project agent, the project boundary hooks, both,
-or neither. This is optional and must not change the result of initialization when declined. For
-each offered surface, display this preview **before** asking for or recording consent:
+Ask one host-native question offering each applicable surface independently, all of them, or none:
+the managed project agent, the project boundary hooks, and (in Claude Code) the Waystone statusline.
+This is optional and must not change the result of initialization when declined. For each offered
+surface, display this preview **before** asking for or recording consent:
 
-- target path (`.claude/agents/waystone-operator.md` for agents or `.claude/settings.json` for hooks);
-- effect (which managed agent or boundary hook becomes available);
-- rollback (delete that exact installed file; no other project file is changed by rollback).
+- target path (`.claude/agents/waystone-operator.md` for agents or the project-local
+  `.waystone/boundary-hooks-enabled` marker for hooks; `~/.claude/settings.json` for statusline);
+- effect (the managed agent becomes available, or the plugin-owned non-blocking Stop hook becomes
+  active in both Claude Code and Codex when that host has loaded and trusted the plugin hooks, or
+  Claude Code runs the read-only `waystone statusline` command);
+- rollback (delete the agent file or `.waystone/boundary-hooks-enabled`, or remove only the
+  `statusLine` field installed in `~/.claude/settings.json`; deleting the marker disables the
+  boundary hook without changing plugin files or host settings).
 
 Only after the user has seen the target path, effect, and rollback, record consent and install:
 
@@ -180,11 +188,17 @@ waystone install agents --root <project-root>
 
 waystone consent record install.hooks accept --context kind=hooks --root <project-root>
 waystone install hooks --root <project-root>
+
+waystone consent record install.statusline accept --context kind=statusline --root <project-root>
+waystone install statusline --root <project-root>
 ```
 
-The install commands refuse to overwrite an existing target. Every installed managed file is left
-uncommitted together with the rest of init output; do not use consent or installation as permission
-to commit it.
+The install commands refuse to overwrite an existing target. The agent file is left uncommitted;
+the hook marker and consent record remain in self-ignored project state. `install hooks` never writes
+`.claude/settings.json`. If it detects the legacy Waystone Stop hook there, it prints a manual removal
+instruction but does not modify the user-owned settings file. `install statusline` records consent
+before adding a user-level `statusLine`; if one already exists, it leaves the settings byte-for-byte
+unchanged and prints how to embed `waystone statusline` in the existing command or script instead.
 
 ## Step 9 — Report
 

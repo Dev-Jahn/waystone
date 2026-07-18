@@ -33,7 +33,7 @@
       "additionalProperties": false,
       "properties": {
         "execution": {
-          "description": "Execution is waystone-executable only for external-runner (codex or claude). main-session, clean-subagent, forked-subagent, and deterministic-workflow are host-guided through routing-contract injection; waystone does not create their runners.",
+          "description": "Execution is waystone-executable only for external-runner (codex or claude). main-session, clean-subagent, forked-subagent, and deterministic-workflow are host-guided through routing-contract injection; waystone does not create their runners. Verifier execution is optional and Codex always uses host-independent codex exec.",
           "oneOf": [
             {
               "enum": [
@@ -55,8 +55,12 @@
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*:[^\\s:]+$"
         },
         "use_for": {"type": "string", "minLength": 1, "pattern": "^[^\\r\\n]+$"},
-        "effort": {"enum": ["none", "minimal", "low", "medium", "high", "xhigh"]},
-        "entry": {"type": "string"}
+        "effort": {"enum": ["none", "minimal", "low", "medium", "high", "xhigh", "ultra"]},
+        "entry": {
+          "enum": ["adversarial-review"],
+          "deprecated": true,
+          "description": "Legacy verifier entrypoint field. adversarial-review is normalized to Waystone's owned verifier prompt; new profiles omit this field."
+        }
       }
     },
     "main": {

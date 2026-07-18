@@ -2,6 +2,9 @@
 # SessionStart fast-path: only spin up Python in waystone-initialized projects.
 set -uo pipefail
 
+. "$(cd "$(dirname "$0")" && pwd)/verifier_guard.sh"
+waystone_verifier_hook_guard && exit 0
+
 # Codex injects PLUGIN_ROOT (and a CLAUDE_PLUGIN_ROOT compatibility alias); Claude injects only
 # CLAUDE_PLUGIN_ROOT. Select the host before Python imports the host-local data helpers.
 if [ -n "${PLUGIN_ROOT:-}" ]; then

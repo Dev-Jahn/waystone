@@ -18,20 +18,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (  # noqa: E402
-    WorkflowError, find_project_root, git, hold_lock, load_tasks, migrate_project_state,
-    project_lock_path, write_text_atomic,
-)
+from common import (
+    WorkflowError, find_project_root, git, hold_project_lock, load_tasks,
+    migrate_project_state, write_text_atomic,
+)  # noqa: E402
 
 STATUS_CLASS = {"pending": "pending", "active": "active", "blocked": "blocked",
-                "done": "done", "dropped": "dropped"}
+                "parked": "parked", "done": "done", "dropped": "dropped"}
 STATUS_BADGE = {"pending": "⬜ pending", "active": "🔵 active", "blocked": "⛔ blocked",
-                "done": "✅ done", "dropped": "🚫 dropped"}
+                "parked": "⏸ parked", "done": "✅ done", "dropped": "🚫 dropped"}
 
 CLASS_DEFS = """\
     classDef pending fill:#f5f5f5,stroke:#9e9e9e,color:#424242
     classDef active fill:#bbdefb,stroke:#1565c0,color:#0d2b56,stroke-width:2px
     classDef blocked fill:#ffcdd2,stroke:#c62828,color:#7f1d1d
+    classDef parked fill:#fff3cd,stroke:#b7791f,color:#7c4a03,stroke-dasharray: 4 2
     classDef done fill:#c8e6c9,stroke:#2e7d32,color:#1b4332
     classDef dropped fill:#eeeeee,stroke:#bdbdbd,color:#9e9e9e,stroke-dasharray: 4 4"""
 
@@ -99,7 +100,7 @@ def render(root: Path) -> str:
 
     rows = ["| ID | Title | Status | Round | Deps | Anchor |",
             "|---|---|---|---|---|---|"]
-    order = {"active": 0, "blocked": 1, "pending": 2, "done": 3, "dropped": 4}
+    order = {"active": 0, "blocked": 1, "pending": 2, "parked": 3, "done": 4, "dropped": 5}
     for t in sorted(tasks, key=lambda t: (order.get(t.get("status", "pending"), 9), t["id"])):
         deps = ", ".join(t.get("deps", [])) or "—"
         rows.append(
@@ -111,7 +112,7 @@ def render(root: Path) -> str:
      Source of truth: tasks.yaml. Regenerated automatically on tasks.yaml edits. -->
 # Roadmap — {project}
 
-**Progress:** {done}/{total} done · {counts.get('active', 0)} active · {counts.get('blocked', 0)} blocked · generated {now} @ `{head}`
+**Progress:** {done}/{total} done · {counts.get('active', 0)} active · {counts.get('blocked', 0)} blocked · {counts.get('parked', 0)} parked · generated {now} @ `{head}`
 
 ```mermaid
 {mermaid}
@@ -129,9 +130,9 @@ def main() -> int:
         print("roadmap: no initialized project (missing .waystone.yml / tasks.yaml)", file=sys.stderr)
         return 1
     try:
-        with hold_lock(project_lock_path(root)):
+        with hold_project_lock(root):
             migrate_project_state(root)
-        with hold_lock(project_lock_path(root)):
+        with hold_project_lock(root):
             out = root / "ROADMAP.md"
             write_text_atomic(out, render(root))
             print(f"wrote {out}")

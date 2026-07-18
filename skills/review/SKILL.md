@@ -34,18 +34,36 @@ deterministic ingest, which copies `/tmp/review.md` byte-exact into the feedback
 metadata header and consumes the drop-file:
 
 ```bash
-waystone review ingest . --round <round-id> --reviewer "<resolved reviewer backend>"
+waystone review ingest . --round <round-id>
 ```
 
-Resolve `review.reviewers` first. When it contains `role:reviewer` (the new-project default), read
-the `reviewer` binding from `{project_root}/.waystone/profile.yml` and pass its literal backend as
-`<resolved reviewer backend>`. If the project intentionally keeps a legacy literal reviewer list,
-pass that configured literal. Never invent a backend when the role binding is missing; follow the
-CLI's fail-loud guidance to add the binding or explicitly retain literal reviewers.
+The reply itself must begin with the request template's key/value block: `model`, `effort`,
+`review-target` (`<target-sha>` or `<base-sha>-<target-sha>`, 12–40 hex characters each), and the
+request's exact `request-digest`. Key case/order/colon whitespace and an optional Markdown fence are
+tolerated; extra keys are preserved. Missing, duplicate, invalid, or non-UTF-8 values stay unknown,
+and a leading key/value block with neither `model` nor `review-target` is ordinary prose. Ingest
+resolves an echoed digest to that round's immutable request sidecar generation; a stale or unknown
+generation remains pending. A digestless reply can use the ingest-time binding only for a genuine
+legacy v1 binding; a v2 reply must be resubmitted with the request's digest line. Ingest never
+rebuilds a missing legacy binding from current config or profile. For new projects that sidecar
+already freezes the backend resolved from `role:reviewer` at publication time. A model matches an
+exact configured identity, or a provider-qualified identity matches the same bare model slug; two
+provider-qualified identities must match completely.
+Missing/mismatched identity or target does not count as configured feedback for
+`review-skipped-closes-v1`.
 
-Besides the byte-exact copy, ingest **appends** (never edits the verbatim body) a *finding triage
-skeleton*: if the reply has `JW-GPT-NNN` finding blocks it builds a table, else it notes "triage the
-verbatim reply directly". Then read `<reviews_dir>/<round-id>-feedback.md` to triage.
+Besides the byte-exact copy, ingest **appends** (never edits the verbatim body) a marker-delimited
+*finding triage skeleton*: if the reply has `JW-GPT-NNN` finding blocks it builds a table, else it
+notes "triage the verbatim reply directly". Then read `<reviews_dir>/<round-id>-feedback.md` to
+triage. Never edit that feedback file directly: write only the replacement triage content (without
+the BEGIN/END markers) to a separate file such as `/tmp/review-triage.md`, then run:
+
+```bash
+waystone review triage . --round <round-id> --file /tmp/review-triage.md
+```
+
+The command replaces only the marked tail and preserves every preceding byte. Missing or damaged
+markers are a refusal, not permission to reconstruct the file.
 
 Relay any review-ingest adaptive-rule output with tri-state wording: **fired**, **did not fire
 (evaluable)**, or **unevaluable (<coverage reason>)**. Never turn an unevaluable result into a
@@ -73,10 +91,12 @@ Reviewer findings are claims, not facts. For each distinct finding:
    A blank type is not a completed triage row.
 3. Register each REAL finding via the CLI — `waystone task add <fix|perf|docs>/<slug> . --title "..." --severity <blocker|major|minor> --origin review-<round-id> [--anchor §...]` — not by editing `tasks.yaml`. The add is validated and comment-preserving.
 
-If ingest parsed a `JW-GPT-NNN` triage-skeleton table, fill each row (in the user's configured
-language; quoted reviewer text verbatim): verdict → taxonomy type → evidence/reason → task id. A free-form reply has no
-such rows — triage each finding in the verbatim body directly (verdict → taxonomy type → evidence → register REAL
-ones).
+If ingest parsed a `JW-GPT-NNN` triage-skeleton table, prepare the complete replacement triage
+section in `/tmp/review-triage.md`, filling each row (in the user's configured language; quoted
+reviewer text verbatim): verdict → taxonomy type → evidence/reason → task id. A free-form reply has
+no such rows — prepare a replacement section that records each finding from the verbatim body
+directly (verdict → taxonomy type → evidence → register REAL ones). After task registration, run
+`waystone review triage` as shown above; do not patch or rewrite the feedback file itself.
 
 ## Step 4 — Report
 

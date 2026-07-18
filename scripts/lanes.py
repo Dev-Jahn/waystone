@@ -16,7 +16,10 @@ sibling lanes merge and would false-fail healthy lanes).
     base_sha: <sha recorded when the lane was created>   # = the dependency's result if depends_on
     depends_on: [feat/bar]   # optional
 
-Usage (also `waystone lanes verify`): lanes.py verify [root]   exit 0 ok, 3 if any lane fails.
+Usage (also `waystone lanes verify`): lanes.py verify [root]
+exit 0 ok, 3 if any lane fails. Every non-terminal lane is verified: round stamps are applied
+only at round close, so they cannot scope the check (ruling: decision/lanes-verify-round-scope).
+A broken unrelated lane blocking a close is deliberate fail-loud; parking is the escape hatch.
 """
 from __future__ import annotations
 
@@ -48,17 +51,17 @@ def check_lane(root: Path, task_id: str, lane: dict) -> list[str]:
     return fails
 
 
-def verify(root: Path, round_id: str | None = None) -> int:
+def verify(root: Path) -> int:
     data = load_tasks(root)
-    # only verify lanes still in flight — a merged-and-deleted historical lane (done/dropped)
-    # must not fail the current round forever. Optionally scope to one round.
+    # Verify every lane still in flight — merged/deleted historical lanes and intentionally parked
+    # lanes must not fail a close forever, but every other open lane is checked regardless of
+    # round stamps: stamps are applied only at round close, so a stamp (or its absence) cannot
+    # identify "this round's" lanes beforehand (ruling: decision/lanes-verify-round-scope).
     lanes = [(t["id"], t["lane"]) for t in data.get("tasks", [])
              if isinstance(t, dict) and isinstance(t.get("lane"), dict)
-             and t.get("status") not in ("done", "dropped")
-             and (round_id is None or t.get("round") == round_id)]
+             and t.get("status", "pending") not in ("done", "dropped", "parked")]
     if not lanes:
-        print("lanes: no in-flight lane manifests to verify"
-              + (f" for round {round_id}" if round_id else ""))
+        print("lanes: no in-flight lane manifests to verify")
         return 0
     all_fails = []
     for tid, lane in lanes:
@@ -78,13 +81,17 @@ def main() -> int:
         print(__doc__, file=sys.stderr)
         return 1
     rest = argv[1:]
-    round_id = rest[rest.index("--round") + 1] if "--round" in rest and rest.index("--round") < len(rest) - 1 else None
-    positional = [a for i, a in enumerate(rest) if not a.startswith("--") and (i == 0 or rest[i - 1] != "--round")]
-    root = Path(positional[0]).resolve() if positional else find_project_root(Path.cwd())
+    unknown = [a for a in rest if a.startswith("--")]
+    if unknown:
+        print(f"lanes: unknown option(s): {' '.join(unknown)} — round scoping was removed; "
+              "every non-terminal lane is verified (decision/lanes-verify-round-scope)",
+              file=sys.stderr)
+        return 1
+    root = Path(rest[0]).resolve() if rest else find_project_root(Path.cwd())
     if root is None:
         print("lanes: no initialized project", file=sys.stderr)
         return 1
-    return verify(root, round_id)
+    return verify(root)
 
 
 if __name__ == "__main__":

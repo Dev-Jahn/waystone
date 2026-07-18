@@ -96,9 +96,10 @@ rather than copying it.
 
 ## 6. Status lifecycle
 
-`pending → active → done`, with `blocked` (unmet deps — list them) and `dropped`
-(abandoned, keep for the record) as side states. `done` requires its gates green; a `gate/...`
-task is `done` only when the bar actually passed, with evidence linked in PROGRESS.
+`pending → active → done`, with `blocked` (unmet deps — list them), `parked`
+(intentionally deferred — record why in `notes`; not actionable and not auto-archived), and
+`dropped` (abandoned, keep for the record) as side states. `done` requires its gates green; a
+`gate/...` task is `done` only when the bar actually passed, with evidence linked in PROGRESS.
 
 ## 7. Review (configured by `review.mode`)
 
@@ -177,7 +178,8 @@ brought back through an explicit artifact contract. The invariants:
   *main-session* decision in `verdict-N.json`. Delegate-claimed content is never promoted to fact,
   and an absent runner report is a reporting absence rather than proof that no verification happened.
 - **Role sandboxes are fixed, not user knobs.** The implementer runs `workspace-write`; the verifier
-  runs `read-only` through the host-derived transport. Verification leaves the delegation
+  runs `read-only`. A Codex verifier uses host-independent `codex exec`, the Waystone-owned
+  adversarial review prompt, `--output-schema`, and `--output-last-message`. Verification leaves the delegation
   `needs-review`. The per-record `record.lock` serializes verify, verdict, apply, and discard; the OS
   releases the lock if its process dies.
 - **The main session judges; the user audits.** `waystone delegate verdict` compares the packet's
@@ -200,10 +202,13 @@ brought back through an explicit artifact contract. The invariants:
 Delegation records live project-local (`{project_root}/.waystone/delegations/…`) and worktrees live
 under `~/.waystone/cache/worktrees/…`; neither is committed. The runner backend (model) is bound
 per role in `{project_root}/.waystone/profile.yml`; a missing binding fails loud rather than
-guessing a default. A verifier binding should normally omit `execution` so Waystone derives the
-transport from the current host. A binding may set `effort` to `none`, `minimal`, `low`, `medium`,
-`high`, or `xhigh`; when omitted, the Codex configuration default is left untouched. Use
-`waystone paths` to inspect every resolved residence.
+guessing a default. A verifier binding should normally omit `execution` and `entry`; Waystone owns
+the verifier transport and prompt. Legacy 0.9 Codex transport and entrypoint fields are normalized
+with a deprecation warning. A binding may set `effort` to `none`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, or `ultra`. `ultra` is Codex-only and is passed unchanged as
+`model_reasoning_effort`; the Claude external runner rejects it without substituting another effort.
+When `effort` is omitted, the runner's configured default is left untouched. Use `waystone paths`
+to inspect every resolved residence.
 
 The role key, `execution`, and `backend` are all routing inputs. `waystone delegate run` starts only
 an `implementer` bound to `external-runner`; `main-session`, `clean-subagent`, `forked-subagent`, and
@@ -212,6 +217,23 @@ Every route first checks the eight policy questions in `templates/routing-policy
 run records the budget-sensitivity judgment in packet `routing_note` with main-session provenance;
 an actually used host-guided route is recorded by repeatable `round close --route-note
 <role>,<execution>,<backend>`. Without that note, improve keeps host-guided role attribution unknown.
+
+`deterministic-workflow` names an execution, not a tool: a fixed plan-manifest procedure whose
+Claude Code carrier is the native Workflow tool (a skill or user instruction is the opt-in).
+A host without a carrier cannot run this binding — the route fails loud and the role must be
+rebound explicitly for that host; prose-driven sequential dispatch is never recorded as
+deterministic-workflow. A session-level workflow default (such as ultracode mode) never rebinds
+a role: the profile binding decides each role's execution, workflow agent model/effort derive
+from the resolved carrier manifest rather than being hardcoded, and a workflow result is a
+non-authoritative carrier report that still passes the ordinary verdict gate before acceptance.
+A deterministic-workflow binding must declare an explicit `effort`, and its `backend` names the
+model owning the procedure; mechanical in-workflow agents borrow the clerk binding's
+backend/effort and attribute to the orchestrator route (ADR-0001). Delegations dispatched from
+a carrier record `carrier` and `carrier_instance_id` in the immutable packet. Documented
+binding options: flip `clerk → deterministic-workflow / claude:haiku-4.5` for sweep-heavy
+rounds; `orchestrator → deterministic-workflow` is scale-up only — parallel task groups with
+pairwise-disjoint scopes, main retaining decomposition and acceptance.
+
 The `claude:<model>` external implementer has no structural filesystem/process/network sandbox and
 is refused unless the user explicitly consents to
 `--allow-unsandboxed-runner --reason <why>`.
@@ -270,10 +292,14 @@ verification-finding trend, main direct work/context inflow, repeated warnings, 
 same-delegation verify-run judgment-set reproducibility. Only explicit `--user-wide` analysis writes its
 cross-project user-habit projection and longitudinal metrics under `~/.waystone/improve/`.
 
-Managed project files are also consent-gated: show the exact target, effect, and delete-to-rollback
-path before recording `install.agents` or `install.hooks` acceptance with `waystone consent record`,
-then run `waystone install agents` or `waystone install hooks`.
-These installs refuse overwrite and remain uncommitted for review.
+Managed project surfaces are also consent-gated: show the exact target, effect, and
+delete-to-rollback path before recording `install.agents` or `install.hooks` acceptance with
+`waystone consent record`, then run `waystone install agents` or `waystone install hooks`.
+The agent install targets `.claude/agents/waystone-operator.md` and remains uncommitted for review.
+The hook install creates the self-ignored `.waystone/boundary-hooks-enabled` marker, which enables
+the plugin-owned non-blocking Stop hook in both Claude Code and Codex; deleting the marker disables
+it. It never writes `.claude/settings.json`. When the legacy Waystone Stop hook is found in that
+settings file, the installer reports the manual removal path without modifying user settings.
 
 ## 10. Storage tiers, backup, and cleanup
 

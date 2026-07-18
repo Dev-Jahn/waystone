@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -116,16 +117,20 @@ def project_state_path(root: Path) -> Path:
 
 
 def _ensure_project_self_ignore(state: Path) -> None:
-    """Create the project-state self-ignore once without racing another bootstrapper."""
+    """Atomically restore the canonical project-state self-ignore when absent or damaged."""
+    ignore = state / ".gitignore"
     try:
-        with (state / ".gitignore").open("x", encoding="utf-8") as stream:
-            stream.write("*\n")
-    except FileExistsError:
+        info = ignore.lstat()
+        if stat.S_ISREG(info.st_mode) and ignore.read_bytes() == b"*\n":
+            return
+    except FileNotFoundError:
         pass
+    write_text_atomic(ignore, "*\n")
 
 
 def ensure_project_state_dir(root: Path) -> Path:
     """Create the project-local state root and restore its self-ignore file when needed."""
+    require_initialized_root(root)
     state = project_state_path(root)
     state.mkdir(parents=True, exist_ok=True)
     _real_directory(state, "project state directory")
@@ -224,6 +229,27 @@ def overlay_lock_path(home: Path | None = None) -> Path:
 def project_lock_path(root: Path) -> Path:
     """Return the project lock path without touching the filesystem."""
     return project_state_path(root) / "lock"
+
+
+def require_initialized_root(root: Path) -> None:
+    """The single write gate for project-local state: creating .waystone under a root that has no
+    project config scaffolds state at an arbitrary path (the `task drop --reason` incident seeded a
+    profile into a typo'd directory). Initialization needs no bypass here — init writes .waystone.yml
+    before the first state-creating CLI call (skills/init: Step 3 precedes consent recording), so an
+    uninitialized root reaching this gate is always a caller error."""
+    if has_project_config(Path(root)):
+        return
+    raise WorkflowError(
+        f"waystone: {root} is not an initialized waystone project (.waystone.yml missing) — "
+        "refusing to create project state there; check the path or initialize the project first")
+
+
+def hold_project_lock(root: Path, timeout: float | None = None):
+    """Project-lock chokepoint: every flow that creates or mutates project-local state acquires
+    the lock through here, so the initialized-root gate lives at this one point instead of being
+    re-checked per entry point."""
+    require_initialized_root(root)
+    return hold_lock(project_lock_path(root), timeout=timeout)
 
 
 def _lock_verb() -> str:
@@ -956,9 +982,7 @@ def _ensure_project_state_raw(root: Path) -> Path:
     state = Path(root) / ".waystone"
     if not _real_directory(state, "project state directory"):
         state.mkdir(parents=True)
-    ignore = state / ".gitignore"
-    if not ignore.is_file() or ignore.read_text(encoding="utf-8") != "*\n":
-        ignore.write_text("*\n", encoding="utf-8")
+    _ensure_project_self_ignore(state)
     return state
 
 
@@ -1419,7 +1443,7 @@ class WorkflowError(Exception):
     main() converts it to an exit code. (sys.exit raises SystemExit/BaseException, which slips past
     `except Exception` rollbacks.)"""
 TASK_TYPES = ("feat", "fix", "perf", "gate", "spike", "decision", "docs", "chore")
-TASK_STATUSES = ("pending", "active", "blocked", "done", "dropped")
+TASK_STATUSES = ("pending", "active", "blocked", "parked", "done", "dropped")
 MILESTONE_STATUSES = ("pending", "active", "done")
 SEVERITIES = ("blocker", "major", "minor")
 
@@ -1462,7 +1486,7 @@ def load_yaml(path: Path):
         return yaml.safe_load(f)
 
 
-def normalize_config(cfg: dict | None) -> dict:
+def normalize_config(cfg: dict | None, *, source: Path | None = None) -> dict:
     """Apply defaults + validation to a parsed config mapping (from disk OR from a PR head)."""
     cfg = dict(cfg or {})
     cfg.setdefault("progress", "PROGRESS.md")
@@ -1507,7 +1531,18 @@ def normalize_config(cfg: dict | None) -> dict:
         raise ValueError("review.operators must be a list of strings")
     dl = cfg.setdefault("delegation", {})
     if not isinstance(dl, dict):
-        raise ValueError("delegation: must be a mapping (enabled/env_prep)")
+        raise ValueError(
+            "delegation: must be a mapping (enabled/env_prep)")
+    if "codex_runner_verified" in dl:
+        if source is not None:
+            marker_path = source.parent / ".waystone" / "codex-runner-verified"
+            print(
+                f"waystone: legacy delegation.codex_runner_verified in {source} is ignored; "
+                f"remove the key from {source}; Codex runner proof is checkout-local at "
+                f"{marker_path}",
+                file=sys.stderr,
+            )
+        dl.pop("codex_runner_verified")
     dl.setdefault("enabled", True)
     if not isinstance(dl["enabled"], bool):
         raise ValueError("delegation.enabled must be a boolean")
@@ -1527,7 +1562,8 @@ def normalize_config(cfg: dict | None) -> dict:
 
 
 def load_config(root: Path) -> dict:
-    return normalize_config(load_yaml(_migrate_project_config(root)))
+    path = _migrate_project_config(root)
+    return normalize_config(load_yaml(path), source=path)
 
 
 def git_rc(root: Path, *args: str) -> tuple[int, str, str]:
@@ -1549,32 +1585,134 @@ def git_full_sha(root: Path, ref: str = "HEAD") -> str | None:
 
 def upstream_ref(root: Path) -> str | None:
     """The tracked upstream (e.g. 'origin/main') of the current branch, or None."""
-    rc, out, _ = git_rc(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
-    return out if rc == 0 and out else None
+    tracking = _upstream_tracking(root)
+    return tracking[0] if tracking is not None else None
+
+
+def _upstream_tracking(root: Path) -> tuple[str, str, str] | None:
+    """Return (display name, remote, exact remote branch ref) without resolving its SHA."""
+    rc, local_ref, _ = git_rc(root, "symbolic-ref", "--quiet", "HEAD")
+    if rc != 0 or not local_ref.startswith("refs/heads/"):
+        return None
+    fmt = "%(upstream:short)%00%(upstream:remotename)%00%(upstream:remoteref)"
+    rc, out, _ = git_rc(root, "for-each-ref", f"--format={fmt}", local_ref)
+    fields = out.split("\0") if rc == 0 and out else []
+    if (len(fields) != 3 or not all(fields)
+            or not fields[2].startswith("refs/heads/")):
+        return None
+    return fields[0], fields[1], fields[2]
+
+
+def fetch_upstream_head(root: Path) -> tuple[str | None, dict]:
+    """Fetch the exact tracked branch into a private ref and return its live commit.
+
+    A command-line refspec deliberately bypasses configured fetch mappings. The fetched SHA is
+    read from a unique temporary ref, then the ref is deleted, so concurrent writes to the shared
+    FETCH_HEAD pseudoref cannot change the publication evidence.
+    """
+    tracking = _upstream_tracking(root)
+    if tracking is None:
+        return (None, {"reason": "no upstream tracking branch"})
+    upstream, remote_name, branch_ref = tracking
+    info = {"upstream": upstream, "remote": remote_name, "branch_ref": branch_ref}
+    if remote_name == ".":
+        return (None, {
+            **info,
+            "reason": "upstream remote '.' is local repository state, not remote publication",
+        })
+    temporary_ref = (
+        f"refs/waystone/verify-fetch-{os.getpid()}-{uuid.uuid4().hex}")
+    rc, _, fetch_error = git_rc(
+        root, "fetch", "--quiet", "--no-tags", "--force", remote_name,
+        f"+{branch_ref}:{temporary_ref}")
+    if rc != 0:
+        cleanup_rc, _, cleanup_error = git_rc(root, "update-ref", "-d", temporary_ref)
+        if cleanup_rc != 0:
+            return (None, {
+                **info,
+                "reason": (
+                    "fetch failed and temporary fetch ref cleanup failed — remote unverifiable: "
+                    f"{cleanup_error or 'error'}"),
+            })
+        probe_rc, _, probe_error = git_rc(
+            root, "ls-remote", "--exit-code", "--refs", remote_name, branch_ref)
+        if probe_rc == 2:
+            return (None, {
+                **info,
+                "reason": f"upstream branch {branch_ref} is absent on remote {remote_name}",
+            })
+        detail = fetch_error or probe_error or "error"
+        return (None, {
+            **info, "reason": f"fetch failed — remote unverifiable: {detail}",
+        })
+    sha_rc, remote_sha, sha_error = git_rc(
+        root, "rev-parse", "--verify", f"{temporary_ref}^{{commit}}")
+    cleanup_rc, _, cleanup_error = git_rc(root, "update-ref", "-d", temporary_ref)
+    if cleanup_rc != 0:
+        return (None, {
+            **info,
+            "reason": (
+                "temporary fetch ref cleanup failed — remote unverifiable: "
+                f"{cleanup_error or 'error'}"),
+        })
+    if sha_rc != 0 or not re.fullmatch(r"[0-9a-f]{40}", remote_sha):
+        return (None, {
+            **info,
+            "reason": (
+                "fetch succeeded but temporary fetch ref is empty or invalid: "
+                f"{sha_error or 'no commit'}"),
+        })
+    return remote_sha, info
+
+
+def ancestry_status(root: Path, a: str, b: str) -> tuple[bool | None, str]:
+    """Return True/False for containment, or None when Git cannot decide."""
+    rc, _, error = git_rc(root, "merge-base", "--is-ancestor", a, b)
+    if rc == 0:
+        return True, ""
+    if rc == 1:
+        return False, ""
+    return None, error or f"git merge-base exited {rc}"
 
 
 def is_ancestor(root: Path, a: str, b: str) -> bool:
     """True iff commit `a` is an ancestor of (i.e. contained in) commit `b`."""
-    rc, _, _ = git_rc(root, "merge-base", "--is-ancestor", a, b)
-    return rc == 0
+    status, _ = ancestry_status(root, a, b)
+    return status is True
 
 
 def head_pushed(root: Path, fetch: bool = True) -> tuple[bool, dict]:
     """Is the current HEAD contained in its tracked upstream (i.e. actually pushed)?
     Returns (pushed, info). Fail-closed: a fetch failure (network/auth/remote) returns
-    (False, reason) rather than trusting a stale ref. Pass fetch=False for explicit offline use."""
-    up = upstream_ref(root)
-    if not up:
-        return (False, {"reason": "no upstream tracking branch"})
-    if fetch:
-        rc, _, err = git_rc(root, "fetch", "--quiet", up.split("/", 1)[0])
-        if rc != 0:
-            return (False, {"reason": f"fetch failed — remote unverifiable: {err or 'error'}", "upstream": up})
+    (False, reason) rather than trusting a stale ref. Offline verification cannot prove
+    publication and therefore also fails closed."""
+    if not fetch:
+        tracking = _upstream_tracking(root)
+        if tracking is None:
+            return (False, {"reason": "no upstream tracking branch"})
+        return (False, {
+            "reason": "live remote fetch required — offline state cannot prove publication",
+            "upstream": tracking[0],
+        })
+    remote_sha, info = fetch_upstream_head(root)
+    if remote_sha is None:
+        return (False, info)
     head = git_full_sha(root, "HEAD")
-    pushed = is_ancestor(root, "HEAD", up)
-    rc, out, _ = git_rc(root, "rev-list", "--count", f"HEAD..{up}")
+    if head is None:
+        return (False, {**info, "reason": "local HEAD is not a commit"})
+    pushed, ancestry_error = ancestry_status(root, head, remote_sha)
+    if pushed is None:
+        return (False, {
+            **info,
+            "reason": (
+                "cannot determine whether local HEAD is contained in the live upstream: "
+                f"{ancestry_error}"),
+            "head": head,
+            "remote_sha": remote_sha,
+        })
+    rc, out, _ = git_rc(root, "rev-list", "--count", f"{head}..{remote_sha}")
     behind = int(out) if rc == 0 and out.isdigit() else None
-    return (pushed, {"upstream": up, "head": head, "behind": behind})
+    return (pushed, {**info, "head": head, "remote_sha": remote_sha, "behind": behind})
 
 
 def load_tasks(root: Path) -> dict:

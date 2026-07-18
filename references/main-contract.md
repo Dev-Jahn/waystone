@@ -6,3 +6,4 @@ Verify outcomes with evidence proportional to the risk.
 Main owns routing, acceptance, and final decisions.
 Delegate non-trivial execution through the declared workflow role.
 Validate findings before incorporating or registering them.
+Session execution modes never override a role's declared binding.

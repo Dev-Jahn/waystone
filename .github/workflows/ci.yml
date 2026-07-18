@@ -28,7 +28,7 @@ jobs:
             "$(jq -r .version .codex-plugin/plugin.json)"
           jq -e '
             .hooks | keys | sort ==
-            ["PostToolUse", "PreCompact", "PreToolUse", "SessionEnd", "SessionStart"]
+            ["PostToolUse", "PreCompact", "PreToolUse", "SessionEnd", "SessionStart", "Stop"]
           ' hooks/hooks.json >/dev/null
           test -x bin/waystone
           test -x bin/waystone-codex

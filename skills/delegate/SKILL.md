@@ -56,10 +56,47 @@ not override the selected profile binding. Route the task by that binding's `exe
 - `main-session`, `clean-subagent`, `forked-subagent`, or `deterministic-workflow`: do not call
   `delegate run`. Dispatch the bound role/execution/backend through the host's native main-session,
   subagent, or workflow mechanism. Preserve the role attribution and record the task as done or
-  touched in `waystone round close` plus the round's PROGRESS entry.
+  touched in `waystone round close` plus the round's PROGRESS entry. For a deterministic-workflow
+  binding, follow the carrier block below.
 
 Do not translate a host-guided binding into a headless runner. Other external-runner roles are not
 an implemented `delegate run` surface; verifier execution is handled separately in Step 4.
+
+### Deterministic-workflow carrier
+
+`deterministic-workflow` names an orchestration procedure, not a host tool: a fixed plan
+manifest (from `waystone delegate plan --json`) executed under declared ordering, concurrency,
+and aggregation rules. On Claude Code its carrier is the host's native Workflow tool; this
+skill instruction is the legitimate opt-in for that tool. On a host without a carrier (Codex),
+this binding is not executable — do not simulate it with prose-driven sequential dispatch;
+rebind the role explicitly for that host and record the route as actually bound.
+
+HARD rules for the workflow carrier:
+
+- Main owns decomposition, packet boundaries, and acceptance before dispatch. Produce the plan
+  with `waystone delegate plan <task-id>... --json`; the workflow only carries that manifest.
+- Derive every `agent()` override from the manifest's carrier bindings; never hardcode past
+  them and never accept free-form model/effort arguments. Effort maps `none|minimal|low → low`,
+  `medium → medium`, `high → high`, `xhigh → xhigh`; `ultra` is a Codex-CLI-only leaf effort —
+  a claude-backend binding naming it fails loud, never substitutes.
+- A workflow agent's success or structured output is a non-authoritative carrier report, never
+  acceptance. Every implementer leg runs `waystone delegate run … --expect-packet-sha
+  --expect-profile --carrier claude-workflow --carrier-instance <correlation-id> --json-events`
+  and each resulting delegation still passes Steps 3–5 individually, with facts re-derived from
+  its on-disk record. Workflow-only completion is valid solely for non-implementation work.
+- Leaf agents start `delegate run` in background execution and await completion; the runner can
+  outlive a foreground tool timeout. Tasks run in the same parallel batch only when their
+  declared scopes are pairwise disjoint; overlapping or undeclared scope runs sequentially —
+  there is no parallel override.
+- Instantiate the canonical carrier for three or more decided tasks: read
+  `${CLAUDE_PLUGIN_ROOT}/templates/hosts/claude-code/delegate-fanout.workflow.js` and pass it
+  verbatim as the Workflow tool's `script` input with `args: {plan: <plan json>}`. For one or
+  two tasks, direct background dispatch is simpler and loses nothing. Do not resume a fan-out
+  workflow run; re-plan from disk state and invoke fresh (`--expect-packet-sha` refuses stale
+  dispatch). Before a project's first fan-out, pre-allow `waystone delegate plan/run/status/show`
+  in project permission settings — a background leaf cannot answer permission prompts.
+- Afterwards record the route with `waystone round close --route-note
+  <role>,deterministic-workflow,<backend>`; the note must equal the live binding.
 
 For an external-runner route, record the budget-sensitivity judgment as one free, single-line
 main-session note in the immutable packet:
@@ -157,8 +194,9 @@ HARD rules:
 ## Step 4 — Produce verification evidence
 
 Use `waystone paths --root <project-root>` to resolve the single project profile at
-`{project_root}/.waystone/profile.yml`. A verifier binding should normally omit `execution` so
-Waystone derives its transport from the current host.
+`{project_root}/.waystone/profile.yml`. A verifier binding should normally omit `execution` and
+`entry`; Waystone owns the verification transport and prompt. Codex verification always uses
+host-independent `codex exec` in a read-only sandbox.
 
 When a verifier binding exists, always run it:
 

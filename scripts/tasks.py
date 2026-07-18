@@ -33,10 +33,10 @@ import yaml  # noqa: E402
 
 import round  # noqa: E402  — reuse the AST-bounded text-surgery helpers
 import validate  # noqa: E402
-from common import (  # noqa: E402
-    WorkflowError, canonical_scope_prefixes, find_project_root, hold_lock, load_tasks,
-    migrate_project_state, normalize_scope_prefix, project_lock_path, write_text_atomic,
-)
+from common import (
+    WorkflowError, canonical_scope_prefixes, find_project_root, hold_project_lock, load_tasks,
+    migrate_project_state, normalize_scope_prefix, write_text_atomic,
+)  # noqa: E402
 
 ARCHIVE_NAME = "tasks.archive.yaml"
 ARCHIVE_THRESHOLD = 100   # only archive once the registry has at least this many tasks
@@ -355,34 +355,59 @@ def cmd_archive(root: Path, threshold: int, keep: int) -> int:
 
 # ---- arg parsing + dispatch --------------------------------------------------
 _VALUE_FLAGS = {"title", "status", "severity", "deps", "milestone", "anchor", "origin",
-                "branch", "notes", "round", "ruling", "result", "type", "threshold", "keep",
+                "branch", "notes", "round", "type", "threshold", "keep", "reason",
                 "accept"}  # accept is recognized only to reject it cleanly (see ACCEPT_REJECT_MSG)
 _REPEAT_FLAGS = {"accept-add", "scope-add"}
+# Each subcommand owns its grammar: an option that exists but is aimed at the wrong verb is
+# rejected just as loudly as an unknown one.
+_SUB_OPTIONS = {
+    "list": {"status", "type", "milestone", "round"},
+    "show": set(),
+    "add": {"title", "status", "severity", "deps", "milestone", "anchor", "origin",
+            "branch", "notes", "round", "accept"},
+    "set": {"accept-add", "scope-add"},
+    "drop": {"reason"},
+    "archive": {"threshold", "keep"},
+}
 
 
-def _split(rest: list[str]) -> tuple[list[str], dict]:
+def _split(sub: str, rest: list[str]) -> tuple[list[str], dict, str | None]:
+    """Parse one subcommand's arguments. Unknown or misplaced options are rejected immediately —
+    an option silently becoming a boolean (its value falling through to the positionals) is how
+    `task drop --reason <text>` once treated free text as a project root. A value that itself
+    starts with `--` must be passed as --name=value, and a value option without a value is an
+    error rather than a silent None."""
+    allowed = _SUB_OPTIONS[sub]
     pos, opts, i = [], {name: [] for name in _REPEAT_FLAGS}, 0
     while i < len(rest):
         a = rest[i]
         if a.startswith("--"):
-            name = a[2:]
-            if name in _REPEAT_FLAGS:
-                if i + 1 >= len(rest):
-                    opts[name] = None
-                    i += 1
-                else:
-                    opts[name].append(rest[i + 1])
-                    i += 2
-            elif name in _VALUE_FLAGS:
-                opts[name] = rest[i + 1] if i + 1 < len(rest) else None
-                i += 2
-            else:
-                opts[name] = True
+            name, eq, inline = a[2:].partition("=")
+            if name not in _VALUE_FLAGS and name not in _REPEAT_FLAGS:
+                return pos, opts, f"waystone task {sub}: unknown option --{name}"
+            if name not in allowed:
+                return pos, opts, f"waystone task {sub}: option --{name} is not valid for '{sub}'"
+            if eq:
+                value = inline
                 i += 1
+            elif i + 1 >= len(rest):
+                return pos, opts, (
+                    f"waystone task {sub}: --{name} requires a value (pass --{name}=<value>)")
+            elif rest[i + 1].startswith("--"):
+                return pos, opts, (
+                    f"waystone task {sub}: value for --{name} looks like an option "
+                    f"({rest[i + 1]!r}) — pass it literally as --{name}=<value>")
+            else:
+                value = rest[i + 1]
+                i += 2
+            if name in _REPEAT_FLAGS:
+                opts[name].append(value)
+            else:
+                opts[name] = value
         else:
             pos.append(a)
             i += 1
-    return pos, opts
+    return pos, opts, None
 
 
 def _resolve_root(explicit: str | None) -> Path | None:
@@ -397,7 +422,13 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 1
     sub, rest = argv[0], argv[1:]
-    pos, opts = _split(rest)
+    if sub not in _SUB_OPTIONS:
+        print(f"waystone task: unknown subcommand {sub!r}\n{__doc__}", file=sys.stderr)
+        return 1
+    pos, opts, parse_error = _split(sub, rest)
+    if parse_error is not None:
+        print(parse_error, file=sys.stderr)
+        return 1
 
     def need_root(explicit: str | None) -> Path | None:
         root = _resolve_root(explicit)
@@ -406,7 +437,7 @@ def main(argv: list[str]) -> int:
             return None
         try:
             # Lazy migration has its own short lock span before the verb's body lock.
-            with hold_lock(project_lock_path(root)):
+            with hold_project_lock(root):
                 migrate_project_state(root)
         except (WorkflowError, OSError) as e:
             print(f"waystone task: migration failed: {e}", file=sys.stderr)
@@ -415,7 +446,7 @@ def main(argv: list[str]) -> int:
 
     def mutate(root: Path, callback) -> int:
         try:
-            with hold_lock(project_lock_path(root)):
+            with hold_project_lock(root):
                 return callback()
         except WorkflowError as e:
             print(e, file=sys.stderr)
@@ -463,12 +494,6 @@ def main(argv: list[str]) -> int:
             fields["deps"] = [x.strip() for x in opts["deps"].split(",") if x.strip()]
         return mutate(root, lambda: cmd_add(root, fields))
     if sub == "set":
-        if opts.get("accept-add") is None:
-            print("waystone task set: --accept-add requires a value", file=sys.stderr)
-            return 1
-        if opts.get("scope-add") is None:
-            print("waystone task set: --scope-add requires a value", file=sys.stderr)
-            return 1
         if opts.get("accept-add") and opts.get("scope-add"):
             print("waystone task set: choose only one of --accept-add or --scope-add", file=sys.stderr)
             return 1
@@ -506,10 +531,26 @@ def main(argv: list[str]) -> int:
         if not pos:
             print("waystone task drop: <id> required", file=sys.stderr)
             return 1
+        reason = opts.get("reason")
+        if reason is not None and not str(reason).strip():
+            print("waystone task drop: --reason requires a non-empty value", file=sys.stderr)
+            return 1
         root = need_root(pos[1] if len(pos) > 1 else None)
         if root is None:
             return 1
-        return mutate(root, lambda: cmd_set(root, pos[0], "status", "dropped"))
+
+        def _drop() -> int:
+            if reason:
+                task = next((t for t in load_tasks(root).get("tasks", [])
+                             if isinstance(t, dict) and t.get("id") == pos[0]), None)
+                old = str((task or {}).get("notes") or "").strip()
+                merged = f"{old} | dropped: {reason}" if old else f"dropped: {reason}"
+                rc = cmd_set(root, pos[0], "notes", merged)
+                if rc != 0:
+                    return rc
+            return cmd_set(root, pos[0], "status", "dropped")
+
+        return mutate(root, _drop)
     if sub == "archive":
         root = need_root(pos[0] if pos else None)
         if root is None:

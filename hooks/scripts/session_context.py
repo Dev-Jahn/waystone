@@ -19,16 +19,16 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from common import (  # noqa: E402
-    git_branch_info, git_full_sha, hold_lock, load_config, load_tasks, migrate_project_state,
-    next_actionable, project_lock_path, project_state_path, registry_lock_path, resume_path,
-    start_here_path,
-)
+from common import (
+    git_branch_info, git_full_sha, hold_lock, hold_project_lock, load_config, load_tasks,
+    migrate_project_state, next_actionable, project_state_path, registry_lock_path,
+    resume_path, start_here_path,
+)  # noqa: E402
 
 MAX_CHARS = 8000
 MAX_TASK_LINES = 8
 MAX_START_HERE = 2560  # ~2.5KB cap on the injected re-entry narrative (read-time, never truncates the file)
-MAX_CONTRACT = 1200
+MAX_CONTRACT = 1300
 CONTRACT_PATH = Path(__file__).resolve().parents[2] / "references" / "main-contract.md"
 ROUTING_POLICY_PATH = Path(__file__).resolve().parents[2] / "templates" / "routing-policy.yaml"
 ROUTING_QUESTION_IDS = (
@@ -123,6 +123,19 @@ def _delegation_summary(root: Path) -> str:
         return "needs-review delegations — unreadable"
 
 
+def _pending_review_summary(root: Path) -> str | None:
+    try:
+        import review
+        rows = review.pending_reviews(root)
+        if not rows:
+            return None
+        shown = [row["round_id"] for row in rows[:5]]
+        suffix = " …" if len(rows) > len(shown) else ""
+        return f"pending reviews {len(rows)} ({' '.join(shown)}{suffix})"
+    except Exception:  # noqa: BLE001 — one damaged review artifact must not break SessionStart
+        return "pending reviews — unreadable"
+
+
 def _evidence_summary(root: Path) -> str | None:
     path = project_state_path(root) / "improve" / "evidence.jsonl"
     if not path.is_file():
@@ -194,7 +207,7 @@ def main() -> int:
     try:
         deadline = time.monotonic() + MIGRATION_LOCK_TIMEOUT
         with hold_lock(registry_lock_path(), timeout=max(0.0, deadline - time.monotonic())):
-            with hold_lock(project_lock_path(root), timeout=max(0.0, deadline - time.monotonic())):
+            with hold_project_lock(root, timeout=max(0.0, deadline - time.monotonic())):
                 migrate_project_state(root)
     except Exception as e:  # noqa: BLE001 — migration must never suppress SessionStart JSON
         print(f"waystone session migration warning: {e}", file=sys.stderr)
@@ -213,7 +226,8 @@ def main() -> int:
     done = sum(1 for t in tasks if t.get("status") == "done")
     active = [t for t in tasks if t.get("status") == "active"]
     blocked = [t for t in tasks if t.get("status") == "blocked"]
-    decisions = [t for t in tasks if t.get("id", "").startswith("decision/") and t.get("status") not in ("done", "dropped")]
+    decisions = [t for t in tasks if t.get("id", "").startswith("decision/")
+                 and t.get("status") not in ("done", "dropped", "parked")]
     rounds = sorted({t["round"] for t in active if t.get("round")})
 
     lines = [
@@ -221,6 +235,9 @@ def main() -> int:
         f" ({'dirty +' + str(g['dirty']) if g['dirty'] else 'clean'}) | tasks: {done}/{len(tasks)} done",
     ]
     lines.extend(_operating_contract(root))
+    pending_review_summary = _pending_review_summary(root)
+    if pending_review_summary:
+        lines.append(pending_review_summary)
 
     # persistent re-entry pointer (model-authored at round close / after review) — surfaced FIRST so a
     # new or post-compaction session picks up the live frontier without a manual "pick up". Read-time

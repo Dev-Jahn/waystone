@@ -1,5 +1,5 @@
 {
-  "description": "waystone: inject project digest+active tasks+next-actionable at session start/compaction; snapshot a re-entry pointer before compaction/session end; validate tasks.yaml and regenerate ROADMAP.md on edit. All hooks no-op fast (<10ms) in projects without .waystone.yml.",
+  "description": "waystone: inject project digest+active tasks+next-actionable at session start/compaction; snapshot a re-entry pointer before compaction/session end; validate tasks.yaml and regenerate ROADMAP.md on edit; run consent-enabled non-blocking boundary checks at Stop. All hooks no-op in independent verifier sessions and no-op fast in projects without .waystone.yml; Stop also requires the project enable marker.",
   "hooks": {
     "PreToolUse": [
       {
@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/tasks_read_nudge.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/tasks_read_nudge.sh\"",
             "timeout": 15
           }
         ]
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/session_context.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/session_context.sh\"",
             "timeout": 20
           }
         ]
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/resume_snapshot.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/resume_snapshot.sh\"",
             "timeout": 15
           }
         ]
@@ -43,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/resume_snapshot.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/resume_snapshot.sh\"",
             "timeout": 15
           }
         ]
@@ -55,7 +55,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/tasks_guard.sh",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/tasks_guard.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/boundary_check.sh\"",
             "timeout": 30
           }
         ]

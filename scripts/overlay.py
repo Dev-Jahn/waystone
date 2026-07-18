@@ -24,14 +24,13 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common import (  # noqa: E402
+from common import (
     ROUND_RE, WorkflowError, _project_slug, _read_registry, canonical_payload_hash,
     content_hash, ensure_project_state_dir, find_project_root, has_accepted_consent, hold_lock,
-    load_config, load_tasks,
-    machine_dir, migrate_project_state, overlay_lock_path, parse_iso_timestamp, project_lock_path,
-    project_state_path, record_consent, registry_entry_paths, registry_lock_path, registry_path,
-    write_text_atomic,
-)
+    git_rc, hold_project_lock, load_config, load_tasks, machine_dir, migrate_project_state,
+    overlay_lock_path, parse_iso_timestamp, project_state_path, record_consent,
+    registry_entry_paths, registry_lock_path, registry_path, write_text_atomic,
+)  # noqa: E402
 
 # delta-id grammar mirrors the improve rec_id (`<lens>/<kebab-gist>`, S2) so a rec materialises to a
 # delta under the same id and the same recommendation keeps a stable identity across cycles.
@@ -339,6 +338,22 @@ def evaluate_review_skipped_closes(rounds: list[dict], ingests: list[dict], *,
     by_round: list[dict] = []
     previous_close_at = ""
     unknown: Counter = Counter()
+
+    def recognized_feedback(event: dict) -> bool:
+        if event.get("source") == "pr-marker":
+            return True
+        narrative_bound = (
+            event.get("narrative_digest_matches") is True
+            or event.get("narrative_coverage_reason") == "legacy-pre-digest"
+        )
+        request_bound = (
+            event.get("rendered_request_digest_matches") is True
+            or event.get("rendered_request_coverage_reason")
+            == "request-digest-missing-legacy-fallback"
+        )
+        return (event.get("reviewer_configured") is True
+                and narrative_bound and request_bound)
+
     for close in closes:
         interval_events = []
         while event_index < len(review_events) and review_events[event_index]["at"] <= close["at"]:
@@ -346,14 +361,24 @@ def evaluate_review_skipped_closes(rounds: list[dict], ingests: list[dict], *,
                 interval_events.append(review_events[event_index])
             event_index += 1
         recognized_events = [
-            event for event in interval_events
-            if event.get("source") == "pr-marker"
-            or event.get("reviewer_configured") is True
+            event for event in interval_events if recognized_feedback(event)
         ]
         unknown_events = [event for event in interval_events if event not in recognized_events]
         for event in unknown_events:
-            unknown[event.get("reviewer_coverage_reason")
-                    or "reviewer-identity-unavailable"] += 1
+            reason = event.get("reviewer_coverage_reason")
+            if event.get("reviewer_configured") is True:
+                request_bound = (
+                    event.get("rendered_request_digest_matches") is True
+                    or event.get("rendered_request_coverage_reason")
+                    == "request-digest-missing-legacy-fallback"
+                )
+                if not request_bound:
+                    reason = (event.get("rendered_request_coverage_reason")
+                              or "request-digest-verdict-unavailable")
+                else:
+                    reason = (event.get("narrative_coverage_reason")
+                              or "narrative-digest-verdict-unavailable")
+            unknown[reason or "reviewer-identity-unavailable"] += 1
         payload = _round_payload(close)
         review_mode = close.get("review_mode", payload.get("review_mode"))
         reason = None
@@ -480,23 +505,9 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _configured_reviewer_membership(root: Path, reviewer_id: str | None) -> tuple[bool | None, str | None]:
-    if not isinstance(reviewer_id, str) or not reviewer_id.strip():
-        return None, "reviewer-identity-unavailable"
-    try:
-        import review
-
-        configured = review.resolve_reviewers(
-            root, (load_config(root).get("review") or {}).get("reviewers", []))
-    except (OSError, ValueError, WorkflowError):
-        return None, "configured-reviewer-resolution-unavailable"
-    if reviewer_id not in configured:
-        return None, "reviewer-not-configured"
-    return True, None
-
-
 def record_review_feedback(root: Path, round_id: str, *, source: str, event_id: str,
-                           reviewer: str | None = None) -> dict:
+                           reviewer: str | None = None, reply_header: dict | None = None,
+                           force: bool = False) -> dict:
     """Append one canonical review-feedback event shared by packet ingest and completed PR markers."""
     if not isinstance(round_id, str) or not round_id:
         raise WorkflowError("review feedback round_id must be non-empty")
@@ -506,33 +517,75 @@ def record_review_feedback(root: Path, round_id: str, *, source: str, event_id: 
         raise WorkflowError("review feedback event_id must be non-empty")
     if reviewer is not None and (not isinstance(reviewer, str) or not reviewer.strip()):
         raise WorkflowError("review feedback reviewer must be a non-empty string when provided")
-    if source == "pr-marker":
-        reviewer_configured, reviewer_reason = True, None
-    else:
-        reviewer_configured, reviewer_reason = _configured_reviewer_membership(root, reviewer)
+    reviewer_effort = None
+    review_target = None
+    reply_metadata = None
+    if source == "packet-ingest":
+        reply_header = reply_header if isinstance(reply_header, dict) else {
+            "metadata": {}, "model": reviewer, "effort": None, "review_target": None,
+        }
+        reviewer = reply_header.get("model")
+        reviewer_effort = reply_header.get("effort")
+        review_target = reply_header.get("review_target")
+        reply_metadata = reply_header.get("metadata") or {}
     row = {
         "schema": REVIEW_FEEDBACK_SCHEMA, "event": "review-feedback", "at": _now_iso(),
         "round_id": round_id, "source": source, "event_id": event_id,
-        "reviewer": reviewer, "reviewer_configured": reviewer_configured,
-        "reviewer_coverage_reason": reviewer_reason, "provenance": "observed",
+        "reviewer": reviewer, "provenance": "observed",
     }
+    if source == "packet-ingest":
+        row.update({
+            "reviewer_effort": reviewer_effort, "review_target": review_target,
+            "reply_metadata": reply_metadata,
+        })
+    else:
+        row.update({"reviewer_configured": True, "reviewer_coverage_reason": None})
+    _ensure_project_state_or_refuse(root)
+    path = _review_ingests_path(root)
+    _mkdir_or_refuse(path.parent)
+    if force and source == "packet-ingest" and path.is_file():
+        lines = path.read_text(encoding="utf-8").splitlines()
+        output: list[str] = []
+        replaced = False
+        for line in lines:
+            try:
+                prior = json.loads(line)
+            except json.JSONDecodeError:
+                output.append(line)
+                continue
+            prior_event_id = prior.get("event_id") if isinstance(prior, dict) else None
+            same_round = (isinstance(prior, dict)
+                          and prior.get("source") == "packet-ingest"
+                          and (prior.get("round_id") == round_id
+                               or (isinstance(prior_event_id, str)
+                                   and prior_event_id.startswith(
+                                       f"packet:{round_id}:reviewer:"))))
+            if same_round:
+                if not replaced:
+                    output.append(json.dumps(row, ensure_ascii=False, sort_keys=True))
+                    replaced = True
+                continue
+            output.append(line)
+        if not replaced:
+            output.append(json.dumps(row, ensure_ascii=False, sort_keys=True))
+        write_text_atomic(path, "\n".join(output) + "\n")
+        return row
     existing, _skipped = load_review_ingests(root)
     prior = next((item for item in existing if item.get("event_id") == event_id), None)
     if prior is not None:
         return {key: prior.get(key) for key in row}
-    _ensure_project_state_or_refuse(root)
-    path = _review_ingests_path(root)
-    _mkdir_or_refuse(path.parent)
     with path.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
     return row
 
 
-def record_review_ingest(root: Path, round_id: str, reviewer: str | None = None) -> dict:
+def record_review_ingest(root: Path, round_id: str, reviewer: str | None = None,
+                         *, reply_header: dict | None = None, force: bool = False) -> dict:
     """Compatibility wrapper: a packet ingest projects to the canonical feedback event."""
     return record_review_feedback(
         root, round_id, source="packet-ingest",
-        event_id=f"packet:{round_id}:reviewer:{reviewer or 'unknown'}", reviewer=reviewer)
+        event_id=f"packet:{round_id}", reviewer=reviewer, reply_header=reply_header,
+        force=force)
 
 
 def load_review_ingests(root: Path) -> tuple[list[dict], int]:
@@ -545,6 +598,12 @@ def load_review_ingests(root: Path) -> tuple[list[dict], int]:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
         return [], 1
+    try:
+        cfg = load_config(root)
+    except (OSError, WorkflowError):
+        cfg = None
+    import review
+
     for line_number, line in enumerate(lines, 1):
         if not line.strip():
             continue
@@ -557,31 +616,48 @@ def load_review_ingests(root: Path) -> tuple[list[dict], int]:
                 or row.get("event") != "review-feedback"
                 or parse_iso_timestamp(row.get("at")) is None
                 or not isinstance(row.get("round_id"), str)
+                or review._round_request_binding_date(row.get("round_id")) is None
                 or row.get("source") not in ("packet-ingest", "pr-marker")
                 or not isinstance(row.get("event_id"), str)
                 or (row.get("reviewer") is not None
                     and (not isinstance(row.get("reviewer"), str)
                          or not row["reviewer"].strip()))
-                or (row.get("reviewer_configured") is not None
-                    and row.get("reviewer_configured") is not True)
                 or (row.get("reviewer_coverage_reason") is not None
                     and not isinstance(row.get("reviewer_coverage_reason"), str))):
-            skipped += 1
-            continue
-        if (row["source"] == "packet-ingest" and row.get("reviewer_configured") is True
-                and not isinstance(row.get("reviewer"), str)):
             skipped += 1
             continue
         if row["source"] == "pr-marker":
             row = {**row, "reviewer_configured": True,
                    "reviewer_coverage_reason": None}
-        elif row.get("reviewer_configured") is not True:
+        else:
+            binding = None
+            if cfg is not None:
+                binding, _binding_reason = review.ingest_round_binding(
+                    root, row["round_id"], cfg)
+                feedback = root / cfg["reviews_dir"] / f"{row['round_id']}-feedback.md"
+            else:
+                feedback = root / "__unavailable-feedback__"
+            projected = review.read_feedback_reply_metadata(
+                feedback, expected_round_id=row["round_id"], binding=binding,
+                request_generation_dir=(project_state_path(root) / "review-requests"
+                                        if cfg is not None
+                                        and (cfg.get("review") or {}).get("mode") == "pr"
+                                        else feedback.parent))
             row = {
-                **row, "reviewer_configured": None,
-                "reviewer_coverage_reason": (
-                    row.get("reviewer_coverage_reason")
-                    if isinstance(row.get("reviewer_coverage_reason"), str)
-                    else "reviewer-identity-unavailable"),
+                **row,
+                "reviewer": projected["model"],
+                "reviewer_effort": projected["effort"],
+                "review_target": projected["review_target"],
+                "review_target_matches": projected["review_target_matches"],
+                "reviewer_configured": projected["reviewer_configured"],
+                "reviewer_coverage_reason": projected["reviewer_coverage_reason"],
+                "narrative_digest_matches": projected["narrative_digest_matches"],
+                "narrative_coverage_reason": projected["narrative_coverage_reason"],
+                "rendered_request_digest_matches":
+                    projected["rendered_request_digest_matches"],
+                "rendered_request_coverage_reason":
+                    projected["rendered_request_coverage_reason"],
+                "reply_metadata": projected["metadata"],
             }
         rows.append({**row, "source_pointer": f"{path}:{line_number}"})
     deduped = {row["event_id"]: row for row in rows}
@@ -802,7 +878,7 @@ def promote_user(root: Path, delta_id: str) -> dict:
     """Atomically promote one independently observed candidate under the global lock order."""
     with hold_lock(registry_lock_path()):
         with hold_lock(overlay_lock_path()):
-            with hold_lock(project_lock_path(root)):
+            with hold_project_lock(root):
                 return _promote_user_locked(root, delta_id)
 
 
@@ -2253,12 +2329,51 @@ def _capture_round_evidence(root: Path, base_sha: str | None, head_sha: str | No
     }
 
 
+def _write_round_exposure_file(root: Path, round_id: str, exposure: dict):
+    edir = _exposure_dir(root)
+    _mkdir_or_refuse(edir)
+    base = edir / f"round-{round_id}.json"
+    path = base
+    number = 2
+    content = json.dumps(exposure, ensure_ascii=False, indent=2) + "\n"
+    while True:
+        try:
+            with path.open("x", encoding="utf-8") as stream:
+                stream.write(content)
+            return path, exposure
+        except FileExistsError:
+            path = base.with_name(f"{base.stem}-{number}{base.suffix}")
+            number += 1
+        except BaseException:
+            # open('x') made this path ours; a failed write must not leave a partial immutable record.
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
+
+def reclose_round_exposure(root: Path, previous_path: Path, previous: dict, head_sha: str):
+    """Rebind an already closed round to its committed PR closeout without touching repo files."""
+    _ensure_project_state_or_refuse(root)
+    exposure = json.loads(json.dumps(previous))
+    branch_rc, branch, _branch_error = git_rc(root, "branch", "--show-current")
+    if branch_rc != 0 or not branch:
+        branch = "(detached)"
+    exposure["at"] = _now_iso()
+    exposure["head_sha"] = head_sha
+    exposure["project"]["branch"] = branch
+    exposure["reclosed_from"] = str(previous_path)
+    return _write_round_exposure_file(root, exposure["round_id"], exposure)
+
+
 def write_round_exposure(root: Path, round_id: str, head_sha: str | None, watermark: str | None,
                          session_id: str | None = None, *, base_sha: str | None = None,
                          task_scopes: dict[str, list[str]] | None = None,
                          task_scope_coverage: dict[str, str] | None = None,
                          done_task_ids: list[str] | None = None,
-                         routes: list[dict] | None = None):
+                         routes: list[dict] | None = None,
+                         reviewers: list[str] | None = None):
     """Immutable per-round exposure record written at close (§9/#4). A re-close of the same round-id
     gets a `-2`/`-3` suffix (H4 precedent — existing records are never overwritten)."""
     _ensure_project_state_or_refuse(root)
@@ -2289,12 +2404,19 @@ def write_round_exposure(root: Path, round_id: str, head_sha: str | None, waterm
             "done_task_ids": sorted(set(done_task_ids or [])), "done_evidence": [],
         }
     policy_composition = compose_policy(root, round_id=round_id)
+    branch_rc, branch, _branch_error = git_rc(root, "branch", "--show-current")
+    if branch_rc != 0 or not branch:
+        branch = "(detached)"
     exposure = {
         "schema": "waystone-round-exposure-1", "round_id": round_id, "at": _now_iso(),
         "session_id": session_id,
-        "project": {"pslug": _project_slug(root), "root": str(Path(root).resolve())},
+        "project": {
+            "pslug": _project_slug(root), "root": str(Path(root).resolve()),
+            "name": cfg.get("project"), "branch": branch,
+        },
         "head_sha": head_sha, "config_watermark": watermark, "base_sha": base_sha,
         "profile_fingerprint": fp, "bindings": bindings,
+        "reviewers": list(reviewers or []),
         "start_level": cfg["policy"]["start_level"],
         "routes": list(routes or []),
         "config_fingerprint": config_fingerprint,
@@ -2311,27 +2433,7 @@ def write_round_exposure(root: Path, round_id: str, head_sha: str | None, waterm
         # recorded waivers. These are truthful contract values, not missing-data fallbacks.
         "guards": None, "waivers": [],
     }
-    edir = _exposure_dir(root)
-    _mkdir_or_refuse(edir)
-    base = edir / f"round-{round_id}.json"
-    p = base
-    n = 2
-    content = json.dumps(exposure, ensure_ascii=False, indent=2) + "\n"
-    while True:
-        try:
-            with p.open("x", encoding="utf-8") as stream:
-                stream.write(content)
-            return p, exposure
-        except FileExistsError:
-            p = base.with_name(f"{base.stem}-{n}{base.suffix}")
-            n += 1
-        except BaseException:
-            # open('x') made this path ours; a failed write must not leave a partial immutable record.
-            try:
-                p.unlink()
-            except FileNotFoundError:
-                pass
-            raise
+    return _write_round_exposure_file(root, round_id, exposure)
 
 
 # ---- CLI (hand-rolled parsing; {0,1,2} exit contract) --------------------------
@@ -2368,7 +2470,7 @@ def _resolve_root(explicit: str | None) -> Path:
     root = Path(explicit).resolve() if explicit else find_project_root(Path.cwd())
     if root is None:
         raise WorkflowError("no initialized project (run inside one, or pass --root DIR)")
-    with hold_lock(project_lock_path(root)):
+    with hold_project_lock(root):
         migrate_project_state(root)
     return root
 
@@ -2385,7 +2487,7 @@ def _cli_add(rest: list[str]) -> int:
     if opts.get("summary") is None:
         raise WorkflowError("add requires --summary <text>")
     root = _resolve_root(opts.get("root"))
-    with hold_lock(project_lock_path(root)):
+    with hold_project_lock(root):
         delta = add_delta(
             root, pos[0], rule=opts["rule"], summary=opts["summary"],
             pointers=opts.get("pointers"), expected_effect=opts.get("expected-effect", ""),
@@ -2419,7 +2521,7 @@ def _cli_promote(rest: list[str]) -> int:
     if not pos:
         raise WorkflowError("promote requires a <delta-id>")
     root = _resolve_root(opts.get("root"))
-    with hold_lock(project_lock_path(root)):
+    with hold_project_lock(root):
         delta = promote(root, pos[0])
     print(f"promoted {delta['id']} -> {delta['status']}")
     return 0
@@ -2430,7 +2532,7 @@ def _cli_demote(rest: list[str]) -> int:
     if not pos:
         raise WorkflowError("demote requires a <delta-id>")
     root = _resolve_root(opts.get("root"))
-    with hold_lock(project_lock_path(root)):
+    with hold_project_lock(root):
         delta = demote(root, pos[0])
     print(f"demoted {delta['id']} -> {delta['status']}")
     return 0
@@ -2441,7 +2543,7 @@ def _cli_suspend(rest: list[str]) -> int:
     if not pos:
         raise WorkflowError("suspend requires a <delta-id>")
     root = _resolve_root(opts.get("root"))
-    with hold_lock(project_lock_path(root)):
+    with hold_project_lock(root):
         delta = suspend(root, pos[0], note=opts.get("note"))
     print(f"suspended {delta['id']}")
     return 0
@@ -2452,7 +2554,7 @@ def _cli_retire(rest: list[str]) -> int:
     if not pos:
         raise WorkflowError("retire requires a <delta-id>")
     root = _resolve_root(opts.get("root"))
-    with hold_lock(project_lock_path(root)):
+    with hold_project_lock(root):
         delta = retire(root, pos[0], note=opts.get("note"))
     print(f"retired {delta['id']}")
     return 0
@@ -2463,7 +2565,7 @@ def _cli_replay(rest: list[str]) -> int:
     if not pos:
         raise WorkflowError("replay requires a <delta-id>")
     root = _resolve_root(opts.get("root"))
-    with hold_lock(project_lock_path(root)):
+    with hold_project_lock(root):
         report = replay(root, pos[0])
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     rate = "null" if report["fire_rate"] is None else f"{report['fire_rate']:.4f}"
@@ -2491,7 +2593,7 @@ def _cli_override(rest: list[str]) -> int:
         if not opts.get(name):
             raise WorkflowError(f"override requires --{name}")
     root = _resolve_root(opts.get("root"))
-    with hold_lock(project_lock_path(root)):
+    with hold_project_lock(root):
         entry = set_round_override(
             root, opts["round"], pos[0], opts["stage"], opts["reason"])
     print(f"round override {entry['rule']} -> {entry['stage']} ({opts['round']})")
@@ -2503,7 +2605,7 @@ def _cli_materialize(rest: list[str]) -> int:
     if len(pos) != 1:
         raise WorkflowError("materialize requires one <delta-id>")
     root = _resolve_root(opts.get("root"))
-    with hold_lock(project_lock_path(root)):
+    with hold_project_lock(root):
         path = materialize(root, pos[0], consent_recorded=bool(opts.get("consent-recorded")))
     print(f"materialized {pos[0]} -> {path} (left uncommitted)")
     return 0
@@ -2534,6 +2636,15 @@ def _cli_check(rest: list[str]) -> int:
         print(f"[{marker}] {e['rule']} [{identity['layer']}:{identity['id']}]: {e['message']}")
     for e in (e for e in events if e["event"] == "evaluation-error"):
         print(f"[eval-error] {e['rule']}: {e['message']}")
+    try:
+        import review
+        pending = review.pending_reviews(root)
+        if pending:
+            print(f"waystone warn: {len(pending)} pending review(s)", file=sys.stderr)
+            for row in pending:
+                print(f"  {review.format_pending_review(row)}", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001 — pending reminders never change check's exit code
+        print(f"waystone warn: pending review check unavailable ({e})", file=sys.stderr)
     return 0
 
 

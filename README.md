@@ -13,7 +13,7 @@
 <img alt="version" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FDev-Jahn%2Fwaystone%2Fmain%2F.claude-plugin%2Fplugin.json&query=%24.version&prefix=v&label=version&style=flat-square">
 <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-8A5CF6?style=flat-square">
 <img alt="Codex plugin" src="https://img.shields.io/badge/Codex-plugin-111111?style=flat-square">
-<img alt="tests" src="https://img.shields.io/badge/tests-543-success?style=flat-square">
+<img alt="tests" src="https://img.shields.io/badge/tests-719-success?style=flat-square">
 <img alt="license" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square">
 </p>
 
@@ -21,7 +21,7 @@
 
 Waystone is a Claude Code and Codex plugin that gives a project a durable source of direction, a validated task list, bounded work cycles, independent review, and a way to learn from past agent sessions. It is built for research and software projects that span many sessions or agents — where context, decisions, and verification evidence would otherwise scatter across chats and memory files.
 
-> **Status:** The v0.10 Bind & Compose capability set is implemented; the distributable manifest version bump is intentionally separate. Waystone now consumes role/execution/backend bindings across host and external execution, composes four policy layers, and records longitudinal workflow metrics. Next: enforceable guards, recorded waivers, and larger-scale orchestration.
+> **Status:** v0.11 Anchor & Attest is the current release. Completion judgments — review receipts, delegation verdicts, round closeouts — now derive only from immutable, re-derivable evidence: digest-bound request generations, read-time re-derivation of reviewer replies, and identity-attested runner probes, with honest failure modes across mixed-version and mixed-machine states. Next: enforceable guards, recorded waivers, and larger-scale orchestration.
 
 <br>
 
@@ -125,7 +125,7 @@ periodically to analyze past sessions and review results.
 | `/waystone:round` | `$waystone:round` | Closes a bounded work cycle, updates progress, refreshes generated views, and creates a review request. |
 | `/waystone:review` | `$waystone:review` | Preserves a reviewer reply exactly, verifies each issue, and turns confirmed issues into tasks. |
 | `/waystone:delegate` | `$waystone:delegate` | Autonomously runs one task in an isolated worktree, verifies it, and resolves it with a recorded evidence-backed verdict. |
-| `/waystone:status` | `$waystone:status` | Shows active, blocked, and pending work across registered local or remote projects. |
+| `/waystone:status` | `$waystone:status` | Shows active, blocked, parked, and pending work across registered local or remote projects. |
 | `/waystone:improve` | `$waystone:improve` | Analyzes host session history and review evidence, then proposes evidence-backed workflow improvements. |
 
 <details>
@@ -154,6 +154,9 @@ Most validation, rendering, bookkeeping, log parsing, and policy checks are plai
 | `waystone task set <id> --scope-add <prefix>` | Appends a validated repo-relative task boundary for scope-drift evaluation. |
 | `waystone paths` | Shows the resolved project-state, machine-state, and worktree-cache locations. |
 | `waystone project` | Registers, unregisters, and lists projects through the machine-wide registry. |
+| `waystone delegate plan --json` | Emits an immutable fan-out manifest for a set of decided tasks — dependency-gated, corrupt-fail-closed — that a deterministic-workflow carrier carries. |
+| `waystone delegate run --json-events --expect-packet-sha` | Runs one delegation; `--json-events` streams pure NDJSON on stdout, `--expect-packet-sha` (with `--expect-profile`) refuses a stale dispatch before any work starts, and `--carrier` / `--carrier-instance` record carrier attribution in the immutable packet. |
+| `waystone delegate status --json` | Reports delegation state (including `corrupt`) with an exact `task_id` field for machine consumption. |
 | `waystone delegate verify` | Re-runs independent read-only verification of a delegation result in its preserved worktree. |
 | `waystone delegate verdict` | Records the main session's evidence-backed apply or discard decision before resolution. |
 | `waystone round close --route-note <role>,<execution>,<backend>` | Records an actually used host-guided route in the immutable round exposure; repeat once per route. |
@@ -162,14 +165,20 @@ Most validation, rendering, bookkeeping, log parsing, and policy checks are plai
 | `waystone overlay promote-user` | Promotes a user-scope candidate only after evidence from at least two registered projects. |
 | `waystone overlay materialize` | Writes a consent-approved, rule-named sanitized policy to `docs/waystone-policy.yaml`, keeps delta provenance only in local state, and leaves the policy uncommitted. |
 | `waystone consent record` | Records candidate-bound user consent for materialization or managed installation. The command group is `waystone consent`. |
-| `waystone install agents` / `waystone install hooks` | Installs a consent-approved managed project agent or hook without overwriting or committing it. The command group is `waystone install`. |
+| `waystone install agents` / `waystone install hooks` | Installs a consent-approved managed project agent or enables the plugin-owned boundary hook. Hook enablement creates `.waystone/boundary-hooks-enabled` for both Claude Code and Codex and never writes `.claude/settings.json`; remove the marker to roll it back. The command group is `waystone install`. |
 | `waystone check` | Evaluates active overlay rules against the current project state; warnings are visible but never block the host command. |
+| `waystone statusline` | Renders one read-only derived-state line (tasks done/total, round, pending reviews, blockers) for the host status line; degrades to an empty segment in cold or corrupt environments. |
+| `waystone install statusline` | Consent-gated managed install of the statusline command hook; refuses to overwrite an existing `statusLine` setting. |
 | `waystone improve evidence` | Deterministically joins review findings and delegation records by task ID into a local evidence log. |
 | `waystone improve metrics` | Appends named §15 metrics and a factual comparison with the previous same-scope snapshot. |
 
 </details>
 
 <br>
+
+Task status follows `pending → active → done`, with `blocked`, `parked`, and `dropped` side
+states. `parked` means intentionally deferred: record the reason in `notes`; it is neither
+actionable nor auto-archived.
 
 ## Rounds and independent review
 
@@ -189,50 +198,163 @@ types while checking them against the code before confirmed issues become tracke
 
 ## Delegate a task without losing control
 
-The `delegate` skill autonomously closes one task whose success criteria are already recorded or can
-be derived exactly from owner-authored project material. Waystone then:
+The `delegate` skill autonomously closes one registered task whose acceptance criteria are already
+recorded or can be derived exactly from owner-authored project material — without ever letting the
+implementation agent grade its own work. Two layers share the job:
 
-1. selects an actionable task and, when necessary, records owner-derived criteria through `waystone task set <id> --accept-add` and an exact path boundary through `waystone task set <id> --scope-add` before the run;
-2. fixes the current repository state as an immutable snapshot, including uncommitted work, then runs the configured implementer in a separate Git worktree;
-3. computes the patch and changed-file list directly from Git while keeping the worker's own verification and risk report labeled as a claim;
-4. always produces verification evidence — through `waystone delegate verify` when a verifier is bound, or focused commands in the normalized worktree otherwise;
-5. records a criterion-by-criterion decision with `waystone delegate verdict`, then applies it or discards it with a recorded `--reason`;
-6. reports the result, evidence, warnings, retries, and one pointer to the preserved record and undo information.
+- **`/waystone:delegate` — the skill.** Routes the task through eight policy questions (reasoning,
+  context inheritance, independent perspective, bounded scope, repetitive tools, retry cost,
+  independent verification, budget sensitivity), records owner-derived criteria with
+  `waystone task set <id> --accept-add` and an exact path boundary with `waystone task set <id> --scope-add`
+  *before* the run, and owns the accept/reject decision in the main session.
+- **`waystone delegate <subcommand>` — the CLI.** Does the mechanical part: immutable records,
+  isolated worktrees, harness-computed patches, independent verification, and audited state
+  transitions.
 
-The main session owns the routine decision and records every acceptance with cited evidence. The user
-audits that record. Worker claims never become facts merely because their report exists, and a missing
-worker report never means verification was absent.
-
-Before routing, the skill checks all eight policy questions (reasoning, context inheritance,
-independent perspective, bounded scope, repetitive tools, retry cost, independent verification, and
-budget sensitivity). An external run stores the budget judgment as the packet's main-session
-`routing_note`; host-guided work is recorded at round close and is otherwise left unattributed.
-
-The autonomous loop keeps the existing safety rails: one nonterminal delegation per task, required
-criteria and valid profile bindings, read-only independent verification, a bounded
-`waystone delegate show --failure` diagnostic, at most two run attempts with retry context recorded by
-`--note`, an atomic plain patch apply, and permanent records. It does not read the full runner log or
-silently substitute a model, verification path, 3-way apply, or stash operation. Recorded override
-flags require `--reason`; a main-session blocker override also has to cite direct checks that refute
-each blocker.
-
-Human input is reserved for ten cases: criteria cannot be derived without invention; the profile or
-binding is unusable; an apply judgment still has an unrefuted blocker; two attempts are exhausted; a
-verifier transport fails again after one retry; apply drift is not wholly caused by the current
-session; the runner failure is deterministic; warning rules conflict; a Claude external runner would
-need an unsandboxed override; or you explicitly request a review. When drift touches your uncommitted
-work, Waystone never commits or stashes it — it reports the state and waits. In every other case the
-main session continues through verdict and apply or discard.
+The division of trust is fixed. Everything the worker claims stays labeled a claim — it never becomes
+a fact merely because the report exists, and a missing report never means verification was absent.
+Every fact that matters (base snapshot, changed files, patch bytes, digests) is computed by the
+harness directly from Git. Nothing reaches your live tree until the main session records a
+criterion-by-criterion verdict against the packet's acceptance criteria, verbatim, with cited
+evidence — and you audit that record, not the worker's word.
 
 Waystone stores bindings by responsibility (`main`, `orchestrator`, `implementer`, `clerk`,
 `verifier`, `reviewer`) rather than baking model names into the workflow. `external-runner` is run by
 Waystone; `clean-subagent`, `forked-subagent`, `deterministic-workflow`, and `main-session` are routed
 through the host and attributed to the round. Bindings live in the project's uncommitted
-`{project_root}/.waystone/profile.yml`; Waystone refuses to guess one when it is missing.
+`{project_root}/.waystone/profile.yml`; Waystone refuses to guess one when it is missing. Profile
+`effort` accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `ultra`. `ultra` is
+Codex-only and is passed unchanged as `model_reasoning_effort`; the Claude external runner rejects it
+without substituting another effort. Omitting `effort` leaves the runner's configured default
+untouched.
 
-The external implementer supports Codex and Claude backends. Because the Claude backend has no
-structural filesystem/process/network sandbox, it is refused by default and can run only after
-explicit user consent with `--allow-unsandboxed-runner --reason` recorded in the exposure.
+Human input is reserved for the cases the machine must not decide alone: criteria that cannot be
+derived without invention, an unusable profile or binding, an apply judgment with an unrefuted
+blocker, exhausted retries, repeated verifier transport failure, apply drift not wholly caused by the
+current session, a deterministic runner failure, conflicting warning rules, a Claude external runner
+that would need an unsandboxed override, or an explicit review request. When drift touches your
+uncommitted work, Waystone never commits or stashes it — it reports the state and waits. In every
+other case the main session continues through verdict and apply or discard.
+
+<details>
+<summary><b>How delegation works under the hood</b> — only read on if you're curious what each step
+actually does.</summary>
+
+### The lifecycle
+
+```text
+routing decision
+  ├─ host-guided execution
+  │    └─ main / subagent / workflow runs it directly
+  │       (no delegation record; attributed at round close)
+  │
+  └─ external runner
+       └─ run
+           ├─ failed-env / failed-runner / failed-artifact
+           │    └─ discard, then retry as a NEW run (with --note)
+           │
+           └─ needs-review
+                ├─ verify     adds verification evidence, state unchanged
+                ├─ verdict    records the judgment, state unchanged
+                ├─ apply      patches the live tree        → applied
+                └─ discard    drops the result             → discarded
+```
+
+The boundaries are deliberate:
+
+- a successful `run` is **not** "done" — it is `needs-review`;
+- `verify` produces evidence and judges nothing;
+- `verdict` judges and touches nothing;
+- `apply` applies the patch and *only* the patch — it does not commit, and it does not flip the task
+  to done;
+- `discard` can clean up any nonterminal record, verdict or not.
+
+### Command map
+
+| command | what it does | writes | state |
+|---|---|---|---|
+| `plan` | emit a fan-out manifest for several decided tasks | stdout JSON only | none |
+| `run` | execute the bound implementer in an isolated worktree | record, refs, worktree, patch, contract | `claimed → running → needs-review / failed-*` |
+| `status` | list delegation states | nothing | none |
+| `show` | inspect patch / contract / verification / failure evidence | nothing | none |
+| `verify` | run the independent verifier | `verify-N.json` | stays `needs-review` |
+| `verdict` | record the main session's judgment | `verdict-N.json` | stays `needs-review` |
+| `apply` | apply the approved patch to the live tree | live working tree | `needs-review → applied` |
+| `discard` | drop the result, keep the audit trail | removes worktree/refs, keeps record | `* → discarding → discarded` |
+
+### What `run` actually does
+
+1. **Gates first.** Initialized project, recorded delegation consent, a sane Git state (no unborn
+   HEAD, submodules, unmerged index, or in-progress merge/rebase), an `implementer/external-runner`
+   binding, task state `pending|active`, **every dependency `done`**, non-empty acceptance criteria,
+   and no other nonterminal delegation for the same task. A carrier-issued run also pins
+   `--expect-packet-sha` and `--expect-profile` so a stale plan fails loudly instead of running.
+2. **Claim.** A unique delegation ID (`20260718T123456Z-fix-something`) and a `claim.json` land
+   before anything else, so even a crash leaves ownership recoverable.
+3. **Snapshot.** Using a temporary index — your live branch and index are never touched — the exact
+   current tree (HEAD + staged + unstaged + non-ignored untracked files) becomes an immutable base
+   commit under `refs/waystone/delegations/<id>`, and a detached worktree is created from it under
+   `~/.waystone/cache/worktrees/<project>/<id>/`. The implementer starts from what you were actually
+   looking at, uncommitted work included.
+4. **Immutable context.** The record keeps `packet.yaml` (task, acceptance, scope, routing context),
+   `exposure.json` (base SHA, dirty flag, binding, profile fingerprint, sandbox), `status.json`
+   (every state transition), and `prompt.txt` (the prompt as sent).
+5. **Environment prep.** `delegation.env_prep` commands if configured; otherwise lockfile
+   auto-detection (`uv.lock → uv sync --frozen`, `pnpm-lock.yaml → pnpm install --frozen-lockfile`,
+   `package-lock.json → npm ci`, `Cargo.toml → cargo fetch`, `go.mod → go mod download`). A prep
+   failure is `failed-env`, worktree preserved for diagnosis.
+6. **The runner.** The Codex backend runs `codex exec` inside the worktree with the bound model,
+   a `workspace-write` sandbox, and the bound `model_reasoning_effort`. The Claude backend has no
+   OS-level confinement and is therefore refused by default — it runs only after explicit
+   `--allow-unsandboxed-runner --reason`, recorded in the exposure. A one-time sandbox preflight
+   probe per checkout catches environments where the sandbox silently blocks all writes.
+7. **Harness-computed results.** After the runner exits, the result snapshot SHA, changed-file list,
+   binary-safe patch, and patch digest are computed directly from Git into
+   `artifact/contract.yaml` + `artifact/changes.patch`. The worker's structured report is excluded
+   from the patch; its verification/limitations/risks enter the contract only under a
+   `delegate-claimed` label. Success is `needs-review`; failures classify as `failed-env`,
+   `failed-runner`, or `failed-artifact`, and are never retried silently.
+
+### Independent verification — `waystone delegate verify`
+
+Only valid on `needs-review`. The preserved worktree is force-normalized (`checkout --force --detach
+<base>`, `clean -fd`, re-apply the exact patch), the rebuilt tree is checked against the contract's
+result SHA, and the bound verifier runs Waystone's own adversarial-review prompt against the
+acceptance criteria. A Codex verifier runs host-independent `codex exec` in a `read-only` sandbox
+with `--output-schema` and `--output-last-message`; a Claude verifier gets read-only tools plus
+before/after filesystem postconditions. If the verifier modified anything, its result is rejected.
+Each pass appends `artifact/verify-N.json`; the newest one is what a later verdict must answer to.
+
+### Judgment — `waystone delegate verdict`
+
+`verdict` runs nothing. It validates and appends the main session's judgment file: the criteria must
+match the packet's acceptance criteria verbatim, every `met: true` needs resolvable evidence
+references, any verifier blocker must be individually refuted by cited direct checks plus an explicit
+override `--reason`, and applying over an unmet criterion requires its own recorded override. The
+harness then stamps provenance, the verify number it answers, the profile fingerprint, and
+contract/patch digests, and appends `artifact/verdict-N.json`. New verification evidence makes an
+older verdict stale.
+
+### Resolution — `apply` / `discard`
+
+`apply` demands a current `apply` verdict whose digests still match, then performs a plain
+`git apply` — no 3-way merge, no stash, no conflict resolution; if your live tree drifted so the
+patch no longer fits, the whole apply fails and says so. On success the cached worktree is removed,
+the record and refs stay for audit, and the tree change is left uncommitted for you (or the round) to
+commit. `discard` walks any nonterminal record through `discarding` (reason recorded, worktree and
+refs removed, postconditions checked) to `discarded`, is safe to re-run if cleanup is interrupted,
+and keeps the record directory forever. `--orphan` recovers the inverse crash: a leftover
+worktree/ref whose record is gone.
+
+### Fan-out — `waystone delegate plan --json`
+
+`plan` starts nothing. It emits one immutable manifest — profile fingerprint, per-task packet
+digests, declared scopes, dependency and scope-overlap analysis — that a deterministic-workflow
+carrier consumes: scope-disjoint tasks run as parallel `run` lanes, overlapping or undeclared-scope
+tasks run serially, and the carrier never verifies, judges, applies, or discards. Those calls stay
+with the main session.
+
+</details>
 
 <br>
 
@@ -288,7 +410,8 @@ remain visible but never block until the enforcement arc lands.
 | **v0.7 — Observe & Advise** | Organize projects, run review-centered work cycles, analyze past sessions, and make evidence-backed recommendations. | Implemented |
 | **v0.8 — Delegate & Verify** | Run coding tasks through an isolated, reproducible delegation flow; verify results independently; begin project-specific observation and warning rules. | Implemented |
 | **v0.9 — Unify & Automate** | Share one project state across Claude Code and Codex with cross-process locking; let the main session run delegation end-to-end behind harness-enforced acceptance gates; scope improve analysis to the project by default. | Implemented |
-| **v0.10 — Bind & Compose** | Complete consumption of role, execution, and backend bindings; compose four policy layers with consent-gated sharing; complete observation lenses and longitudinal metrics. | Implemented — current release |
+| **v0.10 — Bind & Compose** | Complete consumption of role, execution, and backend bindings; compose four policy layers with consent-gated sharing; complete observation lenses and longitudinal metrics. | Implemented |
+| **v0.11 — Anchor & Attest** | Bind every completion judgment to immutable, re-derivable evidence: digest-bound review generations, read-time receipt re-derivation, identity-attested delegation probes, and honest failure modes across mixed-version hosts. | Implemented — current release |
 | **Next — Adapt & Enforce** | Promote proven checks to enforceable guards with recorded waivers, and support larger parallel task groups. | Planned |
 
 <details>
