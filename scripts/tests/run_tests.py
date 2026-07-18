@@ -1682,6 +1682,21 @@ Fail-loud protocol boundaries.
                 metadata["rendered_request_coverage_reason"],
                 "request-digest-stale-generation")
 
+            events, skipped = overlay.load_review_ingests(root)
+            self.assertEqual(skipped, 0)
+            self.assertIs(events[0]["narrative_digest_matches"], False)
+            self.assertEqual(
+                events[0]["rendered_request_coverage_reason"],
+                "request-digest-stale-generation")
+            projected_guard = overlay.evaluate_review_skipped_closes(
+                [{"round_id": self.ROUND_ID,
+                  "at": "2099-01-01T00:00:00+00:00",
+                  "review_mode": "packet"}],
+                [{**events[0], "at": "2098-01-01T00:00:00+00:00"}],
+                consecutive=1)
+            self.assertEqual(projected_guard["fires"], [self.ROUND_ID])
+            self.assertIsNone(projected_guard["by_round"][0]["feedback_observed"])
+
             out = base / "out"
             improve.run_reviews(base / "unused-registry.json", out, project_root=root)
             row = next(row for row in (
@@ -1693,6 +1708,240 @@ Fail-loud protocol boundaries.
             self.assertEqual(
                 row["rendered_request_coverage_reason"],
                 "request-digest-stale-generation")
+
+    def test_feedback_cache_digest_edit_cannot_reassign_verbatim_reply(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, target, narrative = self._closed_project(base)
+            self.assertEqual(review.prepare_review_request(
+                root, self.ROUND_ID, narrative), 0)
+            rdir = root / "docs/reviews"
+            _first_path, first = review.latest_round_request_binding(
+                list(rdir.glob(f"{self.ROUND_ID}-request.binding*.json")),
+                expected_round_id=self.ROUND_ID)
+            self.assertIsNotNone(first)
+
+            reply = base / "reply.md"
+            reply.write_text(
+                "model: reviewer-x\neffort: high\n"
+                f"review-target: {target}\n"
+                f"request-digest: {first['rendered_request_digest']}\n\nreviewed\n")
+            self.assertEqual(review.ingest(root, self.ROUND_ID, src=reply), 0)
+
+            narrative.write_text(self.NARRATIVE.replace(
+                "Fail-loud protocol boundaries.", "A newer narrative generation."))
+            self.assertEqual(review.prepare_review_request(
+                root, self.ROUND_ID, narrative), 0)
+            _latest_path, latest = review.latest_round_request_binding(
+                list(rdir.glob(f"{self.ROUND_ID}-request.binding*.json")),
+                expected_round_id=self.ROUND_ID)
+            self.assertIsNotNone(latest)
+            self.assertNotEqual(
+                first["rendered_request_digest"], latest["rendered_request_digest"])
+
+            feedback = rdir / f"{self.ROUND_ID}-feedback.md"
+            content = feedback.read_bytes()
+            header, tail = content.split(review.FEEDBACK_HEADER_SEPARATOR, 1)
+            lines = header.decode().splitlines()
+            metadata_index = next(
+                index for index, line in enumerate(lines)
+                if line.startswith("reply-metadata-json: "))
+            payload = _json.loads(lines[metadata_index].removeprefix(
+                "reply-metadata-json: "))
+            payload["narrative_digest"] = latest["narrative_digest"]
+            payload["rendered_request_digest"] = latest["rendered_request_digest"]
+            lines[metadata_index] = "reply-metadata-json: " + _json.dumps(
+                payload, sort_keys=True, separators=(",", ":"))
+            feedback.write_bytes(
+                "\n".join(lines).encode() + review.FEEDBACK_HEADER_SEPARATOR + tail)
+
+            pending = review.pending_reviews(root)
+            self.assertEqual([row["round_id"] for row in pending], [self.ROUND_ID])
+            self.assertEqual(pending[0]["reason"], "feedback-cache-body-mismatch")
+            projected = review.read_feedback_reply_metadata(
+                feedback, expected_round_id=self.ROUND_ID, binding=latest)
+            self.assertIsNone(projected["rendered_request_digest_matches"])
+            self.assertEqual(
+                projected["rendered_request_coverage_reason"],
+                "feedback-cache-body-mismatch")
+
+            out = base / "out"
+            improve.run_reviews(base / "unused-registry.json", out, project_root=root)
+            row = next(row for row in (
+                _json.loads(line) for line in (out / "reviews.jsonl").read_text().splitlines()
+            ) if row["round_id"] == self.ROUND_ID)
+            self.assertIsNone(row["rendered_request_digest_matches"])
+            self.assertEqual(
+                row["rendered_request_coverage_reason"], "feedback-cache-body-mismatch")
+
+    def test_feedback_cache_coverage_edit_cannot_enable_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, target, narrative = self._closed_project(base)
+            self.assertEqual(review.prepare_review_request(
+                root, self.ROUND_ID, narrative), 0)
+            reply = base / "reply.md"
+            reply.write_text(
+                "model: reviewer-x\neffort: high\n"
+                f"review-target: {target}\n\nreviewed\n")
+            self.assertEqual(review.ingest(root, self.ROUND_ID, src=reply), 0)
+
+            rdir = root / "docs/reviews"
+            feedback = rdir / f"{self.ROUND_ID}-feedback.md"
+            header, tail = feedback.read_bytes().split(
+                review.FEEDBACK_HEADER_SEPARATOR, 1)
+            lines = header.decode().splitlines()
+            metadata_index = next(
+                index for index, line in enumerate(lines)
+                if line.startswith("reply-metadata-json: "))
+            payload = _json.loads(lines[metadata_index].removeprefix(
+                "reply-metadata-json: "))
+            payload["rendered_request_coverage_reason"] = (
+                "request-digest-missing-legacy-fallback")
+            lines[metadata_index] = "reply-metadata-json: " + _json.dumps(
+                payload, sort_keys=True, separators=(",", ":"))
+            feedback.write_bytes(
+                "\n".join(lines).encode() + review.FEEDBACK_HEADER_SEPARATOR + tail)
+
+            _binding_path, binding = review.latest_round_request_binding(
+                list(rdir.glob(f"{self.ROUND_ID}-request.binding*.json")),
+                expected_round_id=self.ROUND_ID)
+            projected = review.read_feedback_reply_metadata(
+                feedback, expected_round_id=self.ROUND_ID, binding=binding)
+            self.assertIs(projected["rendered_request_digest_matches"], False)
+            self.assertEqual(
+                projected["rendered_request_coverage_reason"], "request-digest-missing")
+            self.assertEqual(
+                review.pending_reviews(root)[0]["reason"],
+                "feedback-request-digest-missing")
+
+    def test_missing_or_corrupt_named_generation_is_unknown_not_receipt_corrupt(self):
+        for mutation in ("missing", "corrupt"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as d:
+                base = Path(d)
+                root, target, narrative = self._closed_project(base)
+                self.assertEqual(review.prepare_review_request(
+                    root, self.ROUND_ID, narrative), 0)
+                rdir = root / "docs/reviews"
+                first_path, first = review.latest_round_request_binding(
+                    list(rdir.glob(f"{self.ROUND_ID}-request.binding*.json")),
+                    expected_round_id=self.ROUND_ID)
+                self.assertIsNotNone(first_path)
+                self.assertIsNotNone(first)
+                reply = base / "reply.md"
+                reply.write_text(
+                    "model: reviewer-x\neffort: high\n"
+                    f"review-target: {target}\n"
+                    f"request-digest: {first['rendered_request_digest']}\n\nreviewed\n")
+                self.assertEqual(review.ingest(root, self.ROUND_ID, src=reply), 0)
+
+                narrative.write_text(self.NARRATIVE.replace(
+                    "Fail-loud protocol boundaries.", "A newer narrative generation."))
+                self.assertEqual(review.prepare_review_request(
+                    root, self.ROUND_ID, narrative), 0)
+                _latest_path, latest = review.latest_round_request_binding(
+                    list(rdir.glob(f"{self.ROUND_ID}-request.binding*.json")),
+                    expected_round_id=self.ROUND_ID)
+                self.assertIsNotNone(latest)
+                if mutation == "missing":
+                    first_path.unlink()
+                else:
+                    first_path.write_text("{}\n")
+
+                feedback = rdir / f"{self.ROUND_ID}-feedback.md"
+                projected = review.read_feedback_reply_metadata(
+                    feedback, expected_round_id=self.ROUND_ID, binding=latest)
+                self.assertIsNone(projected["narrative_digest_matches"])
+                self.assertEqual(
+                    projected["narrative_coverage_reason"], "request-digest-unknown")
+                self.assertIs(projected["rendered_request_digest_matches"], False)
+                self.assertEqual(
+                    projected["rendered_request_coverage_reason"],
+                    "request-digest-unknown")
+                events, skipped = overlay.load_review_ingests(root)
+                self.assertEqual(skipped, 0)
+                self.assertIsNone(events[0]["narrative_digest_matches"])
+                self.assertEqual(
+                    events[0]["rendered_request_coverage_reason"],
+                    "request-digest-unknown")
+                projected_guard = overlay.evaluate_review_skipped_closes(
+                    [{"round_id": self.ROUND_ID,
+                      "at": "2099-01-01T00:00:00+00:00",
+                      "review_mode": "packet"}],
+                    [{**events[0], "at": "2098-01-01T00:00:00+00:00"}],
+                    consecutive=1)
+                self.assertEqual(projected_guard["fires"], [self.ROUND_ID])
+                self.assertIsNone(projected_guard["by_round"][0]["feedback_observed"])
+                self.assertEqual(
+                    review.pending_reviews(root)[0]["reason"],
+                    "feedback-request-digest-unknown")
+
+    def test_invalid_stored_round_is_isolated_before_generation_lookup(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, target, narrative = self._closed_project(base)
+            self.assertEqual(review.prepare_review_request(
+                root, self.ROUND_ID, narrative), 0)
+            rdir = root / "docs/reviews"
+            _binding_path, binding = review.latest_round_request_binding(
+                list(rdir.glob(f"{self.ROUND_ID}-request.binding*.json")),
+                expected_round_id=self.ROUND_ID)
+            reply = base / "reply.md"
+            reply.write_text(
+                "model: reviewer-x\neffort: high\n"
+                f"review-target: {target}\n"
+                f"request-digest: {binding['rendered_request_digest']}\n\nreviewed\n")
+            self.assertEqual(review.ingest(root, self.ROUND_ID, src=reply), 0)
+
+            feedback = rdir / f"{self.ROUND_ID}-feedback.md"
+            pristine = feedback.read_bytes()
+            header, tail = pristine.split(
+                review.FEEDBACK_HEADER_SEPARATOR, 1)
+            lines = ["round: /" if line.startswith("round: ") else line
+                     for line in header.decode().splitlines()]
+            feedback.write_bytes(
+                "\n".join(lines).encode() + review.FEEDBACK_HEADER_SEPARATOR + tail)
+            with mock.patch.object(
+                    review, "_request_generation_in_directory",
+                    side_effect=AssertionError("generation lookup must not run")):
+                projected = review.read_feedback_reply_metadata(
+                    feedback, expected_round_id=self.ROUND_ID, binding=binding)
+            self.assertEqual(
+                projected["rendered_request_coverage_reason"],
+                "feedback-receipt-corrupt")
+
+            header, tail = pristine.split(review.FEEDBACK_HEADER_SEPARATOR, 1)
+            lines = header.decode().splitlines()
+            metadata_index = next(
+                index for index, line in enumerate(lines)
+                if line.startswith("reply-metadata-json: "))
+            payload = _json.loads(lines[metadata_index].removeprefix(
+                "reply-metadata-json: "))
+            payload["metadata"] = []
+            lines[metadata_index] = "reply-metadata-json: " + _json.dumps(
+                payload, sort_keys=True, separators=(",", ":"))
+            feedback.write_bytes(
+                "\n".join(lines).encode() + review.FEEDBACK_HEADER_SEPARATOR + tail)
+            with mock.patch.object(
+                    review, "_request_generation_in_directory",
+                    side_effect=AssertionError("generation lookup must not run")):
+                projected = review.read_feedback_reply_metadata(
+                    feedback, expected_round_id=self.ROUND_ID, binding=binding)
+            self.assertEqual(
+                projected["rendered_request_coverage_reason"],
+                "feedback-receipt-corrupt")
+            self.assertEqual(
+                review.pending_reviews(root)[0]["reason"], "feedback-receipt-corrupt")
+
+            out = base / "out"
+            improve.run_reviews(base / "unused-registry.json", out, project_root=root)
+            row = next(row for row in (
+                _json.loads(line) for line in (out / "reviews.jsonl").read_text().splitlines()
+            ) if row["round_id"] == self.ROUND_ID)
+            self.assertEqual(
+                row["rendered_request_coverage_reason"], "feedback-receipt-corrupt")
 
     def test_stale_echo_recovers_when_its_generation_becomes_latest_again(self):
         with tempfile.TemporaryDirectory() as d:
@@ -4282,6 +4531,26 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(parsed["effort"], "high")
         self.assertEqual(parsed["review_target"], f"{'b' * 12}-{'a' * 12}")
 
+    def test_reply_header_byte_limit_counts_exact_eof_and_crlf_bytes(self):
+        lines = [
+            b"model: gpt-5.6-sol",
+            b"effort: high",
+            f"review-target: {'b' * 12}-{'a' * 12}".encode(),
+            f"request-digest: {'sha256:' + 'c' * 64}".encode(),
+            b"padding: ",
+        ]
+        prefix = b"\r\n".join(lines)
+        exact = prefix + b"x" * (review.REVIEW_REPLY_HEADER_MAX_BYTES - len(prefix))
+        self.assertEqual(len(exact), review.REVIEW_REPLY_HEADER_MAX_BYTES)
+
+        parsed = review.parse_review_reply_header(exact)
+        self.assertTrue(parsed["detected"])
+        self.assertNotIn("header-limit-exceeded", parsed["warnings"])
+
+        over = review.parse_review_reply_header(exact + b"x")
+        self.assertTrue(over["detected"])
+        self.assertIn("header-limit-exceeded", over["warnings"])
+
     def test_reviewer_model_normalization_is_bounded_not_alias_guessing(self):
         self.assertTrue(review.reviewer_model_matches(
             "gpt-5.6-sol", "codex:gpt-5.6-sol"))
@@ -4324,63 +4593,148 @@ class IngestTests(unittest.TestCase):
             self.assertIn(token, review_skill)
         self.assertIn("12–40 hex", review_skill)
 
-    def test_stored_metadata_reader_is_header_bounded_and_projects_stored_fields(self):
+    def test_stored_metadata_reader_projects_verbatim_body_header_only(self):
         with tempfile.TemporaryDirectory() as d:
-            feedback = Path(d) / "feedback.md"
-            payload = _json.dumps({
-                "metadata": {"model": "GPT-5.6-SOL", "effort": "extreme",
-                             "review-target": "not-a-target", "foo": "bar"},
-                "review_target_matches": True, "reviewer_configured": True,
-                "reviewer_coverage_reason": None,
-            }, separators=(",", ":"))
-            body_payload = _json.dumps({
-                "metadata": {"model": "forged", "effort": "high",
-                             "review-target": "aaaaaaaaaaaa"}}, separators=(",", ":"))
-            feedback.write_text(
-                "<!-- waystone feedback -->\nround: r1\n"
-                f"reply-metadata-json: {payload}\n\n---\n\n"
-                "review body\n"
-                f"reply-metadata-json: {body_payload}\n")
-            projected = review.read_feedback_reply_metadata(feedback)
-            self.assertEqual(projected["model"], "GPT-5.6-SOL")
-            self.assertEqual(projected["effort"], "extreme")
-            self.assertEqual(projected["review_target"], "not-a-target")
-            self.assertIsNone(projected["review_target_matches"])
-            self.assertIsNone(projected["reviewer_configured"])
+            root = self._root(d)
+            round_id = "2026-07-18-r1"
+            binding_path = self._binding(root, round_id)
+            src = root / "reply.md"
+            body_payload = _json.dumps({"metadata": {"model": "forged"}},
+                                       separators=(",", ":"))
+            src.write_bytes(self._reply(extra="foo: bar\n") + (
+                f"\nreply-metadata-json: {body_payload}\n").encode())
+            self.assertEqual(review.ingest(root, round_id, src=src), 0)
+            feedback = root / f"docs/reviews/{round_id}-feedback.md"
+            projected = review.read_feedback_reply_metadata(
+                feedback, expected_round_id=round_id,
+                binding=review.read_round_request_binding(binding_path))
+            self.assertEqual(projected["model"], "gpt-5.6-sol")
+            self.assertEqual(projected["effort"], "high")
+            self.assertEqual(
+                projected["review_target"], f"{'b' * 12}-{'a' * 12}")
+            self.assertIs(projected["review_target_matches"], True)
+            self.assertIs(projected["reviewer_configured"], True)
             self.assertEqual(projected["metadata"]["foo"], "bar")
 
             only_body = Path(d) / "only-body.md"
-            only_body.write_text(
-                "<!-- waystone feedback -->\nround: r1\n\n---\n\n"
-                f"reply-metadata-json: {body_payload}\n")
+            only_body.write_bytes(self._reply())
             missing = review.read_feedback_reply_metadata(only_body)
             self.assertIsNone(missing["model"])
             self.assertEqual(missing["metadata"], {})
 
     def test_feedback_separator_crossing_header_cap_is_accepted(self):
         with tempfile.TemporaryDirectory() as d:
-            feedback = Path(d) / "r1-feedback.md"
-            payload = _json.dumps({
-                "metadata": {"model": "gpt-5.6-sol", "effort": "high",
-                             "review-target": "bbbbbbbbbbbb-aaaaaaaaaaaa"},
-                "review_target_matches": False, "reviewer_configured": None,
-                "reviewer_coverage_reason": "forged-stored-result",
-            }, separators=(",", ":"))
-            fixed = ("<!-- waystone feedback -->\nround: r1\n"
-                     f"reply-metadata-json: {payload}\n")
-            separator = b"\n\n---\n\n"
-            padding = "x" * (review.FEEDBACK_HEADER_MAX_BYTES - 1 - len(fixed.encode()))
-            content = (fixed + padding).encode() + separator + b"reply body\n"
-            start = content.index(separator)
-            self.assertLess(start, review.FEEDBACK_HEADER_MAX_BYTES)
-            self.assertGreater(start + len(separator), review.FEEDBACK_HEADER_MAX_BYTES)
+            root = self._root(d)
+            round_id = "2026-07-18-r1"
+            binding_path = self._binding(root, round_id)
+            src = root / "reply.md"
+            src.write_bytes(self._reply())
+            self.assertEqual(review.ingest(root, round_id, src=src), 0)
+            feedback = root / f"docs/reviews/{round_id}-feedback.md"
+            header, tail = feedback.read_bytes().split(
+                review.FEEDBACK_HEADER_SEPARATOR, 1)
+            padding_prefix = b"\ncache-padding: "
+            padding = b"x" * (
+                review.FEEDBACK_HEADER_MAX_BYTES - 1 - len(header) - len(padding_prefix))
+            content = (header + padding_prefix + padding
+                       + review.FEEDBACK_HEADER_SEPARATOR + tail)
             feedback.write_bytes(content)
-            binding = {"target_sha": "a" * 40, "base_sha": "b" * 40,
-                       "reviewers": ["codex:gpt-5.6-sol"]}
+            start = content.index(review.FEEDBACK_HEADER_SEPARATOR)
+            self.assertLess(start, review.FEEDBACK_HEADER_MAX_BYTES)
+            self.assertGreater(
+                start + len(review.FEEDBACK_HEADER_SEPARATOR),
+                review.FEEDBACK_HEADER_MAX_BYTES)
             projected = review.read_feedback_reply_metadata(
-                feedback, expected_round_id="r1", binding=binding)
+                feedback, expected_round_id=round_id,
+                binding=review.read_round_request_binding(binding_path))
             self.assertIs(projected["review_target_matches"], True)
             self.assertIs(projected["reviewer_configured"], True)
+
+    def test_feedback_body_boundary_damage_is_unknown(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self._root(d)
+            round_id = "2026-07-18-r1"
+            binding_path = self._binding(root, round_id)
+            src = root / "reply.md"
+            src.write_bytes(self._reply())
+            self.assertEqual(review.ingest(root, round_id, src=src), 0)
+            feedback = root / f"docs/reviews/{round_id}-feedback.md"
+            binding = review.read_round_request_binding(binding_path)
+            pristine = feedback.read_bytes()
+            first = pristine.index(review.FEEDBACK_HEADER_SEPARATOR)
+
+            damaged_files = {
+                "missing": pristine[:first] + b"\n\n--\n\n" + pristine[
+                    first + len(review.FEEDBACK_HEADER_SEPARATOR):],
+                "duplicate": pristine[:first + len(review.FEEDBACK_HEADER_SEPARATOR)]
+                    + review.FEEDBACK_HEADER_SEPARATOR
+                    + pristine[first + len(review.FEEDBACK_HEADER_SEPARATOR):],
+            }
+            for label, damaged in damaged_files.items():
+                with self.subTest(label=label):
+                    feedback.write_bytes(damaged)
+                    projected = review.read_feedback_reply_metadata(
+                        feedback, expected_round_id=round_id, binding=binding)
+                    self.assertIsNone(projected["review_target_matches"])
+                    self.assertIsNone(projected["rendered_request_digest_matches"])
+                    self.assertEqual(
+                        projected["rendered_request_coverage_reason"],
+                        "feedback-receipt-corrupt")
+
+    def test_feedback_reader_does_not_load_arbitrary_reply_body(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            root = self._root(d)
+            round_id = "2026-07-18-r1"
+            binding_path = self._binding(root, round_id)
+            src = root / "reply.md"
+            src.write_bytes(self._reply() + b"x" * (2 * 1024 * 1024))
+            self.assertEqual(review.ingest(root, round_id, src=src), 0)
+            feedback = root / f"docs/reviews/{round_id}-feedback.md"
+            binding = review.read_round_request_binding(binding_path)
+
+            with mock.patch.object(
+                    Path, "read_bytes",
+                    side_effect=AssertionError("receipt reader must use bounded reads")):
+                projected = review.read_feedback_reply_metadata(
+                    feedback, expected_round_id=round_id, binding=binding)
+            self.assertIs(projected["rendered_request_digest_matches"], True)
+            self.assertIs(projected["review_target_matches"], True)
+
+    def test_overlay_pr_projection_uses_pr_request_generation_directory(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            root = self._root(d)
+            (root / ".waystone.yml").write_text(
+                "version: 1\nproject: x\nreview:\n  mode: pr\n"
+                "  reviewers: [codex:gpt-5.6-sol]\n")
+            round_id = "2026-07-19-pr-receipt"
+            request_dir = common.ensure_project_state_dir(root) / "review-requests"
+            review.write_round_request_binding(
+                root, round_id, "a" * 40, "b" * 40,
+                ["codex:gpt-5.6-sol"], mode="pr",
+                narrative_digest=TEST_NARRATIVE_DIGEST,
+                rendered_request_digest=TEST_RENDERED_REQUEST_DIGEST,
+                directory=request_dir)
+            review.write_pr_freeze_binding(
+                root, round_id, 7, 1, "a" * 40, "b" * 40,
+                ["codex:gpt-5.6-sol"], None, "docs/reviews")
+            src = root / "reply.md"
+            src.write_bytes(self._reply())
+            self.assertEqual(review.ingest(root, round_id, src=src), 0)
+
+            with mock.patch.object(
+                    review, "read_feedback_reply_metadata",
+                    wraps=review.read_feedback_reply_metadata) as reader:
+                events, skipped = overlay.load_review_ingests(root)
+            self.assertEqual(skipped, 0)
+            self.assertEqual(reader.call_args.kwargs["request_generation_dir"], request_dir)
+            self.assertEqual(events[0]["reviewer"], "gpt-5.6-sol")
+            self.assertIs(events[0]["review_target_matches"], True)
+            self.assertIs(events[0]["reviewer_configured"], True)
+            self.assertIsNone(events[0]["reviewer_coverage_reason"])
 
     def test_projection_recomputes_binding_and_rejects_feedback_round_mismatch(self):
         with tempfile.TemporaryDirectory() as d:
@@ -4417,7 +4771,7 @@ class IngestTests(unittest.TestCase):
             self.assertIsNone(mismatch["reviewer_configured"])
             self.assertEqual(mismatch["reviewer_coverage_reason"], "feedback-round-mismatch")
 
-    def test_pre_echo_receipt_without_coverage_is_not_promoted_to_digest_match(self):
+    def test_pre_echo_receipt_without_verbatim_envelope_is_not_promoted(self):
         with tempfile.TemporaryDirectory() as d:
             root = self._root(d)
             round_id = "2026-07-18-r1"
@@ -4441,31 +4795,67 @@ class IngestTests(unittest.TestCase):
             self.assertIsNot(projected["rendered_request_digest_matches"], True)
             self.assertEqual(
                 projected["rendered_request_coverage_reason"],
-                "request-digest-echo-unavailable")
+                "feedback-receipt-corrupt")
 
-    def test_projection_does_not_revalidate_structurally_valid_stored_metadata(self):
+    def test_projection_rejects_stored_metadata_that_disagrees_with_body(self):
         with tempfile.TemporaryDirectory() as d:
-            feedback = Path(d) / "r1-feedback.md"
-            payload = _json.dumps({
-                "metadata": {"model": "bad value", "effort": "extreme",
-                             "review-target": "not-a-target", "foo": "kept"},
-                "review_target_matches": True, "reviewer_configured": True,
-            }, separators=(",", ":"))
-            feedback.write_text(
-                "<!-- waystone feedback -->\nround: r1\n"
-                f"reply-metadata-json: {payload}\n\n---\n\nreply body\n")
+            root = self._root(d)
+            round_id = "2026-07-18-r1"
+            binding_path = self._binding(root, round_id)
+            src = root / "reply.md"
+            src.write_bytes(self._reply())
+            self.assertEqual(review.ingest(root, round_id, src=src), 0)
+            feedback = root / f"docs/reviews/{round_id}-feedback.md"
+            header, tail = feedback.read_bytes().split(
+                review.FEEDBACK_HEADER_SEPARATOR, 1)
+            lines = header.decode().splitlines()
+            index = next(index for index, line in enumerate(lines)
+                         if line.startswith("reply-metadata-json: "))
+            payload = _json.loads(lines[index].removeprefix("reply-metadata-json: "))
+            payload["metadata"]["model"] = "bad value"
+            lines[index] = "reply-metadata-json: " + _json.dumps(
+                payload, sort_keys=True, separators=(",", ":"))
+            feedback.write_bytes(
+                "\n".join(lines).encode() + review.FEEDBACK_HEADER_SEPARATOR + tail)
             projected = review.read_feedback_reply_metadata(
-                feedback, expected_round_id="r1", binding={
-                    "target_sha": "a" * 40, "base_sha": "b" * 40,
-                    "reviewers": ["codex:gpt-5.6-sol"],
-                })
-            self.assertEqual(projected["metadata"], {
-                "model": "bad value", "effort": "extreme",
-                "review-target": "not-a-target", "foo": "kept",
-            })
-            self.assertEqual(projected["model"], "bad value")
-            self.assertEqual(projected["effort"], "extreme")
-            self.assertEqual(projected["review_target"], "not-a-target")
+                feedback, expected_round_id=round_id,
+                binding=review.read_round_request_binding(binding_path))
+            self.assertEqual(projected["metadata"], {})
+            self.assertIsNone(projected["model"])
+            self.assertEqual(
+                projected["reviewer_coverage_reason"], "feedback-cache-body-mismatch")
+
+    def test_overlay_skips_invalid_round_before_receipt_path_resolution(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self._root(d)
+            event_path = common.ensure_project_state_dir(root) / "overlay/review-ingests.jsonl"
+            event_path.parent.mkdir(parents=True, exist_ok=True)
+            event_path.write_text("\n".join(_json.dumps(row) for row in (
+                {
+                    "schema": overlay.REVIEW_FEEDBACK_SCHEMA,
+                    "event": "review-feedback",
+                    "at": "2026-07-18T00:00:00+00:00",
+                    "round_id": "/",
+                    "source": "packet-ingest",
+                    "event_id": "packet:corrupt",
+                    "reviewer": None,
+                },
+                {
+                    "schema": overlay.REVIEW_FEEDBACK_SCHEMA,
+                    "event": "review-feedback",
+                    "at": "2026-07-18T00:01:00+00:00",
+                    "round_id": "2026-07-18-valid",
+                    "source": "pr-marker",
+                    "event_id": "pr:valid",
+                    "reviewer": "codex",
+                },
+            )) + "\n")
+
+            events, skipped = overlay.load_review_ingests(root)
+
+            self.assertEqual(skipped, 1)
+            self.assertEqual([event["round_id"] for event in events],
+                             ["2026-07-18-valid"])
 
     def test_invalid_utf8_header_ingests_as_absent_without_replacement(self):
         import contextlib
@@ -4507,7 +4897,8 @@ class IngestTests(unittest.TestCase):
             # tricky bytes: CRLF, trailing spaces, multibyte utf-8, NO final newline
             body = (f"model: gpt-5.6-sol\r\neffort: high\r\n"
                     f"review-target: {'b' * 12}-{'a' * 12}\r\nfoo: bar\r\n\r\n"
-                    "## Review\r\n  trailing   \nutf8: é한\nno final newline").encode("utf-8")
+                    "## Review\r\n  trailing   \nutf8: é한\n\n---\n\n"
+                    "body separator\nno final newline").encode("utf-8")
             src.write_bytes(body)
             rc = review.ingest(root, "2026-06-22-x", src=src)
             self.assertEqual(rc, 0)
@@ -4705,20 +5096,21 @@ class IngestTests(unittest.TestCase):
                 self.assertEqual(review.ingest(root, wrong_round, src=wrong), 0)
             self.assertIn("review-target", err.getvalue())
 
+            legacy_round = "2026-06-22-legacy"
             legacy = root / "legacy.md"
             legacy.write_bytes(self._reply())
             with contextlib.redirect_stderr(err):
-                self.assertEqual(review.ingest(root, "legacy", src=legacy), 0)
+                self.assertEqual(review.ingest(root, legacy_round, src=legacy), 0)
             self.assertEqual(list((root / "docs/reviews").glob(
-                "legacy-request.binding*.json")), [])
+                f"{legacy_round}-request.binding*.json")), [])
             events, skipped = overlay.load_review_ingests(root)
             self.assertEqual(skipped, 0)
             by_round = {event["round_id"]: event for event in events}
             self.assertIs(by_round[wrong_round]["review_target_matches"], False)
             self.assertIsNone(by_round[wrong_round]["reviewer_configured"])
-            self.assertIsNone(by_round["legacy"]["review_target_matches"])
-            self.assertIsNone(by_round["legacy"]["reviewer_configured"])
-            self.assertEqual(by_round["legacy"]["reviewer_coverage_reason"],
+            self.assertIsNone(by_round[legacy_round]["review_target_matches"])
+            self.assertIsNone(by_round[legacy_round]["reviewer_configured"])
+            self.assertEqual(by_round[legacy_round]["reviewer_coverage_reason"],
                              "round-binding-unavailable")
 
     def test_force_reingest_replaces_legacy_identity_event_for_round(self):
@@ -4940,6 +5332,32 @@ class PendingReviewTests(unittest.TestCase):
             self.assertEqual(pending[0]["age_days"], 1)
             self.assertEqual(pending[0]["target_sha"], target)
             self.assertEqual(pending[0]["reviewers"], ["gpt-5.6-sol"])
+
+    def test_request_filename_round_is_validated_before_binding_glob(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            root = self._root(d)
+            rdir = root / "docs/reviews"
+            invalid_round = "2026-01-01-[invalid]"
+            (rdir / f"{invalid_round}-request.md").write_text("request\n")
+            original_glob = Path.glob
+
+            def guarded_glob(path, pattern):
+                if pattern != "*-request.md" and "[" in pattern:
+                    raise AssertionError("invalid round reached a glob pattern")
+                return original_glob(path, pattern)
+
+            with mock.patch.object(Path, "glob", guarded_glob):
+                pending = review.pending_reviews(root)
+
+            self.assertEqual(pending, [{
+                "round_id": invalid_round,
+                "age_days": None,
+                "target_sha": None,
+                "reviewers": [],
+                "reason": "invalid-round-id",
+            }])
 
     def test_latest_binding_controls_pending_and_old_packet_feedback_cannot_silence_it(self):
         with tempfile.TemporaryDirectory() as d:
@@ -7105,7 +7523,7 @@ class ImproveReviewsTests(unittest.TestCase):
             self.assertEqual(beta["findings"], [])
             self.assertEqual(beta["counts"], {"blocker": 0, "major": 0, "minor": 0, "unknown": 0})
 
-    def test_reviews_projection_consumes_declared_reply_metadata(self):
+    def test_reviews_projection_consumes_rederived_reply_metadata(self):
         with tempfile.TemporaryDirectory() as d:
             base = Path(d)
             root = base / "repo"
@@ -7115,20 +7533,18 @@ class ImproveReviewsTests(unittest.TestCase):
             rdir.mkdir(parents=True)
             round_id = "2026-07-18-r1"
             (rdir / f"{round_id}-request.md").write_text("# request\n")
-            payload = _json.dumps({
-                "metadata": {"model": "gpt-5.6-sol", "effort": "xhigh",
-                             "review-target": "bbbbbbbbbbbb-aaaaaaaaaaaa", "foo": "bar"},
-                "review_target_matches": False, "reviewer_configured": None,
-                "reviewer_coverage_reason": "forged-stored-result",
-            }, separators=(",", ":"))
             review.write_round_request_binding(
                 root, round_id, "a" * 40, "b" * 40,
                 ["codex:gpt-5.6-sol"], mode="packet",
                 narrative_digest=TEST_NARRATIVE_DIGEST,
                 rendered_request_digest=TEST_RENDERED_REQUEST_DIGEST)
-            (rdir / f"{round_id}-feedback.md").write_text(
-                f"<!-- waystone feedback -->\nround: {round_id}\n"
-                f"reply-metadata-json: {payload}\n\n---\n\nreply body\n")
+            reply = root / "reply.md"
+            reply.write_text(
+                "model: gpt-5.6-sol\neffort: xhigh\n"
+                "review-target: bbbbbbbbbbbb-aaaaaaaaaaaa\n"
+                f"request-digest: {TEST_RENDERED_REQUEST_DIGEST}\n"
+                "foo: bar\n\nreview body\n")
+            self.assertEqual(review.ingest(root, round_id, src=reply), 0)
             (rdir / f"{round_id}-request.md").write_text(
                 f"# request\n\n- Reviewing: {'a' * 40}   (diff against {'b' * 40})\n")
             registry = base / "projects.json"
@@ -7183,7 +7599,7 @@ class ImproveReviewsTests(unittest.TestCase):
             self.assertEqual(row["review_binding_provenance"], "unknown")
             self.assertEqual(row["review_binding_reason"], "corrupt-round-request-sidecar")
 
-    def test_review_projection_preserves_binding_digest_and_reports_stamped_mismatch(self):
+    def test_review_projection_rederives_stale_generation_digest_from_body(self):
         with tempfile.TemporaryDirectory() as d:
             base = Path(d)
             root = base / "repo"
@@ -7199,20 +7615,21 @@ class ImproveReviewsTests(unittest.TestCase):
                 f"# request\n\n- Reviewing: {target}   (diff against {base_sha})\n")
             binding_digest = "sha256:" + "2" * 64
             reply_digest = "sha256:" + "1" * 64
+            reply_rendered_digest = "sha256:" + "3" * 64
+            review.write_round_request_binding(
+                root, round_id, target, base_sha, ["expected-reviewer"], mode="packet",
+                narrative_digest=reply_digest,
+                rendered_request_digest=reply_rendered_digest)
+            reply = root / "reply.md"
+            reply.write_text(
+                "model: expected-reviewer\neffort: high\n"
+                f"review-target: {base_sha[:12]}-{target[:12]}\n"
+                f"request-digest: {reply_rendered_digest}\n\nreview body\n")
+            self.assertEqual(review.ingest(root, round_id, src=reply), 0)
             review.write_round_request_binding(
                 root, round_id, target, base_sha, ["expected-reviewer"], mode="packet",
                 narrative_digest=binding_digest,
                 rendered_request_digest=TEST_RENDERED_REQUEST_DIGEST)
-            payload = _json.dumps({
-                "metadata": {
-                    "model": "expected-reviewer", "effort": "high",
-                    "review-target": f"{base_sha[:12]}-{target[:12]}",
-                },
-                "narrative_digest": reply_digest,
-            }, separators=(",", ":"))
-            (rdir / f"{round_id}-feedback.md").write_text(
-                f"<!-- waystone feedback -->\nround: {round_id}\n"
-                f"reply-metadata-json: {payload}\n\n---\n\nreply body\n")
             registry = base / "projects.json"
             registry.write_text(_json.dumps({
                 "projects": [{"name": "demo", "path": str(root)}]}))
@@ -7231,6 +7648,10 @@ class ImproveReviewsTests(unittest.TestCase):
             self.assertIs(row["narrative_digest_matches"], False)
             self.assertEqual(row["narrative_coverage_reason"],
                              "narrative-digest-mismatch")
+            self.assertEqual(row["reply_rendered_request_digest"], reply_rendered_digest)
+            self.assertIs(row["rendered_request_digest_matches"], False)
+            self.assertEqual(row["rendered_request_coverage_reason"],
+                             "request-digest-stale-generation")
 
     def test_legacy_label_survives_unconfigured_reviewer_in_real_file_projection(self):
         with tempfile.TemporaryDirectory() as d:
@@ -17678,6 +18099,10 @@ class L2CGuardTests(unittest.TestCase):
         ]
         ingests = [{"event": "review-feedback", "source": "packet-ingest",
                     "reviewer": "gpt-5.5-pro", "reviewer_configured": True,
+                    "narrative_digest_matches": True,
+                    "narrative_coverage_reason": None,
+                    "rendered_request_digest_matches": True,
+                    "rendered_request_coverage_reason": None,
                     "round_id": "r1", "at": "2026-07-15T01:00:00+00:00"}]
         out = overlay.evaluate_review_skipped_closes(rounds, ingests, consecutive=2)
         self.assertEqual(out["fires"], ["r3"])

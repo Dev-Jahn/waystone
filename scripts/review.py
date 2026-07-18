@@ -87,6 +87,7 @@ _REVIEW_TARGET_RE = re.compile(
     r"(?P<first>[0-9a-fA-F]{12,40})(?:-(?P<second>[0-9a-fA-F]{12,40}))?")
 _REQUEST_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _FEEDBACK_METADATA_PREFIX = "reply-metadata-json: "
+_VERBATIM_BYTES_RE = re.compile(rb"^verbatim-bytes: (\d{1,12})$", re.MULTILINE)
 TRIAGE_BEGIN = b"<!-- waystone triage: BEGIN -->"
 TRIAGE_END = b"<!-- waystone triage: END -->"
 REVIEW_REQUEST_TEMPLATE = Path(__file__).resolve().parent.parent / "templates" / "review-request.md"
@@ -210,17 +211,24 @@ def parse_review_reply_header(body: bytes) -> dict:
     fenced = False
     consumed = 0
 
-    # Slice before splitting so the scan is bounded by construction — body bytes past the cap
-    # never participate (a line truncated by the slice always trips the consumed check below).
-    for line_number, raw in enumerate(
-            body[:REVIEW_REPLY_HEADER_MAX_BYTES + 1].splitlines(), 1):
+    # Slice before splitting so the scan is bounded by construction. Keep line endings while
+    # accounting so CRLF counts as two bytes and an exact-cap final line without a newline does
+    # not acquire a synthetic byte.
+    for line_number, raw_line in enumerate(
+            body[:REVIEW_REPLY_HEADER_MAX_BYTES + 1].splitlines(keepends=True), 1):
         if line_number > REVIEW_REPLY_HEADER_MAX_LINES:
             warnings.append("header-limit-exceeded")
             break
-        consumed += len(raw) + 1
+        consumed += len(raw_line)
         if consumed > REVIEW_REPLY_HEADER_MAX_BYTES:
             warnings.append("header-limit-exceeded")
             break
+        if raw_line.endswith(b"\r\n"):
+            raw = raw_line[:-2]
+        elif raw_line.endswith((b"\r", b"\n")):
+            raw = raw_line[:-1]
+        else:
+            raw = raw_line
         stripped = raw.strip()
         if not started and not stripped:
             raw_header.append(raw)
@@ -562,15 +570,19 @@ def _request_binding_schema(binding: dict | None) -> object:
             or binding.get("schema"))
 
 
-def _round_request_generation(
-        root: Path, round_id: str, cfg: dict, rendered_request_digest: str,
+def _request_generation_in_directory(
+        directory: Path, round_id: str, rendered_request_digest: str,
 ) -> dict | None:
     """Resolve an echoed digest to one immutable request sidecar generation."""
-    mode = (cfg.get("review") or {}).get("mode", "packet")
-    directory = (Path(root) / cfg["reviews_dir"] if mode == "packet"
-                 else project_state_path(root) / "review-requests")
+    if (_round_request_binding_date(round_id) is None
+            or normalize_request_digest(rendered_request_digest) is None):
+        return None
+    try:
+        paths = sorted(Path(directory).glob(f"{round_id}-request.binding*.json"))
+    except (OSError, NotImplementedError):
+        return None
     matches: list[tuple[Path, dict]] = []
-    for path in sorted(directory.glob(f"{round_id}-request.binding*.json")):
+    for path in paths:
         try:
             row = read_round_request_binding(path, expected_round_id=round_id)
         except WorkflowError:
@@ -583,15 +595,42 @@ def _round_request_generation(
     return {**row, "source": str(path)}
 
 
+def _round_request_generation(
+        root: Path, round_id: str, cfg: dict, rendered_request_digest: str,
+) -> dict | None:
+    mode = (cfg.get("review") or {}).get("mode", "packet")
+    directory = (Path(root) / cfg["reviews_dir"] if mode == "packet"
+                 else project_state_path(root) / "review-requests")
+    return _request_generation_in_directory(directory, round_id, rendered_request_digest)
+
+
+def _round_has_legacy_request_generation(directory: Path, round_id: str) -> bool:
+    """Derive no-echo eligibility from immutable v1 sidecars, not receipt cache fields."""
+    if _round_request_binding_date(round_id) is None:
+        return False
+    try:
+        paths = sorted(Path(directory).glob(f"{round_id}-request.binding*.json"))
+    except (OSError, NotImplementedError):
+        return False
+    for path in paths:
+        try:
+            row = read_round_request_binding(path, expected_round_id=round_id)
+        except WorkflowError:
+            continue
+        if row["schema"] == ROUND_REQUEST_BINDING_V1_SCHEMA:
+            return True
+    return False
+
+
 def _unknown_feedback_metadata(reason: str) -> dict:
     return {
         "metadata": {}, "model": None, "effort": None, "review_target": None,
         "review_target_matches": None, "reviewer_configured": None,
         "reviewer_coverage_reason": reason,
         "narrative_digest": None, "narrative_digest_matches": None,
-        "narrative_coverage_reason": None,
+        "narrative_coverage_reason": reason,
         "rendered_request_digest": None, "rendered_request_digest_matches": None,
-        "rendered_request_coverage_reason": None,
+        "rendered_request_coverage_reason": reason,
     }
 
 
@@ -613,16 +652,12 @@ def _assess_narrative_digest(binding: dict | None, feedback_digest: str | None,
 
 
 def _assess_rendered_request_digest(
-        binding: dict | None, feedback_digest: str | None, *, coverage_present: bool,
-        receipt_reason: object,
+        binding: dict | None, feedback_digest: str | None, *, receipt_reason: object,
 ) -> tuple[bool | None, str | None]:
     """Bind a feedback receipt to the exact rendered request generation it reviewed.
 
-    A stored reason never overrides comparison of a stamped echo with the current binding; it
-    preserves provenance only when ingest could not stamp a generation digest.
+    ``receipt_reason`` is rederived from the body echo and binding schema, never read from cache.
     """
-    if not coverage_present:
-        return None, "request-digest-echo-unavailable"
     if feedback_digest is None:
         if receipt_reason == "request-digest-missing-legacy-fallback":
             return None, receipt_reason
@@ -637,55 +672,123 @@ def _assess_rendered_request_digest(
     return False, "request-digest-stale-generation"
 
 
-def read_feedback_reply_metadata(path: Path, *, expected_round_id: str | None = None,
-                                 binding: dict | None = None) -> dict:
-    """Project reply identity from the bounded feedback header and the supplied round binding.
+def _read_feedback_header_and_body_prefix(path: Path) -> tuple[bytes, bytes]:
+    """Read only the generated header and bounded leading reply-header bytes.
 
-    Stored declaration fields are parser output and are projected as-is. Stored assessment
-    booleans are ignored; every projection compares the declarations with current binding evidence.
+    ``verbatim-bytes`` fixes the body extent. Small seeks validate the canonical separator and
+    triage markers without loading an arbitrarily large reviewer reply into memory.
     """
-    unknown = _unknown_feedback_metadata("reply-metadata-unavailable")
+    with Path(path).open("rb") as stream:
+        prefix = stream.read(FEEDBACK_HEADER_MAX_BYTES + len(FEEDBACK_HEADER_SEPARATOR))
+        separator = prefix.find(FEEDBACK_HEADER_SEPARATOR)
+        if separator < 0 or separator >= FEEDBACK_HEADER_MAX_BYTES:
+            raise WorkflowError("feedback receipt header separator is missing")
+        header = prefix[:separator]
+        length_matches = list(_VERBATIM_BYTES_RE.finditer(header))
+        if len(length_matches) != 1:
+            raise WorkflowError("feedback receipt has no unique verbatim body length")
+        body_length = int(length_matches[0].group(1))
+        body_start = separator + len(FEEDBACK_HEADER_SEPARATOR)
+        body_end = body_start + body_length
+        file_size = os.fstat(stream.fileno()).st_size
+        boundary = FEEDBACK_HEADER_SEPARATOR + TRIAGE_BEGIN + b"\n"
+        end_suffix = b"\n" + TRIAGE_END + b"\n"
+        if body_end + len(boundary) > file_size or len(end_suffix) > file_size:
+            raise WorkflowError("feedback receipt body boundary exceeds the file")
+        stream.seek(body_end)
+        if stream.read(len(boundary)) != boundary:
+            raise WorkflowError("feedback receipt body separator is missing or damaged")
+        stream.seek(-len(end_suffix), os.SEEK_END)
+        if stream.read(len(end_suffix)) != end_suffix:
+            raise WorkflowError("feedback receipt triage end marker is missing or damaged")
+        stream.seek(body_start)
+        body_prefix = stream.read(min(body_length, REVIEW_REPLY_HEADER_MAX_BYTES + 1))
+    return header, body_prefix
+
+
+def _feedback_cache_matches_body(payload: dict, parsed_header: dict,
+                                 request_generation: dict | None,
+                                 request_digest: str | None) -> bool:
+    """Check the mutable cache against declarations rederived from the verbatim body."""
+    if payload.get("metadata") != parsed_header["metadata"]:
+        return False
+    for key in ("narrative_digest", "rendered_request_digest"):
+        if request_generation is None and request_digest is None:
+            if key in payload:
+                return False
+        elif (request_generation is not None
+              and payload.get(key) != request_generation.get(key)):
+            return False
+    return True
+
+
+def read_feedback_reply_metadata(path: Path, *, expected_round_id: str | None = None,
+                                 binding: dict | None = None,
+                                 request_generation_dir: Path | None = None) -> dict:
+    """Rederive reply identity from the verbatim body and immutable request sidecars.
+
+    ``reply-metadata-json`` is checked only as a cache of the rederived declarations. Stored
+    assessment booleans are ignored; every projection compares body and sidecar evidence with the
+    current binding.
+    """
     try:
-        with Path(path).open("rb") as stream:
-            prefix = stream.read(FEEDBACK_HEADER_MAX_BYTES + len(FEEDBACK_HEADER_SEPARATOR))
+        header_bytes, body_prefix = _read_feedback_header_and_body_prefix(path)
     except OSError:
         return _unknown_feedback_metadata("feedback-file-unavailable")
-    separator = prefix.find(FEEDBACK_HEADER_SEPARATOR)
-    if separator < 0 or separator >= FEEDBACK_HEADER_MAX_BYTES:
-        return unknown
+    except WorkflowError:
+        return _unknown_feedback_metadata("feedback-receipt-corrupt")
     try:
-        header = prefix[:separator].decode("utf-8")
+        header = header_bytes.decode("utf-8")
     except UnicodeDecodeError:
-        return unknown
+        return _unknown_feedback_metadata("feedback-receipt-corrupt")
     lines = header.splitlines()
     candidates = [line[len(_FEEDBACK_METADATA_PREFIX):]
                   for line in lines if line.startswith(_FEEDBACK_METADATA_PREFIX)]
     rounds = [line[len("round: "):] for line in lines if line.startswith("round: ")]
-    if len(candidates) != 1 or len(rounds) != 1 or not rounds[0]:
-        return unknown
+    if (len(candidates) != 1 or len(rounds) != 1
+            or _round_request_binding_date(rounds[0]) is None):
+        return _unknown_feedback_metadata("feedback-receipt-corrupt")
     try:
         payload = json.loads(candidates[0])
     except json.JSONDecodeError:
-        return unknown
-    metadata = payload.get("metadata") if isinstance(payload, dict) else None
+        return _unknown_feedback_metadata("feedback-receipt-corrupt")
+    if not isinstance(payload, dict):
+        return _unknown_feedback_metadata("feedback-receipt-corrupt")
+    metadata = payload.get("metadata")
     if (not isinstance(metadata, dict)
             or any(not isinstance(key, str) or not isinstance(value, str)
                    for key, value in metadata.items())):
-        return unknown
-    feedback_digest_present = "narrative_digest" in payload
-    feedback_digest = payload.get("narrative_digest")
-    if not _is_sha256_digest(feedback_digest):
-        feedback_digest = None
-    rendered_digest = payload.get("rendered_request_digest")
-    if not _is_sha256_digest(rendered_digest):
-        rendered_digest = None
-    rendered_coverage_present = "rendered_request_coverage_reason" in payload
-    rendered_receipt_reason = payload.get("rendered_request_coverage_reason")
+        return _unknown_feedback_metadata("feedback-receipt-corrupt")
+    parsed_header = parse_review_reply_header(body_prefix)
+    request_digest = parsed_header["request_digest"]
+    generation_directory = request_generation_dir or Path(path).parent
+    request_generation = (_request_generation_in_directory(
+        generation_directory, rounds[0], request_digest)
+        if request_digest is not None else None)
+    if not _feedback_cache_matches_body(
+            payload, parsed_header, request_generation, request_digest):
+        return _unknown_feedback_metadata("feedback-cache-body-mismatch")
+
+    feedback_digest = (request_generation.get("narrative_digest")
+                       if request_generation is not None else None)
+    rendered_digest = (request_generation.get("rendered_request_digest")
+                       if request_generation is not None else None)
+    if request_digest is None:
+        if (_request_binding_schema(binding) == ROUND_REQUEST_BINDING_V1_SCHEMA
+                or _round_has_legacy_request_generation(
+                    generation_directory, rounds[0])):
+            rendered_receipt_reason = "request-digest-missing-legacy-fallback"
+        else:
+            rendered_receipt_reason = "request-digest-missing"
+    elif request_generation is None:
+        rendered_receipt_reason = "request-digest-unknown"
+    else:
+        rendered_receipt_reason = None
     projected = {
-        "metadata": metadata,
-        "model": metadata.get("model"),
-        "effort": metadata.get("effort"),
-        "review_target": metadata.get("review-target"),
+        "metadata": parsed_header["metadata"],
+        "model": parsed_header["model"],
+        "effort": parsed_header["effort"],
+        "review_target": parsed_header["review_target"],
         "narrative_digest": feedback_digest,
         "rendered_request_digest": rendered_digest,
     }
@@ -699,11 +802,13 @@ def read_feedback_reply_metadata(path: Path, *, expected_round_id: str | None = 
             "rendered_request_coverage_reason": "feedback-round-mismatch",
         }
     assessment = assess_review_reply(projected, binding)
-    narrative_matches, narrative_reason = _assess_narrative_digest(
-        binding, feedback_digest, feedback_digest_present=feedback_digest_present)
+    if request_digest is not None and request_generation is None:
+        narrative_matches, narrative_reason = None, "request-digest-unknown"
+    else:
+        narrative_matches, narrative_reason = _assess_narrative_digest(
+            binding, feedback_digest, feedback_digest_present=request_generation is not None)
     rendered_matches, rendered_reason = _assess_rendered_request_digest(
-        binding, rendered_digest, coverage_present=rendered_coverage_present,
-        receipt_reason=rendered_receipt_reason)
+        binding, rendered_digest, receipt_reason=rendered_receipt_reason)
     return {
         **projected,
         "review_target_matches": assessment["review_target_matches"],
@@ -753,6 +858,12 @@ def pending_reviews(root: Path, *, now: datetime | None = None) -> list[dict]:
     pending: list[dict] = []
     for request in sorted(directory.glob("*-request.md")):
         round_id = request.name.removesuffix("-request.md")
+        if _round_request_binding_date(round_id) is None:
+            pending.append({
+                "round_id": round_id, "age_days": None, "target_sha": None,
+                "reviewers": [], "reason": "invalid-round-id",
+            })
+            continue
         binding_paths = sorted(directory.glob(f"{round_id}-request.binding*.json"))
         binding = None
         binding_path = None
@@ -769,7 +880,8 @@ def pending_reviews(root: Path, *, now: datetime | None = None) -> list[dict]:
 
         feedback = directory / f"{round_id}-feedback.md"
         metadata = read_feedback_reply_metadata(
-            feedback, expected_round_id=round_id, binding=binding)
+            feedback, expected_round_id=round_id, binding=binding,
+            request_generation_dir=directory)
         projection_reason = _packet_projection_reason(root, round_id, request, binding)
         # Complete = an ingested reply whose declared review-target matches the LATEST binding
         # and whose two generation digests match, with both on-disk projections reproduced from
@@ -794,6 +906,9 @@ def pending_reviews(root: Path, *, now: datetime | None = None) -> list[dict]:
             reason = "binding-unavailable"
         elif projection_reason is not None:
             reason = projection_reason
+        elif metadata["reviewer_coverage_reason"] in (
+                "feedback-receipt-corrupt", "feedback-cache-body-mismatch"):
+            reason = metadata["reviewer_coverage_reason"]
         elif metadata["review_target_matches"] is not True:
             reason = ("feedback-review-target-mismatch"
                       if metadata["review_target_matches"] is False
@@ -2035,27 +2150,25 @@ def _parse_findings(text: str) -> list[dict]:
     return out
 
 
-_FEEDBACK_HEADER_SEPARATOR = b"\n\n---\n\n"
-_VERBATIM_BYTES_RE = re.compile(rb"^verbatim-bytes: (\d{1,12})$", re.MULTILINE)
-
-
 def _triage_marker_start(content: bytes) -> int:
     """Derive the canonical tail-marker offset from the script-written header's verbatim-bytes
     record — arithmetic, never a content search, so a reply quoting the marker strings can
     neither mask a damaged canonical marker nor be mistaken for it."""
-    sep = content.find(_FEEDBACK_HEADER_SEPARATOR)
-    if sep < 0:
+    sep = content.find(FEEDBACK_HEADER_SEPARATOR)
+    if sep < 0 or sep >= FEEDBACK_HEADER_MAX_BYTES:
         raise WorkflowError(
             "feedback triage marker anchor missing: no ingest header separator")
-    header_match = _VERBATIM_BYTES_RE.search(content[:sep])
-    if header_match is None:
+    header_matches = list(_VERBATIM_BYTES_RE.finditer(content[:sep]))
+    if len(header_matches) != 1:
         raise WorkflowError(
-            "feedback triage marker anchor missing: no verbatim-bytes header — "
+            "feedback triage marker anchor missing: expected one verbatim-bytes header — "
             "re-ingest with --force to record it")
-    body_start = sep + len(_FEEDBACK_HEADER_SEPARATOR)
-    marker_start = body_start + int(header_match.group(1)) + len(_FEEDBACK_HEADER_SEPARATOR)
+    body_start = sep + len(FEEDBACK_HEADER_SEPARATOR)
+    body_end = body_start + int(header_matches[0].group(1))
+    marker_start = body_end + len(FEEDBACK_HEADER_SEPARATOR)
     end_suffix = b"\n" + TRIAGE_END + b"\n"
-    if (not content.endswith(end_suffix)
+    if (content[body_end:marker_start] != FEEDBACK_HEADER_SEPARATOR
+            or not content.endswith(end_suffix)
             or content[marker_start - 1:marker_start + len(TRIAGE_BEGIN) + 1]
             != b"\n" + TRIAGE_BEGIN + b"\n"
             or marker_start + len(TRIAGE_BEGIN) >= len(content) - len(end_suffix) + 1):

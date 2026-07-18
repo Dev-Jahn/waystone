@@ -1154,7 +1154,9 @@ def _project_review_rows(name: str, root: Path, cfg: dict) -> list[dict]:
             import review
 
             reply_metadata = review.read_feedback_reply_metadata(
-                fb, expected_round_id=rid, binding=projection_binding)
+                fb, expected_round_id=rid, binding=projection_binding,
+                request_generation_dir=(project_state_path(root) / "review-requests"
+                                        if mode == "pr" else rdir))
             try:
                 text = fb.read_text(encoding="utf-8", errors="replace")
             except OSError:

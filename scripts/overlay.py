@@ -338,6 +338,22 @@ def evaluate_review_skipped_closes(rounds: list[dict], ingests: list[dict], *,
     by_round: list[dict] = []
     previous_close_at = ""
     unknown: Counter = Counter()
+
+    def recognized_feedback(event: dict) -> bool:
+        if event.get("source") == "pr-marker":
+            return True
+        narrative_bound = (
+            event.get("narrative_digest_matches") is True
+            or event.get("narrative_coverage_reason") == "legacy-pre-digest"
+        )
+        request_bound = (
+            event.get("rendered_request_digest_matches") is True
+            or event.get("rendered_request_coverage_reason")
+            == "request-digest-missing-legacy-fallback"
+        )
+        return (event.get("reviewer_configured") is True
+                and narrative_bound and request_bound)
+
     for close in closes:
         interval_events = []
         while event_index < len(review_events) and review_events[event_index]["at"] <= close["at"]:
@@ -345,14 +361,24 @@ def evaluate_review_skipped_closes(rounds: list[dict], ingests: list[dict], *,
                 interval_events.append(review_events[event_index])
             event_index += 1
         recognized_events = [
-            event for event in interval_events
-            if event.get("source") == "pr-marker"
-            or event.get("reviewer_configured") is True
+            event for event in interval_events if recognized_feedback(event)
         ]
         unknown_events = [event for event in interval_events if event not in recognized_events]
         for event in unknown_events:
-            unknown[event.get("reviewer_coverage_reason")
-                    or "reviewer-identity-unavailable"] += 1
+            reason = event.get("reviewer_coverage_reason")
+            if event.get("reviewer_configured") is True:
+                request_bound = (
+                    event.get("rendered_request_digest_matches") is True
+                    or event.get("rendered_request_coverage_reason")
+                    == "request-digest-missing-legacy-fallback"
+                )
+                if not request_bound:
+                    reason = (event.get("rendered_request_coverage_reason")
+                              or "request-digest-verdict-unavailable")
+                else:
+                    reason = (event.get("narrative_coverage_reason")
+                              or "narrative-digest-verdict-unavailable")
+            unknown[reason or "reviewer-identity-unavailable"] += 1
         payload = _round_payload(close)
         review_mode = close.get("review_mode", payload.get("review_mode"))
         reason = None
@@ -576,6 +602,8 @@ def load_review_ingests(root: Path) -> tuple[list[dict], int]:
         cfg = load_config(root)
     except (OSError, WorkflowError):
         cfg = None
+    import review
+
     for line_number, line in enumerate(lines, 1):
         if not line.strip():
             continue
@@ -588,6 +616,7 @@ def load_review_ingests(root: Path) -> tuple[list[dict], int]:
                 or row.get("event") != "review-feedback"
                 or parse_iso_timestamp(row.get("at")) is None
                 or not isinstance(row.get("round_id"), str)
+                or review._round_request_binding_date(row.get("round_id")) is None
                 or row.get("source") not in ("packet-ingest", "pr-marker")
                 or not isinstance(row.get("event_id"), str)
                 or (row.get("reviewer") is not None
@@ -601,8 +630,6 @@ def load_review_ingests(root: Path) -> tuple[list[dict], int]:
             row = {**row, "reviewer_configured": True,
                    "reviewer_coverage_reason": None}
         else:
-            import review
-
             binding = None
             if cfg is not None:
                 binding, _binding_reason = review.ingest_round_binding(
@@ -611,7 +638,11 @@ def load_review_ingests(root: Path) -> tuple[list[dict], int]:
             else:
                 feedback = root / "__unavailable-feedback__"
             projected = review.read_feedback_reply_metadata(
-                feedback, expected_round_id=row["round_id"], binding=binding)
+                feedback, expected_round_id=row["round_id"], binding=binding,
+                request_generation_dir=(project_state_path(root) / "review-requests"
+                                        if cfg is not None
+                                        and (cfg.get("review") or {}).get("mode") == "pr"
+                                        else feedback.parent))
             row = {
                 **row,
                 "reviewer": projected["model"],
@@ -620,6 +651,12 @@ def load_review_ingests(root: Path) -> tuple[list[dict], int]:
                 "review_target_matches": projected["review_target_matches"],
                 "reviewer_configured": projected["reviewer_configured"],
                 "reviewer_coverage_reason": projected["reviewer_coverage_reason"],
+                "narrative_digest_matches": projected["narrative_digest_matches"],
+                "narrative_coverage_reason": projected["narrative_coverage_reason"],
+                "rendered_request_digest_matches":
+                    projected["rendered_request_digest_matches"],
+                "rendered_request_coverage_reason":
+                    projected["rendered_request_coverage_reason"],
                 "reply_metadata": projected["metadata"],
             }
         rows.append({**row, "source_pointer": f"{path}:{line_number}"})
