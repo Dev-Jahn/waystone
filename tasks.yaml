@@ -613,8 +613,9 @@ tasks:
     severity: "major"
     origin: "review-2026-07-19-evidence-authority"
   - id: fix/probe-config-content-binding
+    notes: "2026-07-19 실사고: 0.11.0 하네스에서 delegate run 발사 시 'runner preflight passed but fingerprint changed during the probe (codex_config_root)' — probe의 codex 실행이 ~/.codex에 세션/로그 파일을 생성해 디렉터리 stat이 변함 → 010 수정의 probe-중-변화 거부 로직이 자기 churn을 잡아 probe 영구 실패. 디렉터리 stat 축은 내용 변경(JW-GPT-013)엔 둔감하고 자기 churn엔 과민 — 동일 근원. 이 task 착지 전까지 이 머신의 delegate run 불가 → round-5는 raw codex exec 우회(사용자 규칙: 하네스 버그는 raw 우회 + finding 기록)"
     scope: ["scripts/delegate.py", "scripts/tests/run_tests.py"]
-    accept: ["fingerprint가 codex가 실제로 읽는 config 입력(최소 CODEX_HOME 또는 ~/.codex의 config.toml)의 canonical content digest를 포함한다 — in-place 내용 변경 후 marker 재사용이 차단되고 재프로브된다 (RED: 내용 변경 후 현행 fingerprint 불변 입증 후 반전)", "config 파일 부재는 정직한 absent 상태로 기록되고 probe·재사용 양쪽 absent는 상태 동등으로 재사용 허용 — macOS probe-once 보존 (무회귀)", "존재하나 읽기 실패는 fail-toward-probe — 재사용 차단 (RED)", "marker에는 digest만 저장한다 — config 원문/내용은 저장 금지 (secret 포함 가능성)", "directory stat 축은 부가 진단으로 유지 (무회귀)", "전체 테스트 스위트 green + ruff F401,F841 clean"]
+    accept: ["fingerprint가 codex가 실제로 읽는 config 입력(최소 CODEX_HOME 또는 ~/.codex의 config.toml)의 canonical content digest를 포함한다 — in-place 내용 변경 후 marker 재사용이 차단되고 재프로브된다 (RED: 내용 변경 후 현행 fingerprint 불변 입증 후 반전)", "config 파일 부재는 정직한 absent 상태로 기록되고 probe·재사용 양쪽 absent는 상태 동등으로 재사용 허용 — macOS probe-once 보존 (무회귀)", "존재하나 읽기 실패는 fail-toward-probe — 재사용 차단 (RED)", "marker에는 digest만 저장한다 — config 원문/내용은 저장 금지 (secret 포함 가능성)", "directory stat 축은 부가 진단으로 유지 (무회귀)", "전체 테스트 스위트 green + ruff F401,F841 clean", "probe 실행 자체가 유발하는 config root 디렉터리 변화(세션/로그 파일 생성 등 디렉터리 stat 변동)가 proof 기록·재사용을 막지 않는다 — 신뢰 대조 축은 probe 전후로 안정적인 config 내용 digest에 결속되고 디렉터리 stat은 진단 기록으로 강등된다 (RED: 2026-07-19 실사고 — 0.11.0에서 probe 중 codex_config_root fingerprint 변화로 기록 거부, delegate run 전면 불가)"]
     title: "probe proof fingerprint에 codex config 실효 내용 digest 결속 — config.toml in-place 변경 후 proof 재사용(JW-GPT-013) 차단"
     status: "pending"
     severity: "major"
