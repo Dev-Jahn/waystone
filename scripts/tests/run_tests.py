@@ -67,7 +67,7 @@ def init_repo(root: Path):
 def _synthetic_codex_fingerprint(worktree: Path) -> dict:
     """Hermetic fingerprint for tests that exercise transport behavior, not discovery."""
     return {
-        "schema": "waystone-codex-runner-proof-1",
+        "schema": "waystone-codex-runner-proof-2",
         "resolved_codex_path": "/opt/waystone-test/bin/codex",
         "codex_version": {"stdout": "codex-cli 9.9.9", "stderr": "test build"},
         "codex_executable": {"size": 1234, "mtime_ns": 5678},
@@ -80,6 +80,28 @@ def _synthetic_codex_fingerprint(worktree: Path) -> dict:
         "sandbox_invocation_contract": "codex-exec:workspace-write:v1",
         "host_sandbox_observation": {
             "source": "none", "status": "not-observed", "platform": "TestOS",
+        },
+        "execution_principal": {
+            "effective_uid": 1000, "effective_gid": 1000,
+            "supplementary_groups": [20, 1000],
+        },
+        "codex_config_root": {
+            "source": "default", "configured_path": "~/.codex",
+            "resolved_path": "/home/waystone-test/.codex", "status": "not-present",
+        },
+        "process_context": {
+            "Seccomp": {"source": "/proc/self/status", "status": "observed", "value": "2"},
+            "NoNewPrivs": {
+                "source": "/proc/self/status", "status": "observed", "value": "1",
+            },
+            "CapEff": {
+                "source": "/proc/self/status", "status": "observed",
+                "value": "0000000000000000",
+            },
+            "security_label": {
+                "source": "/proc/self/attr/current", "status": "observed",
+                "value": "waystone-test (enforce)",
+            },
         },
         "worktree_cache_mount": delegate._worktree_mount_identity(worktree),
     }
@@ -5842,7 +5864,7 @@ class UninitializedRootGateTests(unittest.TestCase):
                     atomic.assert_called_once_with(ignore, "*\n")
                 delegate._record_codex_runner_verified(
                     state / "codex-runner-verified",
-                    {"schema": "waystone-codex-runner-proof-1"})
+                    {"schema": "waystone-codex-runner-proof-2"})
 
                 self.assertEqual(ignore.read_text(), "*\n")
                 self.assertEqual(git(
@@ -10308,7 +10330,7 @@ def _latest_rec(root, home):
 class CodexRunnerVerificationGateTests(unittest.TestCase):
     def setUp(self):
         self.proof = {
-            "schema": "waystone-codex-runner-proof-1",
+            "schema": "waystone-codex-runner-proof-2",
             "resolved_codex_path": "/opt/waystone-test/bin/codex",
             "codex_version": {"stdout": "codex-cli 9.9.9", "stderr": "build test"},
             "codex_executable": {"size": 1234, "mtime_ns": 5678},
@@ -10319,6 +10341,30 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
             "sandbox_invocation_contract": "codex-exec:workspace-write:v1",
             "host_sandbox_observation": {
                 "source": "none", "status": "not-observed", "platform": "TestOS",
+            },
+            "execution_principal": {
+                "effective_uid": 1000, "effective_gid": 1000,
+                "supplementary_groups": [20, 1000],
+            },
+            "codex_config_root": {
+                "source": "default", "configured_path": "~/.codex",
+                "resolved_path": "/home/waystone-test/.codex", "status": "not-present",
+            },
+            "process_context": {
+                "Seccomp": {
+                    "source": "/proc/self/status", "status": "observed", "value": "2",
+                },
+                "NoNewPrivs": {
+                    "source": "/proc/self/status", "status": "observed", "value": "1",
+                },
+                "CapEff": {
+                    "source": "/proc/self/status", "status": "observed",
+                    "value": "0000000000000000",
+                },
+                "security_label": {
+                    "source": "/proc/self/attr/current", "status": "observed",
+                    "value": "waystone-test (enforce)",
+                },
             },
             "worktree_cache_mount": {
                 "device_boundary": "/test-cache", "device": 42, "filesystem_id": 84,
@@ -10378,12 +10424,41 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
             worktree.mkdir()
             host = {"source": "test-host", "value": "host-123"}
             observed = {"source": "test", "status": "observed", "value": "test-lsm"}
+            principal = {
+                "effective_uid": 501, "effective_gid": 20,
+                "supplementary_groups": [20, 80],
+            }
+            config_root = {
+                "source": "CODEX_HOME", "configured_path": str(base / "codex-home"),
+                "resolved_path": str(base / "codex-home"), "status": "not-present",
+            }
+            process_context = {
+                "Seccomp": {
+                    "source": "/proc/self/status", "status": "observed", "value": "2",
+                },
+                "NoNewPrivs": {
+                    "source": "/proc/self/status", "status": "observed", "value": "1",
+                },
+                "CapEff": {
+                    "source": "/proc/self/status", "status": "observed", "value": "0",
+                },
+                "security_label": {
+                    "source": "/proc/self/attr/current", "status": "observed",
+                    "value": "test-profile",
+                },
+            }
             with mock.patch.dict(os.environ, {"PATH": str(fake_bin)}), \
                  mock.patch.object(delegate, "_stable_host_identity", return_value=host), \
-                 mock.patch.object(delegate, "_host_sandbox_observation", return_value=observed):
+                 mock.patch.object(delegate, "_host_sandbox_observation", return_value=observed), \
+                 mock.patch.object(delegate, "_execution_principal_identity",
+                                   return_value=principal), \
+                 mock.patch.object(delegate, "_codex_config_root_identity",
+                                   return_value=config_root), \
+                 mock.patch.object(delegate, "_process_security_context",
+                                   return_value=process_context):
                 proof = self.original_fingerprint(worktree)
 
-            self.assertEqual(proof["schema"], "waystone-codex-runner-proof-1")
+            self.assertEqual(proof["schema"], "waystone-codex-runner-proof-2")
             self.assertEqual(proof["resolved_codex_path"], str(fake_codex.resolve()))
             self.assertEqual(proof["codex_version"], {
                 "stdout": "codex-cli 7.8.9", "stderr": "build abc"})
@@ -10397,11 +10472,136 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
             self.assertEqual(
                 proof["sandbox_invocation_contract"], "codex-exec:workspace-write:v1")
             self.assertEqual(proof["host_sandbox_observation"], observed)
+            self.assertEqual(proof["execution_principal"], principal)
+            self.assertEqual(proof["codex_config_root"], config_root)
+            self.assertEqual(proof["process_context"], process_context)
             mount = proof["worktree_cache_mount"]
             self.assertTrue(Path(mount["device_boundary"]).is_absolute())
             self.assertEqual(mount["device"], worktree.stat().st_dev)
             self.assertIsInstance(mount["filesystem_id"], int)
             self.assertIsInstance(mount["readonly"], bool)
+
+    def test_execution_principal_is_normalized_and_collection_failures_are_closed(self):
+        from unittest import mock
+
+        with mock.patch.object(delegate.os, "geteuid", return_value=501), \
+             mock.patch.object(delegate.os, "getegid", return_value=20), \
+             mock.patch.object(delegate.os, "getgroups", return_value=[80, 20, 80]):
+            self.assertEqual(delegate._execution_principal_identity(), {
+                "effective_uid": 501,
+                "effective_gid": 20,
+                "supplementary_groups": [20, 80],
+            })
+
+        for function in ("geteuid", "getegid", "getgroups"):
+            with self.subTest(function=function), \
+                 mock.patch.object(
+                     delegate.os, function, side_effect=OSError(f"{function} denied")):
+                with self.assertRaisesRegex(
+                        common.WorkflowError, rf"execution principal.*{function} denied"):
+                    delegate._execution_principal_identity()
+
+    def test_codex_config_root_records_resolved_stat_identity_and_honest_absence(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            target = base / "actual-codex-home"
+            target.mkdir()
+            configured = base / "codex-home-link"
+            configured.symlink_to(target, target_is_directory=True)
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(configured)}):
+                identity = delegate._codex_config_root_identity()
+            info = target.stat()
+            self.assertEqual(identity, {
+                "source": "CODEX_HOME",
+                "configured_path": str(configured),
+                "resolved_path": str(target.resolve()),
+                "status": "present",
+                "stat": {
+                    "device": info.st_dev,
+                    "inode": info.st_ino,
+                    "mode": info.st_mode,
+                    "uid": info.st_uid,
+                    "gid": info.st_gid,
+                    "size": info.st_size,
+                    "mtime_ns": info.st_mtime_ns,
+                    "ctime_ns": info.st_ctime_ns,
+                },
+            })
+
+            home = base / "missing-home"
+            home.mkdir()
+            with mock.patch.dict(os.environ, {"CODEX_HOME": ""}), \
+                 mock.patch.object(Path, "home", return_value=home):
+                missing = delegate._codex_config_root_identity()
+            self.assertEqual(missing, {
+                "source": "default",
+                "configured_path": "~/.codex",
+                "resolved_path": str((home / ".codex").resolve()),
+                "status": "not-present",
+            })
+
+            unavailable = _json.loads(_json.dumps(self.proof))
+            unavailable["codex_config_root"] = {
+                "source": "CODEX_HOME",
+                "configured_path": str(base / "unavailable"),
+                "resolved_path": str(base / "unavailable"),
+                "status": "not-observed",
+                "reason": "PermissionError",
+            }
+            self.assertEqual(
+                delegate._codex_runner_reuse_blockers(unavailable), ["codex_config_root"])
+
+    def test_linux_process_context_records_each_axis_and_marks_unobserved_explicitly(self):
+        from unittest import mock
+
+        status = (
+            "Name:\tpython\n"
+            "NoNewPrivs:\t1\n"
+            "Seccomp:\t2\n"
+            "CapEff:\t00000000a80425fb\n"
+        )
+        with mock.patch.object(
+                Path, "read_text", side_effect=[status, "docker-default (enforce)\n"]):
+            context = delegate._process_security_context("Linux")
+        self.assertEqual(context, {
+            "Seccomp": {
+                "source": "/proc/self/status", "status": "observed", "value": "2",
+            },
+            "NoNewPrivs": {
+                "source": "/proc/self/status", "status": "observed", "value": "1",
+            },
+            "CapEff": {
+                "source": "/proc/self/status", "status": "observed",
+                "value": "00000000a80425fb",
+            },
+            "security_label": {
+                "source": "/proc/self/attr/current", "status": "observed",
+                "value": "docker-default (enforce)",
+            },
+        })
+
+        with mock.patch.object(
+                Path, "read_text", side_effect=["Seccomp:\t2\n", FileNotFoundError()]):
+            partial = delegate._process_security_context("Linux")
+        self.assertEqual(partial["Seccomp"]["status"], "observed")
+        self.assertEqual(partial["NoNewPrivs"], {
+            "source": "/proc/self/status", "status": "not-observed", "reason": "missing",
+        })
+        self.assertEqual(partial["CapEff"], {
+            "source": "/proc/self/status", "status": "not-observed", "reason": "missing",
+        })
+        self.assertEqual(partial["security_label"], {
+            "source": "/proc/self/attr/current", "status": "not-observed",
+            "reason": "not-present",
+        })
+
+        unsupported = delegate._process_security_context("Darwin")
+        self.assertEqual(set(unsupported), {"Seccomp", "NoNewPrivs", "CapEff", "security_label"})
+        self.assertTrue(all(
+            axis["status"] == "not-observed" and axis["reason"] == "unsupported-platform"
+            for axis in unsupported.values()))
 
     def test_stable_host_identity_uses_machine_id_and_ioplatformuuid_fail_closed(self):
         import types
@@ -10487,6 +10687,14 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
                 "device_boundary": "/test-cache", "device": 42, "filesystem_id": 84,
                 "readonly": 0,
             }}, ("worktree_cache_mount",)),
+            ({"execution_principal": {
+                "effective_uid": 2000, "effective_gid": 1000,
+                "supplementary_groups": [20, 1000],
+            }}, ("execution_principal",)),
+            ({"codex_config_root": {
+                "source": "CODEX_HOME", "configured_path": "/foreign/.codex",
+                "resolved_path": "/foreign/.codex", "status": "not-present",
+            }}, ("codex_config_root",)),
             ({"foreign_axis": None}, ("foreign_axis",)),
         )
         for changes, changed_axes in cases:
@@ -10998,6 +11206,114 @@ class CodexRunnerVerificationGateTests(unittest.TestCase):
                 delegate._run_codex_sandbox_probe = original_probe
 
             self.assertEqual(calls, {"runner": 1})
+
+    def test_darwin_unobserved_process_context_state_equivalent_marker_skips_probe(self):
+        import types
+
+        original = b"version: 1\nproject: demo\ndelegation:\n  enabled: true\n"
+        with tempfile.TemporaryDirectory() as d:
+            root, worktree, record, prompt = self._fixture(Path(d), original)
+            darwin_proof = _json.loads(_json.dumps(self.proof))
+            darwin_proof["platform"]["system"] = "Darwin"
+            darwin_proof["host_sandbox_observation"] = {
+                "source": "none", "status": "not-observed", "platform": "Darwin",
+            }
+            darwin_proof["process_context"] = delegate._process_security_context("Darwin")
+            delegate._codex_runner_fingerprint = lambda _worktree: _json.loads(
+                _json.dumps(darwin_proof))
+            state = root / ".waystone"
+            state.mkdir()
+            (state / ".gitignore").write_text("*\n")
+            marker = state / "codex-runner-verified"
+            recorded = _json.loads(_json.dumps(darwin_proof))
+            recorded["process_context"]["security_label"]["reason"] = "not-present"
+            marker.write_text(self._proof_text(recorded))
+            calls = {"runner": 0}
+            original_probe = delegate._run_codex_sandbox_probe
+            original_run = delegate.subprocess.run
+
+            def probe(*args, **kwargs):
+                raise AssertionError("equal not-observed process state must reuse the proof")
+
+            def run(*args, **kwargs):
+                if args and args[0] and args[0][0] == "git":
+                    return original_run(*args, **kwargs)
+                calls["runner"] += 1
+                return types.SimpleNamespace(returncode=0)
+
+            delegate._run_codex_sandbox_probe = probe
+            delegate.subprocess.run = run
+            try:
+                self.assertEqual(delegate._run_codex(
+                    worktree, "gpt-test", prompt, record)[0], 0)
+            finally:
+                delegate.subprocess.run = original_run
+                delegate._run_codex_sandbox_probe = original_probe
+
+            self.assertEqual(calls, {"runner": 1})
+            self.assertEqual(marker.read_text(), self._proof_text(recorded))
+
+    def test_observed_and_unobserved_process_context_transitions_reprobe(self):
+        import contextlib
+        import io
+        import types
+
+        original = b"version: 1\nproject: demo\ndelegation:\n  enabled: true\n"
+        unobserved_axis = {
+            "source": "/proc/self/status", "status": "not-observed",
+            "reason": "not-present",
+        }
+        observed_axis = {
+            "source": "/proc/self/status", "status": "observed", "value": "2",
+        }
+        for recorded_axis, current_axis in (
+                (observed_axis, unobserved_axis), (unobserved_axis, observed_axis)):
+            with self.subTest(
+                    recorded=recorded_axis["status"], current=current_axis["status"]), \
+                 tempfile.TemporaryDirectory() as d:
+                root, worktree, record, prompt = self._fixture(Path(d), original)
+                current = _json.loads(_json.dumps(self.proof))
+                current["process_context"]["Seccomp"] = current_axis
+                recorded = _json.loads(_json.dumps(current))
+                recorded["process_context"]["Seccomp"] = recorded_axis
+                delegate._codex_runner_fingerprint = lambda _worktree: _json.loads(
+                    _json.dumps(current))
+                state = root / ".waystone"
+                state.mkdir()
+                (state / ".gitignore").write_text("*\n")
+                marker = state / "codex-runner-verified"
+                marker.write_text(self._proof_text(recorded))
+                calls = {"probe": 0, "runner": 0}
+                original_probe = delegate._run_codex_sandbox_probe
+                original_run = delegate.subprocess.run
+
+                def probe(*args, **kwargs):
+                    calls["probe"] += 1
+                    result = self._passed_probe()
+                    result["worktree_cache_mount"] = _json.loads(_json.dumps(
+                        kwargs["fingerprint"]["worktree_cache_mount"]))
+                    return result
+
+                def run(*args, **kwargs):
+                    if args and args[0] and args[0][0] == "git":
+                        return original_run(*args, **kwargs)
+                    calls["runner"] += 1
+                    return types.SimpleNamespace(returncode=0)
+
+                delegate._run_codex_sandbox_probe = probe
+                delegate.subprocess.run = run
+                stderr = io.StringIO()
+                try:
+                    with contextlib.redirect_stderr(stderr):
+                        self.assertEqual(delegate._run_codex(
+                            worktree, "gpt-test", prompt, record)[0], 0)
+                finally:
+                    delegate.subprocess.run = original_run
+                    delegate._run_codex_sandbox_probe = original_probe
+
+                self.assertEqual(calls, {"probe": 1, "runner": 1})
+                self.assertEqual(marker.read_text(), self._proof_text(current))
+                self.assertIn("process_context", stderr.getvalue())
 
     def test_git_tracked_marker_is_ignored_and_reprobed_with_untrack_guidance(self):
         import contextlib

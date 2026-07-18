@@ -91,7 +91,7 @@ _CLAUDE_EFFORT_VALUES = ("low", "medium", "high", "xhigh")
 _VERIFIER_SESSION_ENV = "WAYSTONE_VERIFIER_SESSION"
 _CODEX_RUNNER_VERIFIED_MARKER = "codex-runner-verified"
 _CODEX_RUNNER_VERIFICATION_LOCK = "codex-runner-verification.lock"
-_CODEX_RUNNER_PROOF_SCHEMA = "waystone-codex-runner-proof-1"
+_CODEX_RUNNER_PROOF_SCHEMA = "waystone-codex-runner-proof-2"
 _CODEX_SANDBOX_INVOCATION_CONTRACT = "codex-exec:workspace-write:v1"
 _IOPLATFORM_UUID_RE = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
@@ -1097,6 +1097,141 @@ def _host_sandbox_observation(system: str) -> dict:
     return {"source": str(source), "status": "observed", "value": value}
 
 
+def _execution_principal_identity() -> dict:
+    """Return the effective POSIX principal; an incomplete identity is not reusable proof."""
+    try:
+        effective_uid = os.geteuid()
+        effective_gid = os.getegid()
+        supplementary_groups = os.getgroups()
+        if (not isinstance(effective_uid, int) or isinstance(effective_uid, bool)
+                or effective_uid < 0):
+            raise ValueError(f"invalid effective UID {effective_uid!r}")
+        if (not isinstance(effective_gid, int) or isinstance(effective_gid, bool)
+                or effective_gid < 0):
+            raise ValueError(f"invalid effective GID {effective_gid!r}")
+        if not isinstance(supplementary_groups, list):
+            raise ValueError("supplementary groups are not a list")
+        if any(not isinstance(group, int) or isinstance(group, bool) or group < 0
+               for group in supplementary_groups):
+            raise ValueError(f"invalid supplementary groups {supplementary_groups!r}")
+    except (AttributeError, OSError, TypeError, ValueError) as e:
+        raise WorkflowError(
+            f"cannot fingerprint Codex runner execution principal: {e}") from e
+    return {
+        "effective_uid": effective_uid,
+        "effective_gid": effective_gid,
+        "supplementary_groups": sorted(set(supplementary_groups)),
+    }
+
+
+def _codex_config_root_identity() -> dict:
+    """Resolve the effective Codex config root and record its filesystem identity."""
+    configured = os.environ.get("CODEX_HOME")
+    source = "CODEX_HOME" if configured else "default"
+    configured_path = configured if configured else "~/.codex"
+    try:
+        candidate = Path(configured).expanduser() if configured else Path.home() / ".codex"
+        resolved = candidate.resolve(strict=False)
+    except (OSError, RuntimeError) as e:
+        return {
+            "source": source,
+            "configured_path": configured_path,
+            "resolved_path": None,
+            "status": "not-observed",
+            "reason": type(e).__name__,
+        }
+    identity = {
+        "source": source,
+        "configured_path": configured_path,
+        "resolved_path": str(resolved),
+    }
+    try:
+        info = resolved.stat()
+    except FileNotFoundError:
+        return {**identity, "status": "not-present"}
+    except OSError as e:
+        return {**identity, "status": "not-observed", "reason": type(e).__name__}
+    return {
+        **identity,
+        "status": "present",
+        "stat": {
+            "device": info.st_dev,
+            "inode": info.st_ino,
+            "mode": info.st_mode,
+            "uid": info.st_uid,
+            "gid": info.st_gid,
+            "size": info.st_size,
+            "mtime_ns": info.st_mtime_ns,
+            "ctime_ns": info.st_ctime_ns,
+        },
+    }
+
+
+def _not_observed_process_axis(source: Path, reason: str) -> dict:
+    return {"source": str(source), "status": "not-observed", "reason": reason}
+
+
+def _process_security_context(system: str) -> dict:
+    """Record cheap process-local Linux security axes, with explicit observation gaps."""
+    status_source = Path("/proc/self/status")
+    label_source = Path("/proc/self/attr/current")
+    status_fields = ("Seccomp", "NoNewPrivs", "CapEff")
+    if system != "Linux":
+        return {
+            field: _not_observed_process_axis(status_source, "unsupported-platform")
+            for field in status_fields
+        } | {
+            "security_label": _not_observed_process_axis(
+                label_source, "unsupported-platform"),
+        }
+
+    try:
+        status_text = status_source.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        status_reason = "not-present"
+        status_values = None
+    except OSError:
+        status_reason = "unavailable"
+        status_values = None
+    except UnicodeError:
+        status_reason = "invalid-encoding"
+        status_values = None
+    else:
+        status_reason = "missing"
+        status_values = {}
+        for line in status_text.splitlines():
+            name, separator, value = line.partition(":")
+            if separator and name in status_fields and value.strip():
+                status_values[name] = value.strip()
+
+    context = {}
+    for field in status_fields:
+        if status_values is not None and field in status_values:
+            context[field] = {
+                "source": str(status_source),
+                "status": "observed",
+                "value": status_values[field],
+            }
+        else:
+            context[field] = _not_observed_process_axis(status_source, status_reason)
+
+    try:
+        label = label_source.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        context["security_label"] = _not_observed_process_axis(label_source, "not-present")
+    except OSError:
+        context["security_label"] = _not_observed_process_axis(label_source, "unavailable")
+    except UnicodeError:
+        context["security_label"] = _not_observed_process_axis(
+            label_source, "invalid-encoding")
+    else:
+        context["security_label"] = (
+            {"source": str(label_source), "status": "observed", "value": label}
+            if label else _not_observed_process_axis(label_source, "empty")
+        )
+    return context
+
+
 def _codex_runner_fingerprint(worktree: Path) -> dict:
     """Collect the machine/runtime axes that make one sandbox probe reusable."""
     executable = shutil.which("codex")
@@ -1140,6 +1275,9 @@ def _codex_runner_fingerprint(worktree: Path) -> dict:
         "kernel": {"release": uname.release, "version": uname.version},
         "sandbox_invocation_contract": _CODEX_SANDBOX_INVOCATION_CONTRACT,
         "host_sandbox_observation": _host_sandbox_observation(uname.system),
+        "execution_principal": _execution_principal_identity(),
+        "codex_config_root": _codex_config_root_identity(),
+        "process_context": _process_security_context(uname.system),
         "worktree_cache_mount": _worktree_mount_identity(worktree),
     }
 
@@ -1160,6 +1298,17 @@ def _codex_runner_comparison_view(fingerprint: dict) -> dict:
         # ordinary timestamp/PID diagnostics invalidate every proof, so stderr remains record-only.
         if isinstance(version.get("stderr"), str):
             version["stderr"] = "<recorded-diagnostic>"
+    process_context = comparable.get("process_context")
+    if isinstance(process_context, dict):
+        for axis in ("Seccomp", "NoNewPrivs", "CapEff", "security_label"):
+            value = process_context.get(axis)
+            if isinstance(value, dict) and value.get("status") == "not-observed":
+                # An unavailable observation has no security value to compare. Preserve the
+                # source and state, but do not turn equivalent observation failures into a
+                # permanent probe loop merely because their diagnostic reason changed.
+                process_context[axis] = {
+                    "source": value.get("source"), "status": "not-observed",
+                }
     return comparable
 
 
@@ -1171,6 +1320,42 @@ def _codex_runner_mismatch_axes(recorded: dict, current: dict) -> list[str]:
         if key not in recorded_view or key not in current_view
         or json.dumps(recorded_view.get(key), ensure_ascii=False, sort_keys=True)
         != json.dumps(current_view.get(key), ensure_ascii=False, sort_keys=True))
+
+
+def _codex_runner_reuse_blockers(fingerprint: dict) -> list[str]:
+    """Name malformed or unavailable context axes that cannot support reusable proof."""
+    blockers = []
+    principal = fingerprint.get("execution_principal")
+    if (not isinstance(principal, dict)
+            or not isinstance(principal.get("effective_uid"), int)
+            or isinstance(principal.get("effective_uid"), bool)
+            or principal.get("effective_uid", -1) < 0
+            or not isinstance(principal.get("effective_gid"), int)
+            or isinstance(principal.get("effective_gid"), bool)
+            or principal.get("effective_gid", -1) < 0
+            or not isinstance(principal.get("supplementary_groups"), list)
+            or any(not isinstance(group, int) or isinstance(group, bool) or group < 0
+                   for group in principal.get("supplementary_groups", []))):
+        blockers.append("execution_principal")
+
+    config_root = fingerprint.get("codex_config_root")
+    if (not isinstance(config_root, dict)
+            or config_root.get("status") not in ("present", "not-present")):
+        blockers.append("codex_config_root")
+
+    process_context = fingerprint.get("process_context")
+    for axis in ("Seccomp", "NoNewPrivs", "CapEff", "security_label"):
+        value = process_context.get(axis) if isinstance(process_context, dict) else None
+        status_value = value.get("status") if isinstance(value, dict) else None
+        if (not isinstance(value, dict)
+                or not isinstance(value.get("source"), str) or not value["source"]
+                or status_value not in ("observed", "not-observed")
+                or (status_value == "observed"
+                    and (not isinstance(value.get("value"), str) or not value["value"]))
+                or (status_value == "not-observed"
+                    and (not isinstance(value.get("reason"), str) or not value["reason"]))):
+            blockers.append(f"process_context.{axis}")
+    return blockers
 
 
 def _record_codex_runner_verified(marker_path: Path, fingerprint: dict) -> None:
@@ -1250,6 +1435,18 @@ def _codex_runner_marker_recorded(
                 f"waystone: checkout-local Codex runner proof fingerprint mismatch at "
                 f"{marker_path} ({', '.join(axes)}); a fresh preflight probe will run and "
                 "replace it with the current runtime contract",
+                file=sys.stderr,
+            )
+        return False
+    blockers = sorted(set(
+        _codex_runner_reuse_blockers(recorded)
+        + _codex_runner_reuse_blockers(fingerprint)))
+    if blockers:
+        if diagnose:
+            print(
+                f"waystone: checkout-local Codex runner proof at {marker_path} cannot be reused "
+                f"because runtime context is incomplete ({', '.join(blockers)}); a fresh "
+                "preflight probe will run",
                 file=sys.stderr,
             )
         return False
