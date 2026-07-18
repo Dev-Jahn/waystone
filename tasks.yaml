@@ -608,11 +608,12 @@ tasks:
     severity: "major"
     origin: "review-2026-07-19-evidence-authority"
   - id: fix/freeze-sidecar-corruption-isolation
+    result: "dev fc70ce1 (lane c474522 squash, raw codex 2-attempt). acceptance 6/6: corrupt sentinel 보존+최신 corrupt는 round unknown(젊은 유효 cycle 무영향)+filename-content identity 대조+cross-round prefix 격리(improve/ingest 판정 일치). 게이트 823→828 green+ruff(매 attempt 주관측 재실측), RED 매 attempt 독립 재현, 적대 회전 REJECT(1)→기계 델타 main 직접 검증(비례성 규칙, 기록). 수용 residual: unreadable rename 위조(filename=identity 계약·위협모델 ruling 범위)"
     notes: "attempt-1 적대 리뷰 REJECT(major 1): 원 fallback 폐쇄·filename identity·최신 corrupt unknown은 확증(잔여 아님), cross-round prefix 충돌만 잔존 — ingest가 타 round 파일(glob 과포집)을 foreign-skip 대신 corrupt 선언(main이 regex/glob 재현으로 확증). accept 6 보강, attempt-2 동일 branch. 수용 residual: unreadable 파일의 filename rename 위조(더 낮은 cycle로)는 filename=identity 계약상 탐지 불가 — 위협모델 ruling 범위"
     scope: ["scripts/improve.py", "scripts/review.py", "scripts/tests/run_tests.py"]
     accept: ["freeze sidecar 파싱 실패는 request sidecar와 동형으로 corrupt sentinel 행으로 보존된다 — 파일명에서 round/cycle identity를 엄격 파생하고, 파생 불가한 파일은 격리 보고된다 (RED: 현행 warning-후-완전제외 동작 반전)", "최고 cycle 후보가 corrupt이면 해당 round의 binding은 honest-unknown으로 투영된다 — 이전 유효 cycle로 fallback해 explicit provenance를 얻지 않는다 (RED: 손상 fixture에서 stale cycle이 explicit로 승격되는 현행 동작 반전)", "content의 round/cycle이 filename identity와 불일치하면 corrupt로 취급된다 (RED)", "한 파일의 손상이 다른 round의 투영을 중단시키지 않는다 — 기존 격리 보존 (무회귀)", "전체 테스트 스위트 green + ruff F401,F841 clean", "round R의 ingest·투영은 파일명 identity가 R이 아닌 파일(prefix가 겹치는 타 round의 sidecar — round id에 '-freeze-'가 포함될 수 있음)을 R의 입력에서 제외한다 — 타 round 파일은 corrupt 여부와 무관하게 R을 차단하지 않고(acceptance 4의 cross-round 격리 완성), freeze·demotion 양쪽 glob 경로 모두에 적용되며, improve와 ingest 두 투영이 동일 디렉터리 상태에서 같은 판정을 낸다 (RED: round '….-a'와 '….-a-freeze-b' 병존 fixture에서 ingest가 corrupt-round-binding을 반환하는 현행 동작 입증 후 반전)"]
     title: "손상된 freeze sidecar를 corrupt sentinel로 보존 — 최신 cycle 손상 시 이전 cycle이 explicit 증거로 승격되는 fallback(JW-GPT-012) 폐쇄"
-    status: "pending"
+    status: "done"
     severity: "major"
     origin: "review-2026-07-19-evidence-authority"
   - id: fix/probe-config-content-binding
