@@ -1,5 +1,4 @@
 __pycache__/
 *.pyc
-dev_docs/
 .DS_Store
 /CLAUDE.md

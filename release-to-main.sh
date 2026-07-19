@@ -50,6 +50,7 @@ SHIP_PATHS=(
 DEV_ONLY_PATHS=(
   .claude
   .waystone.yml
+  dev_docs
   PROGRESS.md
   ROADMAP.md
   SSOT.md
