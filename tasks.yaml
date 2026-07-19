@@ -673,3 +673,9 @@ tasks:
     status: "pending"
     severity: "major"
     origin: "dogfooding-2026-07-19"
+  - id: gate/trust-baseline-tag
+    result: "baseline/0.12-refactor @ 7cfecd3 (annotated tag). 게이트 실측: 828 green + ruff clean(주관측, rc 직접 캡처). exit 조건 3건 충족 — ⑴ 미해결 trust major 2건이 하네스 사용 표면 밖임을 실측 확인(review.mode=packet · freeze sidecar 0개 · ingest_round_binding이 packet 분기에서 조기 반환 · 014 경로는 --pr 필수) ⑵ 영향 범위를 docs/known-issues.md에 문서화(게이트 무영향 근거 포함) ⑶ feature freeze를 tag 메시지에 선언. 해소는 M1-B 수용 기준으로 이월"
+    title: "0.12 리팩터의 source baseline 동결 — 미해결 trust major의 영향 범위 문서화 + immutable tag + feature freeze 선언 (M0-A exit)"
+    status: "done"
+    severity: "major"
+    origin: "plan-0.12-M0A"
