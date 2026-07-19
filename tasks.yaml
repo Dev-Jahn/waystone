@@ -772,3 +772,17 @@ tasks:
     status: done
     severity: "major"
     origin: "review-2026-07-19-m0-contracts"
+  - id: chore/runtime-state-disposition-audit
+    accept: ["docs/runtime-state-audit.md 작성 — 권위 원천(전부 이 트리에 존재): dev_docs/0.12.0-refactor-plan.md(§2-5 porting ledger·traceability matrix, §4 불변조건, §5-1 처분 감사, §6 M0-C/M1-A 출력 등급표), docs/invariants.md, docs/adr/ADR-0002~0012, docs/known-issues.md. 이 저장소의 실제 .waystone/ 트리(및 ~/.waystone/)를 열거해 계획서 §5-1 처분표의 각 행을 실물과 대조한다. 표에 없는 항목이 발견되면 추가하고, 표에 있으나 실물이 없는 항목도 명시한다. 각 항목에 대해: 현재 권위 여부 / git-tracked인가 / 재파생 가능한가 / 0.12 처분(git 유지·DB 이관·read-only archive·발행 중지·역할 분리) / 근거", "계획서 §5-1의 원칙 '권위 있는 것은 git에 있거나 재파생 가능해야 한다. 어느 쪽도 아닌 항목은 M0 finding'을 실제로 적용해, 위반 항목을 **finding으로 명시 열거**한다(없으면 없다고 단언). 발견된 finding은 문서에 심각도와 함께 기록하되 task 등록은 하지 않는다(main이 판단)", "read-only 감사다 — .waystone/ 아래 어떤 파일도 생성·수정·삭제하지 않는다. 산출물은 docs/runtime-state-audit.md 하나뿐", "전체 스위트 green + ruff F401,F841 clean"]
+    scope: ["docs"]
+    title: "M0-C: .waystone/ 아래 runtime state 항목의 실물 감사 — 계획서 §5-1 처분표를 실제 파일·디렉터리와 대조해 확정하고, '권위 있는데 git에도 없고 재파생도 불가'인 항목을 finding으로 적출"
+    status: "pending"
+    severity: "major"
+    origin: "plan-0.12-M0C"
+  - id: chore/porting-ledger-bootstrap
+    accept: ["docs/porting-ledger.md 작성 — 권위 원천(전부 이 트리에 존재): dev_docs/0.12.0-refactor-plan.md(§2-5 ledger·matrix, §6 M1-A 출력 등급표, §4 불변조건), docs/invariants.md(I-01~12·E-01~09), docs/adr/ADR-0002~0012, docs/known-issues.md. scripts/tests/run_tests.py의 전 테스트를 열거해(테스트 클래스 단위로 묶어도 되나 828건 전부가 어느 행에든 귀속되어야 하며 총계가 맞아야 한다) 각 항목에 ⑴ 처분(port=이관 / rewrite=재작성 / drop=폐기+사유) ⑵ M1-A 출력 등급(canonical artifact=byte-identical / machine JSON=schema·value 동일 / human CLI=의미·필수 field 호환 / diagnostic path·traceback=변경 허용·typed code 동일 / time·path-bearing=normalized 비교) ⑶ 어떤 불변조건(I-nn·E-nn)을 지키는지(해당 없으면 none) 를 배정한다", "**알려진 결함을 '보존할 동작'으로 고정하지 않는다** — docs/known-issues.md의 JW-GPT-014·015가 기술하는 동작을 계약으로 태깅하는 테스트가 있으면 처분을 rewrite로 하고 사유에 'known defect, must not be preserved'를 명시한다. 이 판정을 문서의 별도 절에 목록으로 모은다(계획서 §2-1: characterization이 알려진 결함을 보존 대상으로 고정하면 안 된다)", "docs/traceability-matrix.md 골격 작성 — 불변조건 ID(I-01~12, E-01~09) × 4열(characterization test / 새 kernel test / fault-injection test / 상태). 현재 존재하는 테스트만 채우고 없는 칸은 'TODO(M1)'로 남긴다. **ADR-0003의 §3-9 취소·quiescence 안전 계약은 E 번호가 없으므로 독립 행을 둔다**(계획서 §2-5 r5 단서)", "분류는 기계적 열거 + 근거 기반이어야 한다 — 테스트 이름만 보고 추측하지 말고 각 테스트가 무엇을 단언하는지 확인한 뒤 등급을 배정한다. 판단이 갈리는 항목은 'needs-ruling'으로 표시하고 사유를 적는다(임의 결정 금지)", "전체 스위트 green + ruff F401,F841 clean. 테스트 파일 자체는 수정하지 않는다 — 산출물은 문서 2개뿐"]
+    scope: ["docs"]
+    title: "M0-C: 테스트 828건의 porting ledger 개시 — 각 테스트를 이관/재작성/폐기로 분류하고 M1-A 출력 등급(canonical artifact·machine JSON·human CLI·diagnostic·time/path-bearing)을 배정. silent test drop = silent contract drop 방지"
+    status: "pending"
+    severity: "major"
+    origin: "plan-0.12-M0C"
