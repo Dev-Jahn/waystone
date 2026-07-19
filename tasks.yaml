@@ -636,3 +636,13 @@ tasks:
     status: "pending"
     severity: "minor"
     origin: "round-2026-07-19-evidence-authority-fixes"
+  - id: fix/merge-observed-demotion-persistence
+    title: "merge 경로가 관측한 v1 supersession을 demotion sidecar로 영속화하지 않아 offline 투영이 v2 digest를 explicit으로 재주장 — remote classification 수행 경로 전체가 공용 영속화 함수를 호출하도록 (JW-GPT-014)"
+    status: "pending"
+    severity: "major"
+    origin: "review-2026-07-19-evidence-authority-fixes"
+  - id: fix/ingest-malformed-foreign-freeze-skip
+    title: "ingest_round_binding이 malformed filename에서 foreign-skip 이전에 corrupt를 반환해, 타 round의 손상 freeze 파일 하나가 healthy round의 ingest를 중단 — improve와 동일한 fallback owner 파생 규칙으로 일원화 (JW-GPT-015)"
+    status: "pending"
+    severity: "major"
+    origin: "review-2026-07-19-evidence-authority-fixes"
