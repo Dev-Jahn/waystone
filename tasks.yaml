@@ -674,33 +674,55 @@ tasks:
     severity: "major"
     origin: "dogfooding-2026-07-19"
   - id: gate/trust-baseline-tag
+    session_id: "513d1802-24e4-4adf-8ffb-a86b15e0f41d"
+    round: 2026-07-19-m0-contracts
     result: "baseline/0.12-refactor @ 7cfecd3 (annotated tag). 게이트 실측: 828 green + ruff clean(주관측, rc 직접 캡처). exit 조건 3건 충족 — ⑴ 미해결 trust major 2건이 하네스 사용 표면 밖임을 실측 확인(review.mode=packet · freeze sidecar 0개 · ingest_round_binding이 packet 분기에서 조기 반환 · 014 경로는 --pr 필수) ⑵ 영향 범위를 docs/known-issues.md에 문서화(게이트 무영향 근거 포함) ⑶ feature freeze를 tag 메시지에 선언. 해소는 M1-B 수용 기준으로 이월"
     title: "0.12 리팩터의 source baseline 동결 — 미해결 trust major의 영향 범위 문서화 + immutable tag + feature freeze 선언 (M0-A exit)"
-    status: "done"
+    status: done
     severity: "major"
     origin: "plan-0.12-M0A"
   - id: decision/delivery-automation-default
+    session_id: "513d1802-24e4-4adf-8ffb-a86b15e0f41d"
+    round: 2026-07-19-m0-contracts
     ruling: "기본 delivery_policy=commit / review_policy=off (사용자 결정 2026-07-19, 권고안 manual에서 상향). automation level은 프로젝트 설정으로 조정 가능하되 init은 이를 묻지 않는다 — 합리적 기본값 + config override, 대화형 질문 0. 설계 귀결: commit이 기본이므로 사용자 승인 없이 커밋이 발생 → live-tree drift 3분기(계획 §6 M2-4)와 delivery 직전 dirty-tree snapshot 재검증이 안전의 핵심 계약이 된다. push와 review publication은 기본 비활성(저장소 밖으로 나가는 행위는 명시적 상향 시에만)."
     title: "delivery 기본값 = commit, review publication = off, automation level은 설정 조정 가능하되 init이 묻지 않음 (사용자 결정 2026-07-19)"
-    status: "done"
+    status: done
     severity: "major"
     origin: "plan-0.12-M0B"
   - id: docs/adr-runtime-core-contracts
+    session_id: "513d1802-24e4-4adf-8ffb-a86b15e0f41d"
+    round: 2026-07-19-m0-contracts
+    result: "ADR-0002(external effect commit protocol)·ADR-0003(run observability & cancellation) @ dev cf1073c. 계획서 §3-4/§3-8~3-10과 대조해 모순 0 확인. 게이트 828 green + ruff clean(lane·병합 후 각 1회 주관측)"
     accept: ["ADR-0002-external-effect-commit-protocol.md 작성 — 계획서 §3-4를 권위 원천으로: planned→claimed→effect→observed→completed 5단계, effect 종류 7종 표(Git ref·worktree·artifact write·runner 실행·patch integration·push·GitHub marker)를 idempotency 기준/관측 방법/**관측 채널 불가 시**/retry 방식 열로, fencing+CAS correctness 규칙, '중복 실행 0'의 action_id 기반 정의, crash 후 '효과 전 사망'과 '효과 후 commit 전 사망'을 구분하는 recovery 결정표", "ADR-0003-run-observability-and-cancellation.md 작성 — 계획서 §3-8·§3-9·§3-10을 권위 원천으로: liveness/progress/current 3분리와 각각의 honest-unknown, E-08 양방향 규칙(침묵≠종료 증거 / 긍정적 종료 관측=종료 증거), stalled는 FSM state가 아닌 derived health, liveness는 action·job 단위 계산 후 run 집계, progress 분모는 frozen closure, status·watch의 엄격 read-only 계약, heartbeat는 mutable telemetry(append-only transitions 아님), 취소·quiescence·cleanup 안전 계약(running/alive/unknown-effect/cancel-pending의 worktree·ref·artifact 삭제 금지, cancel은 의도만 기록), process identity 최소 집합과 supervisor 소유, monotonic clock+boot identity", "두 문서 모두 기존 컨벤션 준수 — docs/adr/ADR-NNNN-<kebab>.md, 헤더(Status/Date/Round/SSOT sections affected/Tasks), 본문 Context/Decision/Consequences/Alternatives considered. 한국어 본문, 코드 식별자는 영문", "계획서와 모순되는 서술이 없다 — ADR은 계획서 해당 절의 내용을 확정·정밀화할 수는 있으나 뒤집을 수 없다. 계획서에서 미결로 남긴 항목은 ADR에서 결정하되 그 사실을 명시한다", "전체 테스트 스위트 green + ruff F401,F841 clean (docs gate 포함)"]
     scope: ["docs/adr"]
     title: "M0-B ADR 2종(무거움): ADR-0002 external effect commit protocol(효과 종류별 표+관측불가+recovery 결정표) · ADR-0003 run observability & cancellation(3분리·derived health·취소 안전계약·supervisor identity)"
-    status: "pending"
+    status: done
     severity: "major"
     origin: "plan-0.12-M0B"
   - id: docs/adr-state-authority-contracts
+    session_id: "513d1802-24e4-4adf-8ffb-a86b15e0f41d"
+    round: 2026-07-19-m0-contracts
+    result: "ADR-0004(executor 경계)·0005(fact authority)·0006(closeout manifest, 미결 항목은 사용자 결정 옵션 b로 확정)·0007(SQLite 운영) @ dev cf1073c. 계획서 §3-6/§5-2/§5-4/§5-5와 대조해 모순 0 확인"
     accept: ["ADR-0004-executor-boundary.md — 계획서 §3-6 권위: executor_kind(engine/carrier/user) 소유 범위 표, run resume·actions next가 engine-owned action을 내부 소진하고 host/user action만 반환, 비차단 3분기 반환 계약(action 있음 / engine busy+poll_after_s / engine idle+typed reason)", "ADR-0005-fact-authority-matrix.md — 계획서 §5-2 권위: 'DB는 Git fact를 authoritative하게 복제하지 않는다(digest+관측시점만)' 원칙, fact별 Authority/Cache/머신간전달 표(r5에서 추가된 action 실행상태·heartbeat·process liveness·run health 4행 포함), run id 생성 규칙과 uniqueness 책임 분담", "ADR-0006-run-closeout-manifest.md — 계획서 §5-4 권위: run당 정확히 하나·게시 후 immutable·runtime lifecycle 미복제·DB dump 아님·**자기 publication commit SHA를 내용에 넣지 않음**·result SHA는 원격 도달 가능, 최소 필드 스키마, code_result_sha와 publication commit의 구분(후자는 '이 파일을 포함하는 git commit'으로 파생). **미결 항목 확정: 로컬 verifier artifact 삭제 시 manifest에는 digest만 남으며 deep audit는 로컬 artifact store를 요구한다고 정직하게 명시한다(사용자 결정 2026-07-19, 옵션 b) — 최소 criterion verdict를 manifest에 이식하지 않는다. 근거는 manifest를 DB dump로 팽창시키지 않는 것**", "ADR-0007-sqlite-operations.md — 계획서 §5-5 권위: filesystem 판정(기본 project-local .waystone/state.db, 미지원 filesystem은 typed refusal+machine-local 재배치 제안, silent fallback·무단 journal mode 강등 금지), backup(raw file copy 금지 — sqlite3 backup API·checkpoint 후 일관 backup·VACUUM INTO 중 하나), artifact GC(nonterminal 삭제 불가·published closeout 참조분 보존·failed/discarded는 retention 후·mark-and-sweep·삭제 전 digest 검증·doctor가 dangling reference와 orphan artifact 구분)", "네 문서 모두 기존 컨벤션 준수 — docs/adr/ADR-NNNN-<kebab>.md, 헤더(Status/Date/Round/SSOT sections affected/Tasks), 본문 Context/Decision/Consequences/Alternatives considered. 한국어 본문, 코드 식별자는 영문", "계획서와 모순되는 서술이 없다 — ADR은 계획서 해당 절을 확정·정밀화할 수는 있으나 뒤집을 수 없다", "전체 테스트 스위트 green + ruff F401,F841 clean (docs gate 포함)"]
     scope: ["docs/adr"]
     title: "M0-B ADR 4종(경량): executor 경계 · fact authority matrix · run closeout manifest 최소계약 · SQLite 물리 운영계약 — 계획서 §3-6/§5-2/§5-4/§5-5의 확정판"
-    status: "pending"
+    status: done
     severity: "major"
     origin: "plan-0.12-M0B"
   - id: fix/probe-machine-axis-hostname-drift
+    session_id: "513d1802-24e4-4adf-8ffb-a86b15e0f41d"
+    round: 2026-07-19-m0-contracts
     title: "probe fingerprint의 machine 축이 hostname('Mac.local')이라 네트워크/DHCP 변경 시 증명이 무효화되고 매번 재프로브 — 같은 marker의 안정적 host_identity(IOPlatformUUID)가 이미 신원을 담당하므로 hostname은 진단으로 강등 (E-09 계열: ambient 값을 신원 축으로 사용)"
     status: "pending"
     severity: "minor"
     origin: "dogfooding-2026-07-19"
+  - id: docs/invariants-and-terminology
+    session_id: "513d1802-24e4-4adf-8ffb-a86b15e0f41d"
+    round: 2026-07-19-m0-contracts
+    result: "docs/invariants.md(I-01~12 + E-01~09, 집·검증층 4열) · ADR-0008-terminology @ dev 2e06f71. E-불변조건 문구 표류를 기계 대조로 확인 — 계획서 §4에서 추출한 9건 전부 존재, 불일치 0. 게이트 828 green + ruff clean(lane·병합 후)"
+    accept: ["docs/invariants.md 작성 — dev_docs/0.12.0-refactor-plan.md §4 표와 proposal §3(I-01~I-12)을 권위 원천으로: 불변조건 ID / 확정 문구 / 새 구조에서의 집 / 검증층(characterization·kernel test·fault-injection 중 어디서 지켜지는지) 4열. E-01~E-09는 계획서 §4 문구를 **한 글자도 바꾸지 말고** 옮긴다(이미 여러 라운드의 리뷰로 조율된 문구). I-01~I-12는 proposal §3에서 옮기되 계획서와 충돌하면 계획서 우선", "docs/adr/ADR-0008-terminology.md 작성 — proposal §6을 권위 원천으로: 용어 축소표(기존 용어 → 채택 용어 → 폐기 사유), 역할 4개(coordinator/worker/verifier/reviewer), 실행 3범주. ruling #3(내부 canonical run, /waystone:round는 1.0까지 alias) 반영. 기존 ADR 컨벤션 준수(헤더 + Context/Decision/Consequences/Alternatives considered)", "두 문서 모두 계획서·기존 ADR과 모순되는 서술이 없다 — 확정·정밀화는 가능하나 뒤집을 수 없다", "전체 테스트 스위트 green + ruff F401,F841 clean"]
+    scope: ["docs", "docs/adr"]
+    title: "M0-B 잔여 산출물: docs/invariants.md(I-01~12 + E-01~09 확정본, 각 항목의 집·검증층 명시) · ADR-0008 terminology(용어 축소표·역할 4개·실행 3범주 확정)"
+    status: done
+    severity: "major"
+    origin: "plan-0.12-M0B"

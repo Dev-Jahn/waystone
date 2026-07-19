@@ -2,6 +2,22 @@
 
 round 단위 작업 이력이 이 파일에 축적된다. 활성 task와 의존성은 `tasks.yaml`(CLI: `waystone task`)과 생성 파일 `ROADMAP.md` 참조.
 
+## 2026-07-19-m0-contracts
+
+- **Goal**: 0.12 M0-A 마감(baseline 동결)과 M0-B 산출물 전량 착지 — ruling 6건 확정 + ADR 7종 + 불변조건 확정본.
+- **Shipped**:
+  - **M0-A 완료** — `gate/trust-baseline-tag`: **`baseline/0.12-refactor` @ 7cfecd3**(annotated). exit 3조건 충족: ⑴ 미해결 trust major 2건이 하네스 사용 표면 밖임을 **실측**(review.mode=packet · freeze sidecar 0개 · `ingest_round_binding`이 packet 분기에서 freeze glob 이전 조기 반환 · 014 경로는 `--pr` 필수) ⑵ `docs/known-issues.md`에 영향 범위·게이트 무영향 근거 문서화 ⑶ feature freeze를 tag 메시지에 선언. 게이트 828 green + ruff clean 후 부착.
+  - **ruling 6건 전부 확정** — ①배포브랜치(main=전체소스/dist=배포, M4 전환) ②**위협모델=우발적 손상만**(의도적 로컬 변조·adversarial filename·다중사용자 경계는 명시적 비보호; crafted filename 전제 finding은 REAL이어도 수용 잔여로 분류) ③round→run(내부 canonical, /round는 1.0까지 alias) ④SQLite 채택+DB는 project-local 기본·미지원 FS는 typed refusal ⑤**delivery 기본 commit**(사용자 결정 — 권고 manual에서 상향, automation level은 설정 조정·init이 묻지 않음) ⑥타 머신 resume 미지원 명시.
+  - **ADR-0002~0008** (@ cf1073c, 2e06f71) — effect commit protocol(효과 7종 표+관측채널 불가 열+recovery 결정표) · run observability & cancellation(3분리·derived health·**취소는 의도만 기록, running/alive/unknown-effect는 삭제 금지**·supervisor identity) · executor 경계 · fact authority matrix · closeout manifest(add-only CAS·자기참조 금지·**deep audit는 로컬 artifact store 요구**=사용자 결정 b) · SQLite 운영 · terminology.
+  - **`docs/invariants.md`** — I-01~12 + E-01~09 확정본(집·검증층 4열). E-불변조건 문구는 계획서에서 축자 이관, **기계 대조로 9건 전부 존재·표류 0 확인**.
+- **Gates**: 828 green + ruff clean — lane별 1회 + 병합 후 1회, 전부 main 주관측(rc 직접 캡처). **코드 변경 0건**(문서·레지스트리만).
+- **계획 r4→r5**: 외부 리뷰 3차(설계 승인, 필수 2+정밀화 8) 반영 — 수용 9/조정 1/기각 0. 신설: **§3-9 취소·정지·정리 안전 계약**(리뷰 최대 기여 — record.lock이 *우연히* 제공하던 "실행 중 cleanup 차단"이 lock 분해와 함께 사라진다는 지적), E-08 양방향 정밀화, `stalled`를 FSM state→derived health, liveness를 job 단위 계산 후 집계, progress 분모를 frozen closure로, status/watch 엄격 read-only, §3-10 process supervision·identity. **조정 1건**: M0-A 순서 — 리뷰는 `014·015 폐쇄→0.11.2→tag`를 권고했으나 리뷰어가 알 수 없던 두 사실(round-6 발산 결과, 두 결함이 PR-mode 한정이고 dogfooding은 packet mode)로 **0.11.1을 baseline으로 tag**하고 해소는 M1-B 수용 기준에 편입.
+- **신규 finding**: `fix/probe-machine-axis-hostname-drift`(minor) — probe fingerprint의 `machine` 축이 hostname(`Mac.local`)이라 네트워크/DHCP 변경 시 증명 무효화·매번 재프로브. 같은 marker에 안정적 `host_identity`(IOPlatformUUID)가 이미 존재. E-09 계열(ambient 값을 신원 축으로 사용)이나 **E-09 문구는 파일시스템 메타데이터에 한정돼 이 사례를 못 잡는다**(리뷰 패킷 R-8).
+- **조정자 실수 1건**: `git merge --squash`가 커밋 없는 lane 브랜치에 대해 **오류 없이 "no changes"로 성공** — `ls`로 확인하지 않았다면 산출물 0개인 채 "병합 완료"로 보고했을 것. 조용한 실패의 전형이며 리뷰 패킷 R-2의 실사례.
+- **SSOT**: unchanged.
+- **Review**: `docs/reviews/2026-07-19-residual-after-0.12-request.md` — **설계 공백 리뷰**(코드 리뷰 아님). 이번 세션의 실패·실수 중 0.12가 설계대로 전부 구현되어도 남는 것 8건(R-1~R-8)과 메타 질문(계획이 엔진은 촘촘히 설계했으나 조정자는 거의 설계하지 않았다 — 이것이 불변 지향점 ②와 양립하는가). 리뷰어 = chatgpt:gpt-5.6-pro(사용자 지정).
+- **Next**: M0-C characterization + porting ledger(등급 배정) + runtime-state 처분 감사 → M0 exit review → M1-A 승인. 리뷰 회신은 M0-C 착수 전 반영이 바람직(무엇을 "보존할 동작"으로 고정하느냐가 R-5·R-6과 직결).
+
 ## 2026-07-19-supersession-attribution-attempts
 
 - **Goal**: 5차 리뷰의 REAL major 2건(JW-GPT-014 merge 관측-기록 불일치 / JW-GPT-015 foreign malformed sidecar가 healthy round ingest 차단) 해소.
