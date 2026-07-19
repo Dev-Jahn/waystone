@@ -685,3 +685,22 @@ tasks:
     status: "done"
     severity: "major"
     origin: "plan-0.12-M0B"
+  - id: docs/adr-runtime-core-contracts
+    accept: ["ADR-0002-external-effect-commit-protocol.md 작성 — 계획서 §3-4를 권위 원천으로: planned→claimed→effect→observed→completed 5단계, effect 종류 7종 표(Git ref·worktree·artifact write·runner 실행·patch integration·push·GitHub marker)를 idempotency 기준/관측 방법/**관측 채널 불가 시**/retry 방식 열로, fencing+CAS correctness 규칙, '중복 실행 0'의 action_id 기반 정의, crash 후 '효과 전 사망'과 '효과 후 commit 전 사망'을 구분하는 recovery 결정표", "ADR-0003-run-observability-and-cancellation.md 작성 — 계획서 §3-8·§3-9·§3-10을 권위 원천으로: liveness/progress/current 3분리와 각각의 honest-unknown, E-08 양방향 규칙(침묵≠종료 증거 / 긍정적 종료 관측=종료 증거), stalled는 FSM state가 아닌 derived health, liveness는 action·job 단위 계산 후 run 집계, progress 분모는 frozen closure, status·watch의 엄격 read-only 계약, heartbeat는 mutable telemetry(append-only transitions 아님), 취소·quiescence·cleanup 안전 계약(running/alive/unknown-effect/cancel-pending의 worktree·ref·artifact 삭제 금지, cancel은 의도만 기록), process identity 최소 집합과 supervisor 소유, monotonic clock+boot identity", "두 문서 모두 기존 컨벤션 준수 — docs/adr/ADR-NNNN-<kebab>.md, 헤더(Status/Date/Round/SSOT sections affected/Tasks), 본문 Context/Decision/Consequences/Alternatives considered. 한국어 본문, 코드 식별자는 영문", "계획서와 모순되는 서술이 없다 — ADR은 계획서 해당 절의 내용을 확정·정밀화할 수는 있으나 뒤집을 수 없다. 계획서에서 미결로 남긴 항목은 ADR에서 결정하되 그 사실을 명시한다", "전체 테스트 스위트 green + ruff F401,F841 clean (docs gate 포함)"]
+    scope: ["docs/adr"]
+    title: "M0-B ADR 2종(무거움): ADR-0002 external effect commit protocol(효과 종류별 표+관측불가+recovery 결정표) · ADR-0003 run observability & cancellation(3분리·derived health·취소 안전계약·supervisor identity)"
+    status: "pending"
+    severity: "major"
+    origin: "plan-0.12-M0B"
+  - id: docs/adr-state-authority-contracts
+    accept: ["ADR-0004-executor-boundary.md — 계획서 §3-6 권위: executor_kind(engine/carrier/user) 소유 범위 표, run resume·actions next가 engine-owned action을 내부 소진하고 host/user action만 반환, 비차단 3분기 반환 계약(action 있음 / engine busy+poll_after_s / engine idle+typed reason)", "ADR-0005-fact-authority-matrix.md — 계획서 §5-2 권위: 'DB는 Git fact를 authoritative하게 복제하지 않는다(digest+관측시점만)' 원칙, fact별 Authority/Cache/머신간전달 표(r5에서 추가된 action 실행상태·heartbeat·process liveness·run health 4행 포함), run id 생성 규칙과 uniqueness 책임 분담", "ADR-0006-run-closeout-manifest.md — 계획서 §5-4 권위: run당 정확히 하나·게시 후 immutable·runtime lifecycle 미복제·DB dump 아님·**자기 publication commit SHA를 내용에 넣지 않음**·result SHA는 원격 도달 가능, 최소 필드 스키마, code_result_sha와 publication commit의 구분(후자는 '이 파일을 포함하는 git commit'으로 파생). **미결 항목 확정: 로컬 verifier artifact 삭제 시 manifest에는 digest만 남으며 deep audit는 로컬 artifact store를 요구한다고 정직하게 명시한다(사용자 결정 2026-07-19, 옵션 b) — 최소 criterion verdict를 manifest에 이식하지 않는다. 근거는 manifest를 DB dump로 팽창시키지 않는 것**", "ADR-0007-sqlite-operations.md — 계획서 §5-5 권위: filesystem 판정(기본 project-local .waystone/state.db, 미지원 filesystem은 typed refusal+machine-local 재배치 제안, silent fallback·무단 journal mode 강등 금지), backup(raw file copy 금지 — sqlite3 backup API·checkpoint 후 일관 backup·VACUUM INTO 중 하나), artifact GC(nonterminal 삭제 불가·published closeout 참조분 보존·failed/discarded는 retention 후·mark-and-sweep·삭제 전 digest 검증·doctor가 dangling reference와 orphan artifact 구분)", "네 문서 모두 기존 컨벤션 준수 — docs/adr/ADR-NNNN-<kebab>.md, 헤더(Status/Date/Round/SSOT sections affected/Tasks), 본문 Context/Decision/Consequences/Alternatives considered. 한국어 본문, 코드 식별자는 영문", "계획서와 모순되는 서술이 없다 — ADR은 계획서 해당 절을 확정·정밀화할 수는 있으나 뒤집을 수 없다", "전체 테스트 스위트 green + ruff F401,F841 clean (docs gate 포함)"]
+    scope: ["docs/adr"]
+    title: "M0-B ADR 4종(경량): executor 경계 · fact authority matrix · run closeout manifest 최소계약 · SQLite 물리 운영계약 — 계획서 §3-6/§5-2/§5-4/§5-5의 확정판"
+    status: "pending"
+    severity: "major"
+    origin: "plan-0.12-M0B"
+  - id: fix/probe-machine-axis-hostname-drift
+    title: "probe fingerprint의 machine 축이 hostname('Mac.local')이라 네트워크/DHCP 변경 시 증명이 무효화되고 매번 재프로브 — 같은 marker의 안정적 host_identity(IOPlatformUUID)가 이미 신원을 담당하므로 hostname은 진단으로 강등 (E-09 계열: ambient 값을 신원 축으로 사용)"
+    status: "pending"
+    severity: "minor"
+    origin: "dogfooding-2026-07-19"
