@@ -168,3 +168,24 @@ dispatch 경로(`scripts/delegate.py` — packet 조립 :544-592, TASK_BLOCK 렌
    **신규** 유출 0)는 성립하며, WS-GPT-101 blocker는 이 테스트의 착지로 폐쇄된다.
 3. **정합성.** 이 처분은 §2(known-debt 대비 신규 위반 0)·§3(M1-A 순수 기계 — 부채 수리 불허)
    의 기존 기계를 그대로 적용한 것이다. M1-A에서 이 부채를 수리하는 것 역시 불허된다.
+
+## Amendment 2 — Addendum 2 (2026-07-20) — 목록 폐쇄 정정과 보장 범위 명확화
+
+리뷰 round 2026-07-20-review-remediation의 finding 2건(WS-GPT-301·302, 검증 후 minor)을
+정정한다. 두 건 모두 문서 결함이며 M1-A의 성격·게이트·착수 승인을 바꾸지 않는다.
+
+1. **E-08 known-debt의 카테고리 폐쇄 (WS-GPT-301 정정).** §1 첫 항목의 행 나열
+   (#473/#510/#516)은 불완전 전사였다. M1-A 시점에 존재가 알려진 E-08 반-계약 suite 고정의
+   **완전한 집합**은 `docs/traceability-matrix.md`의 "취소·cleanup 역-계약 legacy test" 절과
+   `docs/promoted-contracts.md`의 "unsafe discard·cleanup characterization" 명시적 비승격군이
+   동일하게 열거하는 **7행**(#473·#510·#516·#517·#518·#533·#537)이다. §1의 E-08 항목은 이 두
+   열거를 참조하는 카테고리 폐쇄로 읽는다. §1 세 번째 항목("Legacy reference가 없는 신규 계약
+   의무" 절 참조)은 그 헤더 범위상 legacy reference를 **가진** 이들 행을 포괄하지 않았음을
+   인정한다 — 이 Addendum이 그 간극을 닫는다. 해소 소유(재구축 마일스톤)는 불변이다.
+2. **I-10 "신규 유출 0" 보장 범위 (WS-GPT-302 정정).** Addendum §2의 보장은 **코드 유래**
+   신규 투영 표면에 대한 것이다 — 방어 주체는 exact-pin(TASK_BLOCK 전행 일치 + rendered
+   prompt 전문 oracle + template SHA-256)이며, 부재 단언은 fixture 범위의 보조 검사다.
+   운영자가 공급하는 `routing_note` **값 내용**을 통한 문자열 유입은 별개 채널로, §1이 pin한
+   routing_note 부채의 일부이며 그 제약(값 검증 또는 투영 자체의 제거)은 M1-B
+   `fix/delegate-prompt-i10-surface-strip`이 소유한다. M1-A에서의 값 검증 추가는 동작 변경
+   이므로 §3에 따라 불허된다.
