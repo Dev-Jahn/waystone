@@ -531,3 +531,7 @@ tasks:
     title: "M1-B exit 검증: 단일 run 완주(fixture runner+실 backend smoke)·effect별 crash recovery·fault fixture 8건·PC 귀속표(M1-B분) green·legacy suite green·network-resilience 기질 S1-S3·JW-GPT-014/015 처분 기록 — m1b-slice-plan §6"
     status: "pending"
     deps: ["feat/run-cli-bridge", "feat/review-runs-uuid-owner-directory", "feat/run-lease-fencing"]
+  - id: chore/profile-v1-schema-runtime-drift
+    title: "templates/profile-schema.json과 legacy delegate validator 간 기존 불일치 기록·정합: unknown top-level field 허용 여부, whitespace-only use_for, generic entry 허용 위치/값, arbitrary backend schema vs 실제 runner token 지원 범위 — 신규 profile_v1 adapter는 fail-closed를 택함(m1b-domain 보고 ⑤1), M1-C cut-over 특성화 시 대조 필요"
+    status: "pending"
+    deps: ["feat/run-cli-bridge"]
