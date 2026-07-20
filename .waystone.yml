@@ -19,4 +19,4 @@ delegation:
     - uv sync --script scripts/tests/run_tests.py --locked
     - uv tool run ruff@0.15.22 --version
 state:
-  last_round_commit: ad26225341e993cecb3dfc705bdda6ce88e3ff18
+  last_round_commit: 73789f9fd2a8bb829a36169d46137f173df4f52a

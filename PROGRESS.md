@@ -2,6 +2,25 @@
 
 round 단위 작업 이력이 이 파일에 축적된다. 활성 task와 의존성은 `tasks.yaml`(CLI: `waystone task`)과 생성 파일 `ROADMAP.md` 참조.
 
+## 2026-07-20-m1a-split
+
+- **Goal**: remediation packet의 codex ultra 리뷰 처리(6 finding) → 수리 wave w5 → **M1-A 기계 분할 전체 집행·exit 충족**. main은 관제탑 + ADR 정정 직접 집행.
+- **리뷰 처리** (round 2026-07-20-review-remediation packet 회신): codex ultra 1b/5M → **opus verifier 6기 반증 후 blocker 0 생존, 2M/4m 확정** — 301 blocker 귀결 기각(게이트 성립, M1-A 승인 유지·전사 누락만 실재), 302 major 기각(위협 혼동 — exact-pin이 코드 유래 신규 투영을 실방어함을 역실험 입증), 303 fail-open 기각(판정 경로 fail-closed 입증)→위생 minor, 304② **수리 회귀 REAL**·① 기각, 305 REAL(신규 인접), 306 실재·PC-31 과대→minor. 문서 2건 main 직접(ADR-0014 **Amendment 2 Addendum 2**: E-08 7행 카테고리 폐쇄 + I-10 보장 범위 명문화, 214a6fc). triage 결속 99d7730.
+- **w5 수리 wave** (codex ultra 3기): `fix/linked-read-selector-init-gate`(13587b4, ruling: 명시 root=자체 초기화) · `fix/review-binding-writer-identity`(1028217, typed fail-closed) · `fix/sunset-live-profile-overreach`+`fix/worktrees-cache-ancestor-symlink`(568eebc, live 제외 1행 + detector 조상 lstat·_mkdir_or_refuse owned_root containment 2겹). full gate 838 rc=0. 부수 교훈: 병렬 기체 공용 /tmp/suite.log 인용 오염 → 기체별 고유 로그 경로 강제.
+- **M1-A 기계 분할** (5기 순차·병렬, 전 기 [m1a-move]/[m1a-adapter] 커밋 분리 + source-identical 기계 증명 + suite 838 green + front-door byte-identity):
+  - `chore/m1a-suite-manifest-pin` — test-ID 838 manifest(f513a4e, 재고정 c6ba063) · `docs/m1a-mechanical-split-plan` — 분해 계획(91b008c)
+  - `chore/m1a-package-skeleton` — waystone/ 골격 + dispatcher→cli(b0a9283, 21/21)
+  - `chore/m1a-core-project-split` — common.py 84 선언→core/project/adapters.git + 102-name shim(_CommonShim monkeypatch bridge·import-shadow 보존, c597b6b)
+  - `chore/m1a-runs-move` — delegate.py 3916줄→runs(aed8b3c, 160/160·234-name bridge·I-10 oracle 전후 green; git 헬퍼 정렬은 의미 차이로 정당 거절→M1-B 후보)
+  - `chore/m1a-registry-move` — tasks.py→project/tasks_cli(ced172e, 32/32·49-name)
+  - `chore/m1a-test-suite-split` — 21.8k줄→13 모듈+support.py, 집계 adapter(41e315e, 84 클래스/838 ID 각 1회)
+- **M1-A exit 판정 (main): 충족** — ① 분할 5/5 ② core 상방 import 0(최종 상태 재검) ③ manifest 838 delta 0 + full gate 838 rc=0(병합 후 main 실행) ④ known-debt 대비 신규 위반 0(감시 테스트 green) ⑤ front door 단계별 byte-identity.
+- **Gates**: 수확별 표적 게이트 rc=0 ×9 + full gate rc=0 ×3(w5 마감·m1a 병합·시퀀스 중간). 병렬 hot-file 충돌 0.
+- **SSOT**: unchanged (views 재생성).
+- **Decisions pending**: decision/legacy-settlement-additional-cohort(minor, 사용자).
+- **Review**: requested (docs/reviews/2026-07-20-m1a-split-request.md).
+- **Next**: M1-B 착수 준비 — vertical slice 분해(편입 예약: delegate-prompt-i10-surface-strip·review-runs-uuid-owner-directory·#014/#015 fixture·ADR-0013 fault 3건·git 헬퍼 정렬).
+
 ## 2026-07-20-review-remediation
 
 - **Goal**: 두 round packet(fleet-fix-wave·ruling-execution)의 codex ultra 적대 리뷰 회신 전량 처리(사용자 지시: 리뷰어를 chatgpt→codex ultra로 대체) + 수리 wave w4 + M1-A 착수 판정. main은 관제탑(triage·인수·ADR·머지·게이트).

@@ -331,65 +331,96 @@ tasks:
     severity: "major"
     origin: "review-2026-07-20-fleet-fix-wave"
   - id: chore/m1a-suite-manifest-pin
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-m1a-split
     result: "docs/m1a-suite-manifest.txt — AST 전수 830 = full gate 실행 계수 830 일치, approved-diffs 절 포함 — dev HEAD"
     title: "M1-A 착수 manifest: 시작 commit의 suite test-ID 전수(830)와 계수를 docs/m1a-suite-manifest.txt로 pin — ADR-0014 Amendment 2 §4(suite identity 고정), 이후 suite 변경은 test-ID 보존 이동 또는 main 승인 차이 기록만 허용"
-    status: "done"
+    status: done
   - id: docs/m1a-mechanical-split-plan
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-m1a-split
     result: "dev_docs/m1a-split-plan.md — 인벤토리·목표 배치·커밋 규율([m1a-move]/[m1a-adapter]·본문 diff 0·debt 수리 금지)·테스트 ID-보존 분할·wave 5-task 분해(의존 체인)·exit 4항·실행 시점(리뷰 triage 후) 확정"
     title: "M1-A 기계 분할 분해 계획: scripts/*.py 모놀리스의 분할 단위·이동 매핑·검증 절차 확정(동작 무변경, ADR-0014 순수 기계 ruling) + PC 마일스톤 귀속표 — main 설계 작업"
-    status: "done"
+    status: done
   - id: chore/m1a-package-skeleton
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-m1a-split
+    result: "골격+dispatcher 이동 완료 — 함수 21/21 동일 증명·front-door byte-identical·suite 838 rc=0 — squash of 8d3f34e+0ad87b3"
     title: "M1-A: waystone/ package 골격+composition root 신설, scripts/waystone.py dispatch를 waystone.cli로 이식, bin 진입점 전환 — 동작 무변경, [m1a-move]/[m1a-adapter] 커밋 분리"
-    status: "pending"
+    status: done
   - id: chore/m1a-core-project-split
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-m1a-split
+    result: "84 선언 source-identical 분배 + 102-name shim(monkeypatch bridge·import-shadow 보존) — core 상방 import 0, byte-identical smoke, suite 838 rc=0 — squash of 0346839+d64bea0"
     title: "M1-A: common.py 분해 이동(core=오류·fs·lock·json/yaml 기저, project=root·profile·sunset detector, adapters.git=git probe·worktree) + 잔류 모듈 import adapter 커밋 — 본문 diff 0"
-    status: "pending"
+    status: done
     deps: ["chore/m1a-package-skeleton"]
   - id: chore/m1a-registry-move
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-m1a-split
+    result: "tasks.py 이동 — 32/32 동일·49-name bridge·runpy/front-door byte-identical·suite 838 rc=0 — squash of 2b2d8ad+e7da20e"
     title: "M1-A: tasks.py를 waystone/project로 이동(round text-surgery 의존 경계 유지) — 본문 diff 0"
-    status: "pending"
+    status: done
     deps: ["chore/m1a-core-project-split"]
   - id: chore/m1a-runs-move
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-m1a-split
+    result: "delegate 3916줄 이동 — 160/160 동일·234-name bridge 전수 증명·I-10 oracle 전후 green·byte-identical smoke·suite 838 rc=0. git 헬퍼 추출은 의미 차이로 정당 거절(M1-B 정렬 후보) — squash of c80feba+0876a80"
     title: "M1-A: delegate.py를 waystone/runs로 이동 + git 헬퍼 adapters 정렬 — 내부 재설계 0, I-10 특성화 oracle green 유지"
-    status: "pending"
+    status: done
     deps: ["chore/m1a-core-project-split"]
   - id: chore/m1a-test-suite-split
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-m1a-split
+    result: "84 클래스/838 ID를 13 모듈+support.py로 source-identical 분할, 집계 adapter가 선택자·__main__ identity 유지 — manifest delta 0, full suite 838 rc=0 ×2(+머지 후 main 재게이트) — squash of a1b1cf5..dc9d3da"
     title: "M1-A: run_tests.py(21.8k줄/830)를 클러스터별 test_<area>.py로 ID-보존 분할, run_tests.py는 집계 진입점+기존 CLI 인자 계약 유지 — manifest 830 전수 green"
-    status: "pending"
+    status: done
     deps: ["chore/m1a-registry-move", "chore/m1a-runs-move"]
   - id: docs/adr-0014-e08-debt-closure
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-m1a-split
     result: "Amendment 2 Addendum 2 §1 — E-08 완전 집합=7행(matrix 역계약 절·promoted 비승격군 동일 열거) 카테고리 폐쇄, 오참조 간극 인정·해소, 소유 불변 — main 직접"
     title: "Amendment 2 §1의 E-08 known-debt 항목을 카테고리 폐쇄로 정정: #473/#510/#516만 열거+오참조(신규 의무 절은 legacy reference 부재 항목 전용)로 #517/#518/#533/#537 전사 누락 — matrix 역계약 절·promoted 'unsafe discard·cleanup' 비승격군 참조로 목록=완전 등가 복원 (WS-GPT-301, verifier blocker→minor: exit ② 게이트는 성립, M1-A 승인 유지)"
-    status: "done"
+    status: done
     severity: "minor"
     origin: "review-2026-07-20-review-remediation"
   - id: docs/adr-0014-addendum-i10-value-clarify
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-m1a-split
     result: "Amendment 2 Addendum 2 §2 — 보장=코드 유래 투영 표면(exact-pin 방어), routing_note 값 채널=pin 부채 일부로 M1-B strip task 소유 명시(task notes 갱신 포함) — main 직접"
     title: "Addendum §2에 보장 범위 1문장 명확화: 신규 유출 0 = 코드 유래 투영 표면(exact-pin이 방어), routing_note 값 내용은 pin된 부채로 M1-B 수리 소유 — 값 채널을 M1-B strip task 범위에 명시 (WS-GPT-302, verifier major 기각→minor 잔여: 위협 혼동, exact-pin이 코드 유래 신규 투영을 실제 방어함을 역실험 입증)"
-    status: "done"
+    status: done
     severity: "minor"
     origin: "review-2026-07-20-review-remediation"
   - id: fix/review-binding-writer-identity
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-m1a-split
     result: "writer typed fail-closed(비정규 형제 지목)+path-B identity 필터(7행) — 침묵 성공 제거, 판정 경로 일관화, RED 3종→GREEN, 회귀 4종 불변 — squash of 58cdce8"
     title: "binding writer·digest-reader에 canonical identity 규율: writer가 비정규 파일을 조용히 재사용+canonical 미생성+성공 출력(wedged round), path-B digest lookup도 identity 미검증 — 판정 경로는 fail-closed 확인돼 위생/방어심층 (WS-GPT-303, verifier major→minor: fail-open 기각, 침묵 성공은 constitution 위반)"
-    status: "done"
+    status: done
     severity: "minor"
     origin: "review-2026-07-20-review-remediation"
   - id: fix/sunset-live-profile-overreach
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-m1a-split
     result: "비교 집합에서 live 제거(1행) — 수리 회귀 해소, oracle 반전+missing-live 수용 테스트, preserved 분기 거부 불변 — dev 568eebc (squash of 0746bc5)"
     title: "sunset detector 비교 집합에서 live profile 제거(preserved끼리만 비교) + 테스트 oracle 반전 + missing-live 수용 테스트: live를 offender로 삼는 과잉이 .pre-0.9 잔재 머신의 전 프로젝트를 구조적 차단(207 수리 회귀 — 처방이 증거를 과확장, 검증자 재현) (WS-GPT-304 ②, verifier REAL major; ① missing-live 미완료 주장은 sunset이 의무 폐지로 기각)"
-    status: "done"
+    status: done
     severity: "major"
     origin: "review-2026-07-20-review-remediation"
   - id: fix/worktrees-cache-ancestor-symlink
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-m1a-split
     result: "2겹 방어: detector 조상 lstat(machine root 하위, 첫 위반=offender) + _mkdir_or_refuse owned_root containment·no-follow — 호출처 3/3 검증, 독립 방어 각각 증명, RED(외부 쓰기)→GREEN — dev 568eebc (squash of 704eb0f)"
     title: "engine-owned 조상 symlink 방어 2겹: detector가 cache·cache/worktrees 조상을 lstat(machine root까지, 첫 symlink/non-dir을 offender로) + _mkdir_or_refuse에 no-follow 조상 검증·containment(ADR-0013:76-77) — 현행은 leaf만 검사해 외부 쓰기 재현됨 (WS-GPT-305, verifier REAL major, 208의 미완 아닌 신규 인접)"
-    status: "done"
+    status: done
     severity: "major"
     origin: "review-2026-07-20-review-remediation"
   - id: fix/linked-read-selector-init-gate
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-m1a-split
     result: "정규화 전 require_initialized_root 게이트(1행+테스트) — 조용한 권위 치환·canonical lock 차단, ruling(명시 root=자체 초기화) 집행, suite 831 rc=0 main 재확인 — squash of 9d7edaa"
     title: "명시 root read의 active selector 초기화 검증: 미초기화 linked 경로가 canonical 동일 상대경로 프로젝트로 조용히 치환(권위 치환) — 정규화 전 selector 자체의 find_project_root==root 검증, 실패 시 typed 거부; ruling: 명시 root = 그 경로 자체가 초기화된 프로젝트(canonical 정규화는 litter 회피 redirect일 뿐) (WS-GPT-306, verifier PARTIAL major→minor: PC-31 no-state는 미위반)"
-    status: "done"
+    status: done
     severity: "minor"
     origin: "review-2026-07-20-review-remediation"
