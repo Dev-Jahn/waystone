@@ -581,3 +581,8 @@ tasks:
     status: "pending"
     severity: "minor"
     deps: ["feat/run-supervisor-identity"]
+  - id: fix/store-canceled-run-child-refusal
+    title: "RunStore.create_action의 canceled run child 거부를 store 전역 FSM 불변조건으로 승격: 현재 cancel 모듈이 entry/WAI/completion에서 감지·보상하나 store 자체는 canceled run에 새 child action 생성을 거부하지 않음 — 다른 생성 경로가 같은 방어를 얻도록 (m1b-cancel 보고 ⑤2)"
+    status: "pending"
+    severity: "minor"
+    deps: ["feat/run-store-kernel"]

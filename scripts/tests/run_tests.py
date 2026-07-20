@@ -98,6 +98,9 @@ from test_project import (
 from test_release import (
     ReleaseToMainTests,
 )
+from test_run_cancel import (
+    RunCancelTests,
+)
 from test_run_domain import (
     RunDomainTests,
 )
@@ -222,6 +225,7 @@ _TEST_CLASSES = (
     LaneTests,
     RoundCloseTests,
     ReleaseToMainTests,
+    RunCancelTests,
     RunDomainTests,
     RunEffectTests,
     RunLeaseTests,
