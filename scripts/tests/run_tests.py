@@ -16140,8 +16140,12 @@ class DelegateVerifyTests(unittest.TestCase):
         }
         mutation = os.environ.get("WAYSTONE_TEST_NOOP_HOOK")
         mutation_seen = False
+        uv_env = os.environ.copy()
+        uv_env.pop("FORCE_COLOR", None)
+        uv_env.pop("CLICOLOR_FORCE", None)
+        uv_env["NO_COLOR"] = "1"
         uv_cache_dir = subprocess.run(
-            ["uv", "cache", "dir"], capture_output=True, text=True, check=True,
+            ["uv", "cache", "dir"], capture_output=True, text=True, check=True, env=uv_env,
         ).stdout.strip()
         self.assertTrue(Path(uv_cache_dir).is_absolute())
 
