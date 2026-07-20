@@ -60,6 +60,9 @@ CODEX_BOT = "chatgpt-codex-connector[bot]"  # REST `user.login` form
 INBOX = Path("/tmp/review.md")  # fixed drop-file: user saves the reviewer reply here, byte-exact
 ROUND_REQUEST_BINDING_V1_SCHEMA = "waystone-round-request-binding-1"
 ROUND_REQUEST_BINDING_SCHEMA = "waystone-round-request-binding-2"
+LEGACY_REVIEW_SETTLEMENT_SCHEMA = "waystone-legacy-review-settlement-1"
+LEGACY_REVIEW_SETTLEMENT_DISPOSITION = "archived-unverifiable"
+LEGACY_REVIEW_SETTLEMENT_DIR = "legacy-settlements"
 # 0.10.0 emitted genuine v1 bindings on this date. Only later rounds are digest-capable.
 # This leaves a finite downgrade window for round ids on/before the cutoff: their v2 sidecars can
 # still be rewritten as v1 because same-day genuine v1 evidence is indistinguishable. Settling
@@ -74,6 +77,9 @@ CYCLE_VERSION_TIE_REASON = "v1-v2-timestamp-tie"
 CYCLE_DIGEST_ERA_V1_REASON = "digest-era-v1-freeze"
 _ROUND_REQUEST_BINDING_FILE_RE = re.compile(
     r"^(?P<round_id>.+)-request\.binding(?:-(?P<sequence>\d+))?\.json$")
+_LEGACY_REVIEW_SETTLEMENT_FILE_RE = re.compile(
+    r"^(?P<round_id>\d{4}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]*)"
+    r"(?:\.(?P<sequence>[1-9]\d*))?\.json$")
 _PR_FREEZE_BINDING_FILE_RE = re.compile(
     r"^(?P<round_id>.+)-freeze-(?P<cycle>[1-9]\d*)\.binding"
     r"(?:-(?P<sequence>[1-9]\d*))?\.json$")
@@ -524,6 +530,122 @@ def latest_round_request_binding(
     except WorkflowError:
         return latest, None
     return latest, row
+
+
+def legacy_review_settlement_identity(path: Path) -> tuple[str, int] | None:
+    """Return the round and filename sequence without treating either as settlement proof."""
+    match = _LEGACY_REVIEW_SETTLEMENT_FILE_RE.fullmatch(Path(path).name)
+    if match is None or _round_request_binding_date(match.group("round_id")) is None:
+        return None
+    return match.group("round_id"), int(match.group("sequence") or 1)
+
+
+def _read_json_without_duplicate_fields(path: Path) -> object:
+    def reject_duplicate_fields(pairs: list[tuple[str, object]]) -> dict:
+        data = {}
+        for key, value in pairs:
+            if key in data:
+                raise ValueError(f"duplicate field {key}")
+            data[key] = value
+        return data
+
+    return json.loads(
+        Path(path).read_text(encoding="utf-8"),
+        object_pairs_hook=reject_duplicate_fields)
+
+
+def read_legacy_review_settlement(
+        path: Path, *, expected_round_id: str | None = None,
+) -> dict:
+    """Load one archived-unverifiable decision without accepting schema drift or ambiguity."""
+    identity = legacy_review_settlement_identity(path)
+    if identity is None or Path(path).name != f"{identity[0]}.json":
+        raise WorkflowError(f"corrupt legacy review settlement {path}: invalid filename")
+
+    try:
+        data = _read_json_without_duplicate_fields(path)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
+        raise WorkflowError(
+            f"corrupt legacy review settlement {path}: {type(e).__name__}") from e
+    fields = {
+        "schema", "disposition", "reason", "round_id", "request_sha256",
+        "binding_sha256", "feedback_sha256", "decision_source", "rationale",
+    }
+    if (not isinstance(data, dict) or set(data) != fields
+            or data.get("schema") != LEGACY_REVIEW_SETTLEMENT_SCHEMA
+            or data.get("disposition") != LEGACY_REVIEW_SETTLEMENT_DISPOSITION
+            or _round_request_binding_date(data.get("round_id")) is None
+            or data.get("round_id") != identity[0]
+            or not all(_is_sha256_digest(data.get(field)) for field in (
+                "request_sha256", "binding_sha256", "feedback_sha256"))
+            or not all(isinstance(data.get(field), str) and data[field].strip()
+                       for field in ("reason", "decision_source", "rationale"))):
+        raise WorkflowError(
+            f"corrupt legacy review settlement {path}: invalid schema or fields")
+    if expected_round_id is not None and data["round_id"] != expected_round_id:
+        raise WorkflowError(
+            f"corrupt legacy review settlement {path}: round_id {data['round_id']!r} "
+            f"does not match {expected_round_id!r}")
+    return data
+
+
+def _legacy_review_settlements(directory: Path) -> dict[str, dict | None]:
+    """Read canonical markers by round; duplicates and damaged rows isolate fail-closed."""
+    marker_dir = Path(directory) / LEGACY_REVIEW_SETTLEMENT_DIR
+    if not marker_dir.is_dir():
+        return {}
+    grouped: dict[str, list[Path]] = {}
+    unassociated_damage = False
+    for path in sorted(marker_dir.glob("*.json")):
+        identity = legacy_review_settlement_identity(path)
+        claimed_round = None
+        try:
+            candidate = _read_json_without_duplicate_fields(path)
+            if (isinstance(candidate, dict)
+                    and _round_request_binding_date(candidate.get("round_id")) is not None):
+                claimed_round = candidate["round_id"]
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            pass
+        round_ids = {value for value in (
+            identity[0] if identity is not None else None, claimed_round) if value is not None}
+        if not round_ids:
+            unassociated_damage = True
+        for round_id in round_ids:
+            grouped.setdefault(round_id, []).append(path)
+    settlements: dict[str, dict | None] = {}
+    for round_id, paths in grouped.items():
+        if unassociated_damage or len(paths) != 1:
+            settlements[round_id] = None
+            continue
+        try:
+            settlements[round_id] = read_legacy_review_settlement(
+                paths[0], expected_round_id=round_id)
+        except WorkflowError:
+            settlements[round_id] = None
+    return settlements
+
+
+def _file_sha256(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _legacy_review_settlement_matches(
+        marker: dict | None, *, request: Path | None, binding_path: Path | None,
+        feedback: Path, binding: dict | None,
+) -> bool:
+    """Bind a disposition to the three current raw artifacts, never to reconstructed facts."""
+    if marker is None or request is None or binding_path is None or binding is None:
+        return False
+    return (
+        marker["request_sha256"] == _file_sha256(request)
+        and marker["binding_sha256"] == _file_sha256(binding_path)
+        and marker["feedback_sha256"] == _file_sha256(feedback)
+    )
 
 
 def _review_cycle_row_version(row: dict) -> int:
@@ -994,22 +1116,30 @@ def _packet_projection_reason(
     return None
 
 
-def pending_reviews(root: Path, *, now: datetime | None = None) -> list[dict]:
-    """Derive packet requests whose latest binding has no matching ingested feedback."""
+def packet_review_dispositions(
+        root: Path, *, now: datetime | None = None,
+) -> dict[str, list[dict]]:
+    """Derive actionable waits and separately settled, unverifiable historical receipts."""
     cfg = load_config(root)
     directory = Path(root) / cfg["reviews_dir"]
     if not directory.is_dir():
-        return []
+        return {"actionable": [], "archived_unverifiable": []}
     local_now = now or datetime.now().astimezone()
     local_timezone = local_now.tzinfo if now is not None else None
     if local_now.tzinfo is None or local_now.utcoffset() is None:
         raise WorkflowError("pending review age requires a timezone-aware local clock")
 
-    pending: list[dict] = []
-    for request in sorted(directory.glob("*-request.md")):
-        round_id = request.name.removesuffix("-request.md")
+    settlements = _legacy_review_settlements(directory)
+    requests = {
+        path.name.removesuffix("-request.md"): path
+        for path in sorted(directory.glob("*-request.md"))
+    }
+    actionable: list[dict] = []
+    archived: list[dict] = []
+    for round_id in sorted(set(requests) | set(settlements)):
+        request = requests.get(round_id)
         if _round_request_binding_date(round_id) is None:
-            pending.append({
+            actionable.append({
                 "round_id": round_id, "age_days": None, "target_sha": None,
                 "reviewers": [], "reason": "invalid-round-id",
             })
@@ -1032,7 +1162,9 @@ def pending_reviews(root: Path, *, now: datetime | None = None) -> list[dict]:
         metadata = read_feedback_reply_metadata(
             feedback, expected_round_id=round_id, binding=binding,
             request_generation_dir=directory)
-        projection_reason = _packet_projection_reason(root, round_id, request, binding)
+        projection_reason = (
+            _packet_projection_reason(root, round_id, request, binding)
+            if request is not None else "request-unavailable")
         # Complete = an ingested reply whose declared review-target matches the LATEST binding
         # and whose two generation digests match, with both on-disk projections reproduced from
         # that binding. Pre-digest history retains only the old target contract, labeled explicitly
@@ -1084,15 +1216,41 @@ def pending_reviews(root: Path, *, now: datetime | None = None) -> list[dict]:
                 requested_date = datetime.strptime(round_id[:10], "%Y-%m-%d").date()
             except ValueError:
                 pass
-        pending.append({
+        row = {
             "round_id": round_id,
             "age_days": ((local_now.date() - requested_date).days
                          if requested_date is not None else None),
             "target_sha": binding["target_sha"] if binding is not None else None,
             "reviewers": list(binding["reviewers"]) if binding is not None else [],
             "reason": reason,
-        })
-    return pending
+        }
+        marker = settlements.get(round_id)
+        if _legacy_review_settlement_matches(
+                marker, request=request, binding_path=binding_path,
+                feedback=feedback, binding=binding):
+            archived.append({
+                **row,
+                "disposition": marker["disposition"],
+                "reason": marker["reason"],
+                "underlying_pending_reason": row["reason"],
+                "decision_source": marker["decision_source"],
+                "rationale": marker["rationale"],
+            })
+        else:
+            actionable.append(row)
+    return {"actionable": actionable, "archived_unverifiable": archived}
+
+
+def pending_reviews(root: Path, *, now: datetime | None = None) -> list[dict]:
+    """Return only packet requests that still require actionable reviewer feedback."""
+    return packet_review_dispositions(root, now=now)["actionable"]
+
+
+def archived_unverifiable_reviews(
+        root: Path, *, now: datetime | None = None,
+) -> list[dict]:
+    """Return exact-bound historical receipts settled without claiming completion."""
+    return packet_review_dispositions(root, now=now)["archived_unverifiable"]
 
 
 def format_pending_review(row: dict) -> str:
@@ -1101,6 +1259,12 @@ def format_pending_review(row: dict) -> str:
     reviewers = ", ".join(row.get("reviewers") or []) or "(binding unavailable)"
     return (f"round {row['round_id']} | age {age} | target {target} | "
             f"reviewers {reviewers} | reason {row.get('reason') or 'unknown'}")
+
+
+def format_archived_unverifiable_review(row: dict) -> str:
+    return (f"round {row['round_id']} | disposition {row['disposition']} | "
+            f"reason {row.get('reason') or 'unknown'} | "
+            f"underlying {row.get('underlying_pending_reason') or 'unknown'}")
 
 
 def pr_freeze_binding_identity(path: Path) -> tuple[str, int, int] | None:
@@ -2542,18 +2706,28 @@ def status(root: Path, pr: int | None) -> int:
         print("no reviews dir yet")
         return 0
     reqs = sorted(p.stem[: -len("-request")] for p in rdir.glob("*-request.md"))
-    awaiting = pending_reviews(root)
-    print(f"packet reviews: {len(reqs)} requested, {len(awaiting)} awaiting feedback")
+    dispositions = packet_review_dispositions(root)
+    awaiting = dispositions["actionable"]
+    archived = dispositions["archived_unverifiable"]
+    print(f"packet reviews: {len(reqs)} requested, {len(awaiting)} actionable awaiting "
+          f"feedback, {len(archived)} archived-unverifiable")
     for row in awaiting:
-        print(f"  pending: {row['round_id']}")
+        print(f"  pending: {format_pending_review(row)}")
+    for row in archived:
+        print(f"  archived: {format_archived_unverifiable_review(row)}")
     return 0
 
 
 def pending(root: Path) -> int:
-    rows = pending_reviews(root)
-    print(f"pending packet reviews: {len(rows)}")
-    for row in rows:
+    dispositions = packet_review_dispositions(root)
+    actionable = dispositions["actionable"]
+    archived = dispositions["archived_unverifiable"]
+    print(f"pending packet reviews: {len(actionable)} actionable, "
+          f"{len(archived)} archived-unverifiable")
+    for row in actionable:
         print(f"  {format_pending_review(row)}")
+    for row in archived:
+        print(f"  {format_archived_unverifiable_review(row)}")
     return 0
 
 

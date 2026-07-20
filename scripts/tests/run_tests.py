@@ -5590,6 +5590,39 @@ class PendingReviewTests(unittest.TestCase):
                 f"review-target: {base[:12]}-{target[:12]}\n"
                 f"{digest_line}\nreviewed\n").encode()
 
+    def _legacy_feedback(self, root: Path, round_id: str) -> Path:
+        feedback = root / "docs" / "reviews" / f"{round_id}-feedback.md"
+        feedback.write_bytes(b"round: legacy\n\n---\n\npre-canonical review receipt\n")
+        return feedback
+
+    def _settlement(self, root: Path, round_id: str, *, suffix: str = "") -> Path:
+        directory = root / "docs" / "reviews"
+        binding_path, binding = review.latest_round_request_binding(
+            sorted(directory.glob(f"{round_id}-request.binding*.json")),
+            expected_round_id=round_id)
+        self.assertIsNotNone(binding)
+        settlement_dir = directory / "legacy-settlements"
+        settlement_dir.mkdir(parents=True, exist_ok=True)
+
+        def digest(path: Path) -> str:
+            return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+        path = settlement_dir / f"{round_id}{suffix}.json"
+        path.write_text(_json.dumps({
+            "schema": "waystone-legacy-review-settlement-1",
+            "disposition": "archived-unverifiable",
+            "reason": "pre-canonical-feedback-envelope",
+            "round_id": round_id,
+            "request_sha256": digest(directory / f"{round_id}-request.md"),
+            "binding_sha256": digest(binding_path),
+            "feedback_sha256": digest(directory / f"{round_id}-feedback.md"),
+            "decision_source": (
+                "decision/pre-header-feedback-settlement-method ruling 2026-07-20"),
+            "rationale": (
+                "The historical receipt is no longer actionable without claiming completion."),
+        }, sort_keys=True) + "\n")
+        return path
+
     def test_pending_is_derived_from_request_and_ingest_header_not_file_existence(self):
         from datetime import datetime, timedelta, timezone
 
@@ -5612,6 +5645,168 @@ class PendingReviewTests(unittest.TestCase):
             self.assertEqual(pending[0]["age_days"], 1)
             self.assertEqual(pending[0]["target_sha"], target)
             self.assertEqual(pending[0]["reviewers"], ["gpt-5.6-sol"])
+
+    def test_exact_legacy_settlement_archives_without_synthesizing_completion(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self._root(d)
+            round_id = "2026-01-01-archived"
+            binding_path = self._request(root, round_id, "a" * 40)
+            feedback = self._legacy_feedback(root, round_id)
+            self._settlement(root, round_id)
+
+            self.assertEqual(review.pending_reviews(root), [])
+            archived = review.archived_unverifiable_reviews(root)
+            self.assertEqual(
+                [(row["round_id"], row["disposition"], row["reason"]) for row in archived],
+                [(round_id, "archived-unverifiable", "pre-canonical-feedback-envelope")])
+
+            metadata = review.read_feedback_reply_metadata(
+                feedback, expected_round_id=round_id,
+                binding=review.read_round_request_binding(binding_path))
+            self.assertIsNone(metadata["review_target_matches"])
+            self.assertEqual(
+                metadata["rendered_request_coverage_reason"], "feedback-receipt-corrupt")
+
+    def test_corrupt_unknown_field_and_duplicate_settlements_fail_closed(self):
+        cases = (
+            "corrupt", "unknown-field", "invalid-digest", "duplicate-field",
+            "duplicate-marker", "duplicate-marker-noncanonical",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as d:
+                root = self._root(d)
+                round_id = "2026-01-01-invalid-settlement"
+                self._request(root, round_id, "a" * 40)
+                self._legacy_feedback(root, round_id)
+                marker = self._settlement(root, round_id)
+                if case == "corrupt":
+                    marker.write_text('{"schema":')
+                elif case == "unknown-field":
+                    row = _json.loads(marker.read_text())
+                    row["unexpected"] = True
+                    marker.write_text(_json.dumps(row) + "\n")
+                elif case == "invalid-digest":
+                    row = _json.loads(marker.read_text())
+                    row["feedback_sha256"] = "sha256:not-a-digest"
+                    marker.write_text(_json.dumps(row) + "\n")
+                elif case == "duplicate-field":
+                    marker.write_text(marker.read_text().replace(
+                        '"schema":',
+                        '"schema": "waystone-legacy-review-settlement-1", "schema":',
+                        1))
+                else:
+                    suffix = ".02" if case == "duplicate-marker-noncanonical" else ".2"
+                    duplicate = marker.with_name(f"{round_id}{suffix}.json")
+                    duplicate.write_bytes(marker.read_bytes())
+
+                self.assertEqual(
+                    [row["round_id"] for row in review.pending_reviews(root)], [round_id])
+                self.assertEqual(review.archived_unverifiable_reviews(root), [])
+
+    def test_settlement_with_missing_referenced_file_fails_closed(self):
+        for missing in ("request", "binding", "feedback"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as d:
+                root = self._root(d)
+                round_id = "2026-01-01-missing-reference"
+                binding = self._request(root, round_id, "a" * 40)
+                feedback = self._legacy_feedback(root, round_id)
+                self._settlement(root, round_id)
+                paths = {
+                    "request": root / "docs/reviews" / f"{round_id}-request.md",
+                    "binding": binding,
+                    "feedback": feedback,
+                }
+                paths[missing].unlink()
+
+                pending = review.pending_reviews(root)
+                self.assertEqual([row["round_id"] for row in pending], [round_id])
+                self.assertEqual(review.archived_unverifiable_reviews(root), [])
+
+    def test_settlement_stales_on_feedback_bytes_or_new_binding(self):
+        for mutation in ("feedback-bytes", "new-binding"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as d:
+                root = self._root(d)
+                round_id = "2026-01-01-stale-settlement"
+                self._request(root, round_id, "a" * 40)
+                feedback = self._legacy_feedback(root, round_id)
+                self._settlement(root, round_id)
+                if mutation == "feedback-bytes":
+                    feedback.write_bytes(feedback.read_bytes() + b"changed\n")
+                else:
+                    review.write_round_request_binding(
+                        root, round_id, "c" * 40, "b" * 40, ["new-reviewer"],
+                        mode="packet", **self._projection_digests())
+
+                pending = review.pending_reviews(root)
+                self.assertEqual([row["round_id"] for row in pending], [round_id])
+                self.assertEqual(review.archived_unverifiable_reviews(root), [])
+
+    def test_canonical_reingest_supersedes_stale_settlement(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self._root(d)
+            round_id = "2026-01-01-reingested"
+            base = "b" * 40
+            target = "a" * 40
+            self._request(root, round_id, target, base=base)
+            self._legacy_feedback(root, round_id)
+            self._settlement(root, round_id)
+
+            source = root / "reply.md"
+            source.write_bytes(self._reply("gpt-5.6-sol", base, target))
+            self.assertEqual(review.ingest(root, round_id, src=source, force=True), 0)
+
+            self.assertEqual(review.pending_reviews(root), [])
+            self.assertEqual(review.archived_unverifiable_reviews(root), [])
+
+    def test_normal_completion_precedes_an_exact_current_settlement(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = self._root(d)
+            round_id = "2026-01-01-complete-with-marker"
+            base = "b" * 40
+            target = "a" * 40
+            self._request(root, round_id, target, base=base)
+            source = root / "reply.md"
+            source.write_bytes(self._reply("gpt-5.6-sol", base, target))
+            self.assertEqual(review.ingest(root, round_id, src=source), 0)
+            self._settlement(root, round_id)
+
+            dispositions = review.packet_review_dispositions(root)
+            self.assertEqual(dispositions["actionable"], [])
+            self.assertEqual(dispositions["archived_unverifiable"], [])
+
+    def test_tracked_pre_header_cohort_is_actionable_without_settlements(self):
+        from unittest import mock
+
+        root = SCRIPTS.parent
+        cohort = {
+            "2026-07-16-adopt-dogfooding",
+            "2026-07-16-fix-wave",
+            "2026-07-18-carrier-lanes",
+        }
+        with mock.patch.object(review, "_legacy_review_settlements", return_value={}):
+            actionable = {
+                row["round_id"]: row["reason"]
+                for row in review.packet_review_dispositions(root)["actionable"]
+            }
+        self.assertEqual(
+            {round_id: actionable[round_id] for round_id in cohort},
+            {round_id: "feedback-receipt-corrupt" for round_id in cohort})
+
+    def test_tracked_legacy_settlement_cohort_is_exactly_three_and_archived(self):
+        root = SCRIPTS.parent
+        cohort = {
+            "2026-07-16-adopt-dogfooding",
+            "2026-07-16-fix-wave",
+            "2026-07-18-carrier-lanes",
+        }
+        marker_dir = root / "docs" / "reviews" / "legacy-settlements"
+        self.assertEqual({path.stem for path in marker_dir.glob("*.json")}, cohort)
+
+        dispositions = review.packet_review_dispositions(root)
+        self.assertTrue(cohort.isdisjoint(
+            row["round_id"] for row in dispositions["actionable"]))
+        self.assertEqual(
+            {row["round_id"] for row in dispositions["archived_unverifiable"]}, cohort)
 
     def test_request_filename_round_is_validated_before_binding_glob(self):
         from unittest import mock
@@ -5869,6 +6064,61 @@ class PendingReviewTests(unittest.TestCase):
             self.assertRegex(rendered, r"age \d+d")
             self.assertIn(target, rendered)
             self.assertIn("reviewer-one, reviewer-two", rendered)
+
+    def test_review_surfaces_separate_archived_from_actionable_boundaries(self):
+        import contextlib
+        import io
+
+        sys.path.insert(0, str(SCRIPTS.parent / "hooks" / "scripts"))
+        import session_context
+
+        with tempfile.TemporaryDirectory() as d:
+            root = self._root(d)
+            archived_round = "2026-01-01-archived-surface"
+            actionable_round = "2026-01-02-actionable-surface"
+            self._request(root, archived_round, "a" * 40)
+            self._legacy_feedback(root, archived_round)
+            self._settlement(root, archived_round)
+            self._request(root, actionable_round, "c" * 40)
+
+            pending_out = io.StringIO()
+            with contextlib.redirect_stdout(pending_out):
+                self.assertEqual(review.pending(root), 0)
+            rendered_pending = pending_out.getvalue()
+            self.assertIn("1 actionable, 1 archived-unverifiable", rendered_pending)
+            self.assertIn(archived_round, rendered_pending)
+            self.assertIn(actionable_round, rendered_pending)
+
+            status_out = io.StringIO()
+            with contextlib.redirect_stdout(status_out):
+                self.assertEqual(review.status(root, None), 0)
+            rendered_status = status_out.getvalue()
+            self.assertIn("1 actionable awaiting feedback", rendered_status)
+            self.assertIn("1 archived-unverifiable", rendered_status)
+            self.assertIn(archived_round, rendered_status)
+            self.assertIn(actionable_round, rendered_status)
+
+            old_argv = sys.argv
+            session_out = io.StringIO()
+            try:
+                sys.argv = ["session_context.py", str(root)]
+                with contextlib.redirect_stdout(session_out):
+                    self.assertEqual(_run_with_home(
+                        Path(d) / "home", session_context.main), 0)
+            finally:
+                sys.argv = old_argv
+            session_context_text = _json.loads(session_out.getvalue())[
+                "hookSpecificOutput"]["additionalContext"]
+            self.assertIn(actionable_round, session_context_text)
+            self.assertNotIn(archived_round, session_context_text)
+
+            round_err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(round_err):
+                self.assertEqual(round.close(
+                    root, TEST_CLOSE_ROUND_ID, done=["chore/close-me"], touched=[],
+                    commit="HEAD"), 0)
+            self.assertIn(actionable_round, round_err.getvalue())
+            self.assertNotIn(archived_round, round_err.getvalue())
 
     def test_session_start_adds_one_summary_line_and_omits_zero(self):
         import contextlib
