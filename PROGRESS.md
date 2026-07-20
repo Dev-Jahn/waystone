@@ -2,6 +2,26 @@
 
 round 단위 작업 이력이 이 파일에 축적된다. 활성 task와 의존성은 `tasks.yaml`(CLI: `waystone task`)과 생성 파일 `ROADMAP.md` 참조.
 
+## 2026-07-20-review-remediation
+
+- **Goal**: 두 round packet(fleet-fix-wave·ruling-execution)의 codex ultra 적대 리뷰 회신 전량 처리(사용자 지시: 리뷰어를 chatgpt→codex ultra로 대체) + 수리 wave w4 + M1-A 착수 판정. main은 관제탑(triage·인수·ADR·머지·게이트).
+- **리뷰 처리**: 회신 2건 verbatim ingest, **13 finding 전량 finding당 opus verifier(clean-subagent) 반증 후 확정** — REAL 12(1건 기해소)·PARTIAL 1, severity 재조정 2(major→minor). triage를 feedback 파일에 결속, 수리 task 11건 등록(origin=review-*). 81bd177.
+- **ADR-0014 Amendment 2** (main 직접, blocker WS-GPT-201·202 폐쇄): known-debt 목록 고정(E-08 #473/#510/#516·E-09 #486·특성화 공백), exit ②="debt 대비 신규 위반 0", M1-A=순수 기계 ruling, suite test-ID manifest pin, I-10 경계(WAYSTONE_REPORT stanza만).
+- **Amendment 2 Addendum** (main 직접): w4-i10이 **현행 I-10 위반 확정**(rendered prompt가 status·milestone·round·anchor·routing_note 전달, main 독립 재현) — known-debt 편입, 수리는 M1-B(`fix/delegate-prompt-i10-surface-strip`), 특성화는 pinned-debt 형태 재규정. dev d95931b.
+- **Shipped** (implementer=raw codex exec ultra, worktree 6기; 1차 발사 5기 네트워크/DNS 장애 격추 → 잔존 감사·승계 재발사, litter는 스톨 발견 후 3차):
+  - `fix/improve-dual-prefix-archive-reader` — 역사 아카이브 reader dual-prefix 복원, 보존 corpus 21건 0→21, 실물 corpus 회귀 테스트. dev b6bde56
+  - `fix/i10-prompt-minimality-characterization` — **blocker WS-GPT-101 폐쇄**: pinned-debt 3중 고정(양성·debt 5종 TASK_BLOCK exact equality·template SHA-256 전문 oracle), RED 증명 3종. dev a6e9ea0
+  - `fix/review-binding-generation-collision` — 3종 수리(regex [1-9]\d*·generation 유일성 하중 규칙·duplicate-key reader), alias 충돌 시 pending/unknown(PC-10), settled 3건 회귀 보존. dev 6298c3d
+  - `fix/sunset-preserved-profile-divergence`+`fix/sunset-marker-container-symlink` — detector fail-open 2건 typed 거부 전환(profile raw-bytes 비교·container no-follow), 부수: MarkerTests HOME 격리. dev c1cfb6a
+  - `docs/plan-m1c-exit-supersession`·`docs/promoted-reverse-closure-and-pc31`·`docs/matrix-regen-adr13-obligations` — M1-C comparator supersede(byte 보존 증명)·85클래스 양방향 폐쇄(39+46)+**PC-31** 승격·matrix stale 0(AST 증명)+ADR-0013 fault 3건 M1-B fixture 등록. dev 0ae2457
+  - `fix/linked-read-lock-litter` — linked read의 lock 이전 canonical 정규화(재탐침 증명) 또는 typed 거부, linked checkout 생성물 0(ADR-0011). dev ee2ea20
+- **M1-A 착수 판정** (`decision/m1a-start-approval`, 사용자 위임 조건 집행): 미해소 blocker 0 확인 → **승인**. 착수 시 suite manifest pin(830 @ ee2ea20)부터.
+- **Gates**: 머지별 표적 게이트 rc=0 ×6 + 최종 full gate **830 tests rc=0**(817→830: reader+1·binding+4·sunset+4·i10+1·litter+3). hot-file 충돌 0.
+- **SSOT**: unchanged (views 재생성만).
+- **Decisions pending**: decision/legacy-settlement-additional-cohort(minor, 사용자 — 동종 3건 marker 포함 여부).
+- **Review**: requested (docs/reviews/2026-07-20-review-remediation-request.md) — 이번 라운드부터 binding이 codex:gpt-5.6-sol ultra 동결(profile 전환 반영).
+- **Next**: M1-A 분해 착수 — suite test-ID manifest pin → 기계 분할 단위 확정(PC 마일스톤 귀속표 참조) + feat/review-runs-uuid-owner-directory M1-B acceptance 편입.
+
 ## 2026-07-20-ruling-execution
 
 - **Goal**: 사용자 ruling 4건(M0 exit 노선 B·settlement 방식·readme 처분·migration sunset) 전량 집행 — fleet w0720b(codex 7기 병렬 + 경량 재심 1기). M0 exit blocker 2건 폐쇄가 핵심.

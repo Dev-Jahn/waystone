@@ -232,13 +232,19 @@ tasks:
     status: done
     severity: "minor"
   - id: decision/m1a-start-approval
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-review-remediation
+    ruling: "승인 (main 집행, 2026-07-20 — 사용자 위임 조건 충족): 두 packet의 codex 적대 리뷰 13 finding 전량 처리 완료(REAL 12·PARTIAL 1, 수리 9 task done + 이월 2 등록), blocker 2건(WS-GPT-101·201) 폐쇄, 미해소 blocker 0. M1-A는 ADR-0014 Amendment 2(+Addendum) 기준의 순수 기계 분할로 착수 — 착수 시 suite test-ID manifest pin(830 @ dev ee2ea20 기준)부터."
     title: "M1-A 착수 승인 — 사용자가 자율 처리 위임(2026-07-20 '리뷰패킷은 codex ultra로 처리, 후속작업 자율, 쭉 자율개발'). main 집행 조건: 두 round packet(fleet-fix-wave·ruling-execution)의 codex 적대 리뷰 회신 처리에서 미해소 blocker 0이면 착수 판정, blocker 발생 시 폐쇄 후 착수"
-    status: "pending"
+    status: done
     severity: "major"
   - id: fix/i10-prompt-minimality-characterization
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-review-remediation
+    result: "pinned-debt 특성화 착지: 실조립 경로 3중 고정(양성·debt 5종 TASK_BLOCK exact equality·내부 표면 부재+template SHA-256 전문 oracle), RED 증명 3종, suite 819 rc=0 — WS-GPT-101 blocker 폐쇄. NO-GO 경위·부채 편입은 ADR-0014 Amendment 2 Addendum — dev a6e9ea0 (squash of bd66f52)"
     notes: "형태 재규정(Amendment 2 Addendum §2): 현행 위반 확정(NO-GO, w4-i10 보고 + main 재현)으로 순수 경계-준수 테스트는 작성 불가 — pinned-debt 형태로: 양성 단언 + 부채 표면 5종(status·milestone·round·anchor·routing_note) exact pin(추가 표면 유입 시 red) + 목록 외 대표 내부 표면 부재 단언. 수리는 fix/delegate-prompt-i10-surface-strip(M1-B)"
     title: "I-10 특성화 테스트 신설: rendered worker prompt가 goal·bounds·판정요청+WAYSTONE_REPORT 보고 계약 stanza만 담고 registry/round/exposure/overlay 내부 프로토콜을 전달하지 않음을 부정형으로 단언 — I-10 관측 공백(ledger 0행·matrix TODO·단언 테스트 0)이 M1-A 착수 blocker (WS-GPT-101, verifier REAL; bookkeeping 경계는 ADR-0014 Amendment 2가 확정)"
-    status: "pending"
+    status: done
     severity: "blocker"
     origin: "review-2026-07-20-fleet-fix-wave"
   - id: fix/env-prep-toolchain-digest-binding
@@ -247,50 +253,75 @@ tasks:
     severity: "minor"
     origin: "review-2026-07-20-fleet-fix-wave"
   - id: fix/linked-read-lock-litter
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-review-remediation
+    result: "linked read의 lock 이전 canonical 정규화(재탐침 증명, decoy 방어) 또는 typed 거부 — linked checkout 생성물 0, mutation guard 불변. RED→GREEN, TaskCliTests 20/20, suite 830 rc=0 — dev ee2ea20 (squash of 726dc9d)"
     title: "linked worktree에서 read(list/show)가 lock 획득으로 .waystone/{.gitignore,lock}을 생성 — 거부·정상 어느 경로든 잔재가 먼저 생김(재현). need_root read 경로에서 canonical 정규화 또는 typed 거부를 lock 이전에 (WS-GPT-103 잔여, verifier PARTIAL major→minor; 파괴 절반은 sunset이 기해소)"
-    status: "pending"
+    status: done
     severity: "minor"
     origin: "review-2026-07-20-fleet-fix-wave"
   - id: fix/improve-dual-prefix-archive-reader
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-review-remediation
     result: "dual-prefix reader 복원(improve._FINDING_ID_RE만) — 보존 corpus 21건 0→21 RED/GREEN(실물 6파일), review.FINDING_RE는 WS-only 유지, 실물 corpus 회귀 테스트 신설, suite 818 rc=0 — dev b6bde56 (squash of 2e0d51e)"
     title: "improve 역사 triage reader를 dual-prefix((JW|WS)-GPT)로 복원: rename이 아카이브 reader까지 WS 전용화해 보존된 JW finding 21건이 투영·recurrence·overlay rule 2에서 소거(21→0 재현), fixture 개서로 회귀 은폐 — 신규 생성(review.FINDING_RE)은 WS 유지, 실제 보존 파일 대상 회귀 테스트 추가 (WS-GPT-104, verifier REAL major)"
-    status: "done"
+    status: done
     severity: "major"
     origin: "review-2026-07-20-fleet-fix-wave"
   - id: docs/adr-0014-amendment2-m1a-debt-and-suite-pin
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-review-remediation
     result: "Amendment 2 — known-debt 목록 고정(#473/#510/#516 E-08·#486 E-09·특성화 공백), exit ②='debt 대비 신규 위반 0', M1-A 순수 기계 ruling, suite test-ID manifest pin, I-10 bookkeeping 경계(WAYSTONE_REPORT stanza만) — WS-GPT-201·202 반증 조건 충족, suite 817 rc=0 — dev HEAD"
     title: "ADR-0014 Amendment 2: M1-A exit ②를 'pinned known-debt(ledger #473/#510/#516 E-08 반-계약·#486 E-09·특성화 공백 목록) 대비 신규 위반 0'으로 정정(절대 0은 현행 suite가 위반 동작을 성공 고정해 동시성립 불가) + suite identity manifest pin(같은 patch가 suite 축소해도 통과하는 자기참조 제거) + M1-A 순수 기계 단계 ruling + I-10 bookkeeping 경계 확정 (WS-GPT-201 blocker·202 major, main 검증 REAL)"
-    status: "done"
+    status: done
     severity: "blocker"
     origin: "review-2026-07-20-ruling-execution"
   - id: docs/plan-m1c-exit-supersession
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-review-remediation
+    result: "M1-C comparator exit supersession note 삽입(원문 byte 보존, 복원 대조 증명 rc=0) — 현행 exit는 ADR-0014 3항 기준 — dev 0ae2457 (squash of 29ea648)"
     title: "계획 M1-C exit의 legacy comparator 문구('기존 characterization green·old-new 등급 호환·구 관측 계약 동일')를 ADR-0014 기준(PC/invariant/accepted ADR semantic contract)으로 supersede — 현행은 같은 구현이 ADR 통과·계획 거부되는 이중 기준 (WS-GPT-203, main 검증 REAL 원문 확인)"
-    status: "pending"
+    status: done
     severity: "major"
     origin: "review-2026-07-20-ruling-execution"
   - id: docs/promoted-reverse-closure-and-pc31
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-review-remediation
+    result: "ledger 85 클래스 양방향 폐쇄 표(승격 39+비승격 46, exact-set 검증 rc=0) + PC-31 승격(미초기화 root no-write, 근거 ②) — dev 0ae2457 (squash of 7fc2db0)"
     title: "승격 목록 reverse closure: ledger 85 클래스 전수가 {승격|명시 비승격} 정확히 한쪽에 속함을 양방향 검증 + 누락된 UninitializedRootGateTests의 미초기화 root no-write 계약을 PC-31로 승격(criterion ②) (WS-GPT-204, main 검증 REAL — 현 validator는 단방향)"
-    status: "pending"
+    status: done
     severity: "major"
     origin: "review-2026-07-20-ruling-execution"
   - id: docs/matrix-regen-adr13-obligations
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-review-remediation
+    result: "matrix stale 4건 제거·I-07 현행 증거+gap 정직 교체(AST stale=0) + ADR-0013 fault 3건을 matrix·promoted 의무·M1-B fixture(5→8)에 등록 — dev 0ae2457 (squash of 4f33822)"
     title: "traceability matrix를 HEAD 기준 재생성(삭제된 MigrationV2Phase2Tests 4건 인용 제거·I-07 현행 증거로 교체) + ADR-0013 신규 의무(token mismatch·lock 획득 후 DB tuple recheck·reclaim race fault test)를 matrix 행과 promoted 신규 의무 절·M1-B fixture 목록에 등록 (WS-GPT-205, main 검증 REAL)"
-    status: "pending"
+    status: done
     severity: "major"
     origin: "review-2026-07-20-ruling-execution"
   - id: fix/review-binding-generation-collision
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-review-remediation
+    result: "3종 수리 착지: regex [1-9]\\d* + generation 유일성 하중 규칙(위반=binding-generation-collision reason으로 pending/unknown) + duplicate-key reader — RED alias fixture(수리 전 archived 유지) → GREEN, settled 3건 archived 회귀 보존, suite 821 rc=0 — dev 6298c3d (squash of 397caba)"
     title: "binding generation 충돌 fail-open 폐쇄 3종: sequence regex를 형제들과 동일한 [1-9]\\d*로(현재 \\d+ 단독 예외), 논리 generation당 후보 ≠1이면 pending/unknown(하중 규칙 — glob이 여전히 -02를 흡수하므로 regex만으론 불충분), binding reader를 기존 duplicate-key 거부 parser로 (WS-GPT-206, verifier REAL 실라운드 재현 — settlement가 alias 추가에도 archived 유지)"
-    status: "pending"
+    status: done
     severity: "major"
     origin: "review-2026-07-20-ruling-execution"
   - id: fix/sunset-preserved-profile-divergence
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-review-remediation
+    result: "preserved profile raw-bytes 비교(live 포함, no-follow) — 분기 시 참여 profile 전부 offender로 typed 거부, 동일-잔재 수용 유지. RED 2건(Pre09StateError not raised) → GREEN, suite 821 rc=0 — dev c1cfb6a (squash of db4c9b3)"
     title: "sunset detector가 분기된 preserved profile을 완료 seed로 오인(fail-open 재현: preserved 분기→조용한 False, plain root 동형은 typed 거부 — 비대칭): 분기 시 profile.yml을 offender로 typed 거부, 동일-잔재 수용 유지 — '정상 완료 이관은 분기 profile을 만들 수 없다'(구 Phase 2가 거부) (WS-GPT-207, verifier REAL major)"
-    status: "pending"
+    status: done
     severity: "major"
     origin: "review-2026-07-20-ruling-execution"
   - id: fix/sunset-marker-container-symlink
+    session_id: "9c45406a-2fef-4660-b072-4824b6fcaede"
+    round: 2026-07-20-review-remediation
+    result: "marker container 존재+non-real-dir(no-follow)이면 container 자체 offender — symlink/regular-file fixture RED → GREEN, real dir+marker 기존 동작 유지, 구 0.11 거부 회귀 복원. suite 821 rc=0 — dev c1cfb6a (squash of 37ea980)"
     title: "pending-worktree marker container가 symlink/non-directory면 detector 우회(fail-open 재현, 구 0.11은 typed 거부 — 회귀·ADR-0013:52 위반): container가 real dir 아니면 container 자체를 offender로, no-follow symlink·regular-file acceptance 테스트 추가 — 형제 helper들은 이미 올바름(국소 불일치) (WS-GPT-208, verifier REAL major)"
-    status: "pending"
+    status: done
     severity: "major"
     origin: "review-2026-07-20-ruling-execution"
   - id: fix/delegate-prompt-i10-surface-strip
