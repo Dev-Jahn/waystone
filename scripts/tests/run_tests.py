@@ -145,8 +145,13 @@ from test_run_store import (
     ArtifactStoreTests,
     RunStoreTests,
 )
+<<<<<<< HEAD
 from test_run_supervisor import (
     RunSupervisorTests,
+=======
+from test_run_transport import (
+    RunTransportTests,
+>>>>>>> m1b/transport
 )
 from test_run_spec import (
     RunSpecTests,
@@ -245,7 +250,11 @@ _TEST_CLASSES = (
     AcceptFieldTests,
     ArtifactStoreTests,
     RunStoreTests,
+<<<<<<< HEAD
     RunSupervisorTests,
+=======
+    RunTransportTests,
+>>>>>>> m1b/transport
     RunSpecTests,
 )
 
