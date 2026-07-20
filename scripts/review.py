@@ -1369,17 +1369,12 @@ def _round_exposure_order(path: Path, row: dict) -> tuple[str, int, str]:
     return str(row["at"]), int(match.group(1)) if match else 1, str(path)
 
 
-def read_round_closeout_exposure(root: Path, round_id: str) -> tuple[Path, dict]:
-    """Load the newest immutable exposure for exactly ``round_id`` as the render binding."""
-    import overlay
-
-    directory = overlay._exposure_dir(root)
+def _read_round_closeout_exposures(root: Path, round_id: str) -> list[tuple[Path, dict]]:
+    """Load and validate every immutable exposure generation for exactly ``round_id``."""
+    directory = project_state_path(root) / "exposure"
     filename_re = re.compile(rf"^round-{re.escape(round_id)}(?:-(\d+))?\.json$")
     paths = [path for path in sorted(directory.glob("round-*.json"))
              if filename_re.fullmatch(path.name)] if directory.is_dir() else []
-    if not paths:
-        raise WorkflowError(
-            f"round exposure is missing for {round_id}; reclose the round before preparing review")
     rows: list[tuple[Path, dict]] = []
     for path in paths:
         try:
@@ -1399,6 +1394,32 @@ def read_round_closeout_exposure(root: Path, round_id: str) -> tuple[Path, dict]
                 f"round exposure {path} lacks a deterministic review binding; "
                 "reclose the round with the current Waystone version")
         rows.append((path, row))
+    return rows
+
+
+def read_initial_round_closeout_exposure(
+        root: Path, round_id: str, *, missing_ok: bool = False) -> tuple[Path, dict] | None:
+    """Load generation 1, whose immutable ``base_sha`` is the round's original review base."""
+    rows = _read_round_closeout_exposures(root, round_id)
+    if not rows:
+        if missing_ok:
+            return None
+        raise WorkflowError(
+            f"round exposure is missing for {round_id}; reclose the round before preparing review")
+    initial_name = f"round-{round_id}.json"
+    for item in rows:
+        if item[0].name == initial_name:
+            return item
+    raise WorkflowError(
+        f"initial round exposure is missing for {round_id}; cannot recover the original diff base")
+
+
+def read_round_closeout_exposure(root: Path, round_id: str) -> tuple[Path, dict]:
+    """Load the newest immutable exposure for exactly ``round_id`` as the render binding."""
+    rows = _read_round_closeout_exposures(root, round_id)
+    if not rows:
+        raise WorkflowError(
+            f"round exposure is missing for {round_id}; reclose the round before preparing review")
     return max(rows, key=lambda item: _round_exposure_order(*item))
 
 

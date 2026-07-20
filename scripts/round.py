@@ -209,13 +209,10 @@ def _current_date() -> date:
     return date.today()
 
 
-def _round_has_existing_closeout(root: Path, round_id: str, review) -> bool:
-    """Recognize a previously minted round from its validated immutable exposure."""
-    try:
-        review.read_round_closeout_exposure(root, round_id)
-        return True
-    except WorkflowError:
-        return False
+def _round_initial_closeout(root: Path, round_id: str, review) -> dict | None:
+    """Return a previously minted round's validated generation-1 exposure, if present."""
+    initial = review.read_initial_round_closeout_exposure(root, round_id, missing_ok=True)
+    return initial[1] if initial is not None else None
 
 
 def close(root: Path, round_id: str, done: list[str], touched: list[str], commit: str,
@@ -240,8 +237,12 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
         return 1
     cfg = load_config(root)
     current_date = _current_date()
-    if (round_date != current_date
-            and not _round_has_existing_closeout(root, round_id, review)):
+    try:
+        initial_closeout = _round_initial_closeout(root, round_id, review)
+    except WorkflowError as e:
+        print(f"round close: cannot read existing round exposure — {e}", file=sys.stderr)
+        return 1
+    if round_date != current_date and initial_closeout is None:
         print(
             f"round close: --round date must be today ({current_date.isoformat()}), "
             f"got {round_date.isoformat()}", file=sys.stderr)
@@ -269,6 +270,8 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     ctext = cfg_path.read_text(encoding="utf-8")
     prev_raw = (cfg.get("state") or {}).get("last_round_commit")
     prev_wm = git_full_sha(root, str(prev_raw)) if prev_raw else None
+    review_base = (initial_closeout.get("base_sha")
+                   if initial_closeout is not None else prev_wm)
     created_event_paths: list[Path] = []
     try:
         ctext_new = set_config_scalar(ctext, "last_round_commit", full, section="state")
@@ -365,7 +368,7 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
             import overlay
             exposure_path, round_exposure = overlay.write_round_exposure(
                 root, round_id, head_sha, full, session_id=session_id,
-                base_sha=prev_wm, task_scopes=task_scopes,
+                base_sha=review_base, task_scopes=task_scopes,
                 task_scope_coverage=task_scope_coverage, done_task_ids=done_transitions,
                 routes=routes, reviewers=review_reviewers)
             created_event_paths.append(exposure_path)
@@ -391,12 +394,11 @@ def close(root: Path, round_id: str, done: list[str], touched: list[str], commit
     if gen_backup is not None:
         shutil.rmtree(gen_backup.parent, ignore_errors=True)
 
-    # report the watermark move so the review request can name the diff base (prev tip → this tip).
-    # `prev_wm` is the watermark BEFORE this close advanced it — the previous round's tip; resolve it
-    # to a full sha (it may be stored short) so it can be copied verbatim as the review base.
+    # Report the actual watermark move separately from the round-bound review base. On a same-round
+    # close retry, the watermark has already advanced but generation 1 still names the prior round.
     print(f"round {round_id} closed: {len(done)} done, {len(set(done + touched))} stamped; "
           f"watermark {(prev_wm[:12] if prev_wm else '(root)')} → {full[:12]}")
-    print(f"  review diff base = {prev_wm or '(root)'}  (previous round tip; head = {full})")
+    print(f"  review diff base = {review_base or '(root)'}  (previous round tip; head = {full})")
     print(f"  review reviewers = {', '.join(review_reviewers)}")
 
     # Boundary warnings remain advisory. Unlike exposure (part of the transaction above), a warning

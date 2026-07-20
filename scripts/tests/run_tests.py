@@ -15071,6 +15071,68 @@ class RoundExposureTests(unittest.TestCase):
             self.assertTrue((edir / f"round-{TEST_CLOSE_ROUND_ID}.json").exists())
             self.assertTrue((edir / f"round-{TEST_CLOSE_ROUND_ID}-2.json").exists())
 
+    def test_same_round_reclose_preserves_original_previous_round_diff_base(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as d:
+            root, home = _round_review_project(d)
+            previous_round_tip = git(root, "rev-parse", "HEAD").stdout.strip()
+            config_path = root / ".waystone.yml"
+            config_path.write_text(round.set_config_scalar(
+                config_path.read_text(), "last_round_commit", previous_round_tip, section="state"))
+            (root / "round-work.txt").write_text("round work\n")
+            git(root, "add", ".waystone.yml", "round-work.txt")
+            git(root, "commit", "-qm", "round work")
+            first_close_tip = git(root, "rev-parse", "HEAD").stdout.strip()
+
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = _run_with_home(home, lambda: round.close(
+                    root, TEST_CLOSE_ROUND_ID,
+                    done=["chore/close-me"], touched=[], commit="HEAD"))
+            self.assertEqual(rc, 0)
+            _first_path, first = _run_with_home(
+                home, lambda: review.read_round_closeout_exposure(root, TEST_CLOSE_ROUND_ID))
+            self.assertEqual(first["head_sha"], first_close_tip)
+            self.assertEqual(first["base_sha"], previous_round_tip)
+
+            # Model a pre-fix generation whose base already drifted to this round's first tip.
+            _run_with_home(home, lambda: overlay.write_round_exposure(
+                root, TEST_CLOSE_ROUND_ID, first_close_tip, first_close_tip,
+                base_sha=first_close_tip, reviewers=first["reviewers"]))
+            _drifted_path, drifted = _run_with_home(
+                home, lambda: review.read_round_closeout_exposure(root, TEST_CLOSE_ROUND_ID))
+            self.assertEqual(drifted["base_sha"], first_close_tip)
+
+            (root / "after-close.txt").write_text("follow-up\n")
+            git(root, "add", ".waystone.yml", "tasks.yaml", "ROADMAP.md", "after-close.txt")
+            git(root, "commit", "-qm", "closeout plus follow-up")
+            reclose_head = git(root, "rev-parse", "HEAD").stdout.strip()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = _run_with_home(home, lambda: round.close(
+                    root, TEST_CLOSE_ROUND_ID, done=[], touched=[], commit="HEAD"))
+            self.assertEqual(rc, 0)
+            _latest_path, latest = _run_with_home(
+                home, lambda: review.read_round_closeout_exposure(root, TEST_CLOSE_ROUND_ID))
+            self.assertEqual(latest["head_sha"], reclose_head)
+            self.assertEqual(latest["base_sha"], previous_round_tip)
+            self.assertNotEqual(latest["base_sha"], first_close_tip)
+
+            narrative = Path(d) / "narrative.md"
+            narrative.write_text(PacketPublicationTests.NARRATIVE)
+            self.assertEqual(_run_with_home(
+                home, lambda: review.prepare_packet_request(
+                    root, TEST_CLOSE_ROUND_ID, narrative)), 0)
+            request = root / "docs" / "reviews" / f"{TEST_CLOSE_ROUND_ID}-request.md"
+            self.assertIn(
+                f"- Reviewing: {reclose_head}   (diff against {previous_round_tip})",
+                request.read_text())
+            binding_path = next((root / "docs" / "reviews").glob(
+                f"{TEST_CLOSE_ROUND_ID}-request.binding*.json"))
+            binding = review.read_round_request_binding(binding_path)
+            self.assertEqual(binding["target_sha"], reclose_head)
+            self.assertEqual(binding["base_sha"], previous_round_tip)
+
     def test_exposure_open_x_collision_never_overwrites(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = _round_review_project(d)
