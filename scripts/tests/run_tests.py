@@ -136,6 +136,9 @@ from test_run_store import (
     ArtifactStoreTests,
     RunStoreTests,
 )
+from test_run_spec import (
+    RunSpecTests,
+)
 
 _TEST_CLASSES = (
     DelegateFanoutPlanTests,
@@ -227,6 +230,7 @@ _TEST_CLASSES = (
     AcceptFieldTests,
     ArtifactStoreTests,
     RunStoreTests,
+    RunSpecTests,
 )
 
 for _test_class in _TEST_CLASSES:

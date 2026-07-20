@@ -8,6 +8,58 @@ import uuid
 from pathlib import Path
 
 
+class GitReadError(RuntimeError):
+    """A byte-preserving, read-only Git probe could not establish its fact."""
+
+    code = "git_read_failed"
+
+    def __init__(
+            self, args: tuple[str, ...], returncode: int | None, detail: str):
+        self.args_tuple = args
+        self.returncode = returncode
+        self.detail = detail
+        command = " ".join(args)
+        suffix = f" (rc={returncode})" if returncode is not None else ""
+        super().__init__(f"{self.code}: git {command}{suffix}: {detail}")
+
+
+_READ_ONLY_BYTE_COMMANDS = frozenset({
+    "diff", "ls-files", "ls-tree", "rev-parse", "status",
+})
+
+
+def git_read_bytes(root: Path, *args: str, timeout: int = 15) -> bytes:
+    """Return raw stdout from one explicitly read-only Git command, or fail loudly.
+
+    ``GIT_OPTIONAL_LOCKS=0`` prevents otherwise optional index refreshes from changing the
+    user's live index while snapshot facts are collected.
+    """
+    if not args or args[0] not in _READ_ONLY_BYTE_COMMANDS:
+        command = args[0] if args else "<missing>"
+        raise ValueError(f"git_read_bytes does not allow command {command!r}")
+    environment = {
+        **os.environ,
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_PAGER": "cat",
+        "LC_ALL": "C",
+    }
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            env=environment,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise GitReadError(tuple(args), None, str(error)) from error
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).decode("utf-8", errors="replace").strip()
+        raise GitReadError(
+            tuple(args), result.returncode, detail or "command produced no diagnostic")
+    return result.stdout
+
+
 def git_rc(root: Path, *args: str) -> tuple[int, str, str]:
     """Run git; return (returncode, stdout, stderr). Distinguishes failure from empty output."""
     try:
