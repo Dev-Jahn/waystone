@@ -2,6 +2,25 @@
 
 round 단위 작업 이력이 이 파일에 축적된다. 활성 task와 의존성은 `tasks.yaml`(CLI: `waystone task`)과 생성 파일 `ROADMAP.md` 참조.
 
+## 2026-07-20-ruling-execution
+
+- **Goal**: 사용자 ruling 4건(M0 exit 노선 B·settlement 방식·readme 처분·migration sunset) 전량 집행 — fleet w0720b(codex 7기 병렬 + 경량 재심 1기). M0 exit blocker 2건 폐쇄가 핵심.
+- **Ruling 기록**: `decision/m0-exit-verdict`(보류 승인 + **노선 B**: 합격 기준 = invariants+accepted ADR+승격 계약, legacy 828 기본 폐기, 승격 원칙 = git-tracked 기록 연속성) · `decision/pre-header-feedback-settlement-method`((a) marker 채택) · `decision/delegate-readme-disposition`(삭제, f2bedea). `fix/porting-ledger-grade-gate-executability`는 노선 B로 대체 소멸(dropped).
+- **Shipped** (implementer=external-runner/codex:gpt-5.6-sol ultra, worktree 7기 @ 8392d5a):
+  - **ADR-0013** operational threat model — 8/8축 완결(신규 3: child env closed allowlist·lease principal token CAS·permission/symlink fail-direction; 흡수 4). M0 exit 재심 조건 ①
+  - **ADR-0014 + `docs/promoted-contracts.md`** — 합격 기준 전환 성문화 + 승격 계약 30건(main confirmed v1) + 신규 의무 8건 절 + 비승격 전수 절. 재심 조건 ②
+  - **ADR-0006 Amendment** — manifest 4공백(§5-4 deviation 표·multi-task mapping·no-result terminal·canonical path `docs/runs/<run-id>/closeout.yaml`)
+  - **run id UUIDv7 단일화** — plan §3-3·§5-2 supersession + ADR-0005 deviation note, 구 문법 산출물 실사 0건
+  - **doc-sync 6항목** — ruling cell 정착·E-09 정합·anchor 수리·audit 시점 분리·§5-2 back-reference·gap 명시
+  - **settlement marker** — `docs/reviews/legacy-settlements/` 3건(digest 3축 결속·fail-closed·완료 합성 불가 증명), 추가 동종 3건은 감사만 → `decision/legacy-settlement-additional-cohort`
+  - **migration sunset** — pre-0.9 자동 이관·재개·repair 전량 삭제(-1661줄) → read-only typed 거부(`unsupported_pre_0_9_layout`)
+- **경량 재심 (read-only codex)**: 원 판정표 10행 = **해소 9 + 전환 소멸 1 + 미해소 0**. 단 병렬 문서 교차 모순 **WS-RX-1 blocker 적발** — ADR-0014 새 exit(PC 전량 green)와 계획 M1-A 범위(기계 분할)가 동시 성립 불가(main 인수 실수: 마일스톤 귀속 미확인). → **ADR-0014 Amendment**로 해소: 단계별 gate 귀속(승격 계약은 소유 서브시스템 재구축 마일스톤에), M1-A exit = 분할 완료+invariant 0+현행 suite green(동작 무변경 자기 신호 — comparator 부활 아님). RX-2/3/4(확정·초안 이중 선언, lease_epoch 표기, stale anchor)도 정합. 상세: `docs/meta/agent-reports-2026-07-20/w2-reexam.md`
+- **Gates**: 기별 표적/전체 게이트 rc=0, sunset 머지 후 및 RX 수리 후 full gate **817 tests rc=0** (828→817: settlement +9, sunset -25, 기타 wave-1 누적 반영). 병렬 hot-file(계획서 4분할) 충돌 0.
+- **SSOT**: unchanged (views 재생성만).
+- **Decisions pending**: decision/legacy-settlement-additional-cohort(minor — 동종 3건 marker 포함 여부). **M1-A 착수 승인 = 사용자 최종 게이트**(main 판정: M0 exit 충족, 아래 Next).
+- **Review**: requested (docs/reviews/2026-07-20-ruling-execution-request.md).
+- **Next**: M1-A 착수 승인 시 — 계획 M1-A 분해(기계적 구조 분할, ADR-0014 Amendment의 exit 3항 적용) + feat/review-runs-uuid-owner-directory의 M1-B acceptance 편입.
+
 ## 2026-07-20-fleet-fix-wave
 
 - **Goal**: 대기 결함·정리 task 전량 병렬 착수 — fleet w0720(codex 9기: 구현 7·read-only 분석 1·M0 exit 적대 리뷰 1) + finding당 opus verifier 11기. main은 관제탑(브리핑·회수·머지·게이트·인수)만.
