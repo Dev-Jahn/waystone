@@ -25,6 +25,8 @@ threshold; the live registry stays small.
 """
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -369,6 +371,7 @@ _SUB_OPTIONS = {
     "drop": {"reason"},
     "archive": {"threshold", "keep"},
 }
+_MUTATION_SUBCOMMANDS = frozenset({"add", "set", "drop", "archive"})
 
 
 def _split(sub: str, rest: list[str]) -> tuple[list[str], dict, str | None]:
@@ -417,6 +420,48 @@ def _resolve_root(explicit: str | None) -> Path | None:
     return Path(explicit).resolve() if explicit else find_project_root(Path.cwd())
 
 
+def _refuse_linked_worktree_mutation(root: Path) -> None:
+    """Reject linked worktrees; fail closed when a checkout's Git context is unverifiable."""
+    has_git_marker = any((candidate / ".git").exists() or (candidate / ".git").is_symlink()
+                         for candidate in (root, *root.parents))
+    env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--git-dir", "--git-common-dir"],
+            capture_output=True, text=True, timeout=15, env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        if not has_git_marker:
+            return  # without filesystem Git metadata, this root cannot be a linked worktree
+        raise WorkflowError(
+            f"project_context_unavailable: cannot verify Git checkout context for {root}"
+            f" ({e}); refusing registry mutation — run the command from the canonical checkout") from e
+    if probe.returncode != 0:
+        if not has_git_marker:
+            return  # without filesystem Git metadata, this root cannot be a linked worktree
+        detail = probe.stderr.strip() or f"git exited {probe.returncode}"
+        raise WorkflowError(
+            f"project_context_unavailable: cannot verify Git checkout context for {root} "
+            f"({detail}); refusing registry mutation — "
+            "run the command from the canonical checkout")
+    observed = probe.stdout.splitlines()
+    if len(observed) != 2 or not all(observed):
+        raise WorkflowError(
+            f"project_context_unavailable: Git returned incomplete checkout context for {root}; "
+            "refusing registry mutation — run the command from the canonical checkout")
+
+    git_dir_text, common_dir_text = observed
+    git_dir = Path(git_dir_text)
+    common_dir = Path(common_dir_text)
+    git_dir = (git_dir if git_dir.is_absolute() else root / git_dir).resolve()
+    common_dir = (common_dir if common_dir.is_absolute() else root / common_dir).resolve()
+    if git_dir != common_dir:
+        raise WorkflowError(
+            f"noncanonical_intent_mutation: refusing task registry mutation for linked worktree "
+            f"{root}; run the command from the canonical checkout, or pass the canonical checkout "
+            "root as the positional project root")
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print(__doc__, file=sys.stderr)
@@ -435,6 +480,12 @@ def main(argv: list[str]) -> int:
         if root is None:
             print("waystone task: no initialized project (run inside one, or pass its path)", file=sys.stderr)
             return None
+        if sub in _MUTATION_SUBCOMMANDS:
+            try:
+                _refuse_linked_worktree_mutation(root)
+            except WorkflowError as e:
+                print(f"waystone task: {e}", file=sys.stderr)
+                return None
         try:
             # Lazy migration has its own short lock span before the verb's body lock.
             with hold_project_lock(root):

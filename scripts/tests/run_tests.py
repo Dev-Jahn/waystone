@@ -6326,6 +6326,77 @@ class TaskCliTests(unittest.TestCase):
             self.assertIn("not an initialized waystone project", err.getvalue())
             self.assertFalse((plain / ".waystone").exists())
 
+    def test_mutations_refuse_linked_worktree_before_migration_but_allow_canonical_checkout(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root = base / "repo"
+            linked = base / "linked"
+            home = base / "home"
+            root.mkdir()
+            home.mkdir()
+            init_repo(root)
+            (root / ".waystone.yml").write_text("version: 1\nproject: x\n")
+            (root / "tasks.yaml").write_text(TASKS_FIXTURE)
+            self.assertEqual(git(root, "add", ".waystone.yml", "tasks.yaml").returncode, 0)
+            self.assertEqual(git(root, "commit", "-qm", "add waystone project").returncode, 0)
+            added = git(root, "worktree", "add", "-q", "--detach", str(linked), "HEAD")
+            self.assertEqual(added.returncode, 0, added.stderr)
+            before = (linked / "tasks.yaml").read_text()
+
+            def invoke(argv, cwd):
+                previous = Path.cwd()
+                out, err = io.StringIO(), io.StringIO()
+                try:
+                    os.chdir(cwd)
+                    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                        rc = _run_with_home(home, lambda: tasks.main(argv))
+                finally:
+                    os.chdir(previous)
+                return rc, out.getvalue(), err.getvalue()
+
+            attempts = [
+                ("cwd-set", ["set", "feat/alpha", "status", "done"], linked, {}),
+                ("explicit-add", ["add", "fix/linked", str(linked), "--title", "must refuse"],
+                 root, {}),
+                ("explicit-set", ["set", "feat/alpha", "status", "done", str(linked)], root, {}),
+                ("explicit-drop", ["drop", "gate/beta", str(linked)], root, {}),
+                ("explicit-archive", ["archive", str(linked), "--threshold", "0", "--keep", "0"],
+                 root, {}),
+                ("ambient-git-env", ["set", "feat/alpha", "status", "done"], linked, {
+                    "GIT_DIR": str(root / ".git"),
+                    "GIT_WORK_TREE": str(root),
+                    "GIT_COMMON_DIR": str(root / ".git"),
+                }),
+            ]
+            with mock.patch.object(tasks, "migrate_project_state") as migrate:
+                for label, argv, cwd, git_env in attempts:
+                    with self.subTest(label=label), mock.patch.dict(os.environ, git_env):
+                        rc, _out, err = invoke(argv, cwd)
+                        self.assertEqual(rc, 1)
+                        self.assertIn("noncanonical_intent_mutation", err)
+                        self.assertIn("canonical checkout", err)
+                        self.assertEqual((linked / "tasks.yaml").read_text(), before)
+                        self.assertEqual((root / "tasks.yaml").read_text(), before)
+                        self.assertFalse((linked / ".waystone").exists())
+            migrate.assert_not_called()
+
+            rc, _out, err = invoke(["set", "feat/alpha", "status", "done"], root)
+            self.assertEqual(rc, 0, err)
+            data = yaml.safe_load((root / "tasks.yaml").read_text())
+            alpha = next(t for t in data["tasks"] if t["id"] == "feat/alpha")
+            self.assertEqual(alpha["status"], "done")
+
+            rc, _out, err = invoke(
+                ["set", "feat/alpha", "status", "active", str(root)], linked)
+            self.assertEqual(rc, 0, err)
+            data = yaml.safe_load((root / "tasks.yaml").read_text())
+            alpha = next(t for t in data["tasks"] if t["id"] == "feat/alpha")
+            self.assertEqual(alpha["status"], "active")
+
     def test_dash_dash_values_use_equals_form_and_bare_form_refuses_loudly(self):
         import contextlib
         import io
