@@ -10194,6 +10194,78 @@ class DelegatePacketTests(unittest.TestCase):
         self.assertEqual(packet["task"]["deps"], [{"id": "feat/dep", "status": "done"}])
         self.assertEqual(packet["project"]["name"], "demo")
 
+    def test_rendered_worker_prompt_pins_i10_contract_and_known_debt(self):
+        data = _packet_registry()
+        task = next(item for item in data["tasks"] if item["id"] == "feat/xyz")
+        scope = "src/i10_scope.py"
+        task.update({
+            "milestone": "M1-A",
+            "round": "2026-07-20-i10",
+            "scope": [scope],
+        })
+        packet, _acceptance = delegate._build_packet(
+            data, "feat/xyz", [], Path("/x"),
+            routing_note="budget favors delegated execution")
+        base_sha = "a" * 40
+        prompt = delegate._render_prompt(packet, base_sha)
+
+        # I-10 bounds: the packet retains declared scope while the current prompt states the
+        # worker-facing scope/worktree boundary generically.
+        self.assertEqual(packet["declared_scope"], [scope])
+        self.assertIn("- title: implement the xyz feature", prompt)
+        self.assertIn(
+            "Stay strictly within scope. Modify only files inside this worktree.", prompt)
+        self.assertIn("1. registry criterion one", prompt)
+        self.assertIn("Do NOT accept your own work", prompt)
+        self.assertIn("a separate verifier decides that. Never declare success.", prompt)
+        for report_contract_line in (
+                "## Report (required)", "`WAYSTONE_REPORT.yaml`", "verification:",
+                "limitations:", "risks:", "escalations:"):
+            with self.subTest(report_contract_line=report_contract_line):
+                self.assertIn(report_contract_line, prompt)
+
+        task_block = prompt.split("## Task\n\n", 1)[1].split(
+            "\n\n## Acceptance criteria", 1)[0]
+        expected_task_lines = [
+            "- id: feat/xyz",
+            "- title: implement the xyz feature",
+            "- status: active",  # ADR-0014 Addendum §1: pinned I-10 debt.
+            "- milestone: M1-A",  # ADR-0014 Addendum §1: pinned I-10 debt.
+            "- round: 2026-07-20-i10",  # ADR-0014 Addendum §1: pinned I-10 debt.
+            "- anchor: SSOT §2",  # ADR-0014 Addendum §1: pinned I-10 debt.
+            "- notes: do the thing",
+            # ADR-0014 Addendum §1: dependency presence also pins its registry status.
+            "- deps: feat/dep (done)",
+            # ADR-0014 Addendum §1: routing_note is the fifth pinned I-10 debt surface.
+            "- routing_note: budget favors delegated execution",
+        ]
+        self.assertEqual(task_block.splitlines(), expected_task_lines)
+
+        normalized_prompt = prompt.casefold()
+        for internal_surface in (
+                "tasks.yaml",  # I-10/Addendum §2: registry paths are outside pinned debt.
+                "roadmap",  # I-10/Addendum §2: project-roadmap bookkeeping stays internal.
+                "progress",  # I-10/Addendum §2: progress bookkeeping stays internal.
+                ".waystone/",  # I-10/Addendum §2: machine/runtime state paths stay internal.
+                "round close",  # I-10/Addendum §2: round-close protocol is not worker intent.
+                "exposure",  # I-10/Addendum §2: exposure protocol stays internal.
+                "overlay",  # I-10/Addendum §2: overlay protocol stays internal.
+        ):
+            with self.subTest(internal_surface=internal_surface):
+                self.assertNotIn(internal_surface, normalized_prompt)
+
+        # Pin both the static template and its three declared substitutions so a new
+        # registry/internal projection cannot appear elsewhere and evade TASK_BLOCK.
+        template = delegate._TEMPLATE_PATH.read_text(encoding="utf-8")
+        self.assertEqual(
+            hashlib.sha256(template.encode("utf-8")).hexdigest(),
+            "f5f43018a3b64db121529bf3f1a91439bdd888aa583575efbbebb424e50bbcd4",
+        )
+        expected_prompt = (template.replace("{{TASK_BLOCK}}", "\n".join(expected_task_lines))
+                           .replace("{{ACCEPTANCE}}", "1. registry criterion one")
+                           .replace("{{BASE_SHA}}", base_sha))
+        self.assertEqual(prompt, expected_prompt)
+
     def test_empty_acceptance_raises(self):
         data = {"project": "d", "tasks": [{"id": "feat/na", "title": "no acceptance here", "status": "active"}]}
         with self.assertRaises(delegate.WorkflowError) as cm:
