@@ -101,6 +101,9 @@ from test_release import (
 from test_run_domain import (
     RunDomainTests,
 )
+from test_run_effects import (
+    RunEffectTests,
+)
 from test_run_lease import (
     RunLeaseTests,
 )
@@ -211,6 +214,7 @@ _TEST_CLASSES = (
     RoundCloseTests,
     ReleaseToMainTests,
     RunDomainTests,
+    RunEffectTests,
     RunLeaseTests,
     RunPreflightTests,
     RunPromptTests,

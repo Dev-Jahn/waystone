@@ -158,6 +158,47 @@ class AppendOnlyConflict(StoreError):
         super().__init__(f"{record_kind} identity {record_id!r} already exists")
 
 
+class RunnerInvocationConflict(StoreError):
+    """A runner invocation reservation conflicts with durable action lineage."""
+
+    code = "runner_invocation_conflict"
+
+    def __init__(self, lineage_key: str, action_id: str, detail: str):
+        self.lineage_key = lineage_key
+        self.action_id = action_id
+        self.detail = detail
+        super().__init__(
+            f"runner lineage {lineage_key!r} conflicts at action {action_id!r}: {detail}")
+
+
+class GuardedEffectTransitionRequired(StoreError):
+    """An effect action cannot advance through the generic transition surface."""
+
+    code = "guarded_effect_transition_required"
+
+    def __init__(self, action_id: str):
+        self.action_id = action_id
+        super().__init__(
+            f"effect action {action_id!r} requires a LeaseManager guarded transition")
+
+
+class InvalidEffectTransition(StoreError):
+    """A guarded effect transition does not follow the five-stage lifecycle."""
+
+    code = "invalid_effect_transition"
+
+    def __init__(
+            self, action_id: str, prev_state: str, next_state: str,
+            reason: "TransitionReason"):
+        self.action_id = action_id
+        self.prev_state = prev_state
+        self.next_state = next_state
+        self.reason = reason
+        super().__init__(
+            f"effect action {action_id!r} cannot transition {prev_state!r} -> "
+            f"{next_state!r} for reason {reason.value!r}")
+
+
 class CorruptRuntimeRecordError(StoreError):
     """One logical run graph cannot prove its current-state integrity."""
 
@@ -1007,6 +1048,163 @@ class RunStore:
         )
         return self._insert_entity(record)
 
+    def _create_planned_effect_action(
+            self, run_id: str, job_id: str, attempt_id: str, action_id: str, *,
+            evidence_digest: str,
+            artifact_references: Sequence[ArtifactReference],
+            runner_lineage_key: str | None = None,
+            runner_retry_of: str | None = None) -> EntityRecord:
+        """Create one effect action and its evidence-bound planned state atomically."""
+        run_identity = _nonempty(run_id, "run_id")
+        job_identity = _nonempty(job_id, "job_id")
+        attempt_identity = _nonempty(attempt_id, "attempt_id")
+        action_identity = _nonempty(action_id, "action_id")
+        digest = validate_sha256_digest(evidence_digest)
+        references = tuple(artifact_references)
+        seen_reference_ids: set[str] = set()
+        for reference in references:
+            if not isinstance(reference, ArtifactReference):
+                raise TypeError("artifact_references must contain ArtifactReference values")
+            if reference.reference_id in seen_reference_ids:
+                raise AppendOnlyConflict("artifact reference", reference.reference_id)
+            seen_reference_ids.add(reference.reference_id)
+
+        lineage_prefix: str | None = None
+        if runner_lineage_key is not None:
+            lineage_key = validate_sha256_digest(runner_lineage_key)
+            lineage_prefix = f"runner-invocation:{lineage_key}:"
+            lineage_reference_id = f"{lineage_prefix}{action_identity}"
+            if lineage_reference_id not in seen_reference_ids:
+                raise ValueError(
+                    "runner lineage reservation must be included in artifact_references")
+            if runner_retry_of is not None:
+                runner_retry_of = _nonempty(runner_retry_of, "runner_retry_of")
+        elif runner_retry_of is not None:
+            raise ValueError("runner_retry_of requires runner_lineage_key")
+
+        created = EntityRecord(
+            entity_kind=EntityKind.ACTION,
+            entity_id=action_identity,
+            run_id=run_identity,
+            state="created",
+            version=0,
+            parent_job_id=job_identity,
+            parent_attempt_id=attempt_identity,
+        )
+        planned = replace(created, state="planned", version=1)
+        try:
+            with self._connection_lock, _immediate_transaction(self._connection):
+                if self._connection.execute(
+                        "SELECT 1 FROM actions WHERE action_id = ?",
+                        (action_identity,)).fetchone() is not None:
+                    raise AppendOnlyConflict(EntityKind.ACTION.value, action_identity)
+
+                parent_run = self._load_record(EntityKind.RUN, run_identity)
+                parent_job = self._load_record(EntityKind.JOB, job_identity)
+                parent_attempt = self._load_record(EntityKind.ATTEMPT, attempt_identity)
+                if parent_run.run_id != run_identity:
+                    raise CorruptRuntimeRecordError(
+                        run_identity, EntityKind.RUN, run_identity, "run identity mismatch")
+                if parent_job.run_id != run_identity:
+                    raise ValueError("action parent job belongs to a different run")
+                if (parent_attempt.run_id != run_identity
+                        or parent_attempt.parent_job_id != job_identity):
+                    raise ValueError("action parent attempt belongs to a different run or job")
+
+                if lineage_prefix is not None:
+                    lineage_rows = self._connection.execute(
+                        "SELECT a.reference_id, a.entity_id, x.state FROM artifacts a "
+                        "JOIN actions x ON x.action_id = a.entity_id "
+                        "WHERE substr(a.reference_id, 1, length(?)) = ? "
+                        "ORDER BY a.transition_id",
+                        (lineage_prefix, lineage_prefix),
+                    ).fetchall()
+                    prior: list[EntityRecord] = []
+                    for row in lineage_rows:
+                        if row["reference_id"] != f"{lineage_prefix}{row['entity_id']}":
+                            raise CorruptRuntimeRecordError(
+                                run_identity, EntityKind.ACTION, row["entity_id"],
+                                "runner lineage reference identity is malformed")
+                        record = self._load_record(EntityKind.ACTION, row["entity_id"])
+                        if (record.run_id != run_identity
+                                or record.parent_job_id != job_identity
+                                or record.state != row["state"]):
+                            raise CorruptRuntimeRecordError(
+                                record.run_id, EntityKind.ACTION, record.entity_id,
+                                "runner lineage scope or current state is incoherent")
+                        prior.append(record)
+                    if prior and runner_retry_of is None:
+                        raise RunnerInvocationConflict(
+                            runner_lineage_key, prior[-1].entity_id,
+                            "a repeated invocation requires explicit retry lineage")
+                    prior_ids = {record.entity_id for record in prior}
+                    if runner_retry_of is not None and runner_retry_of not in prior_ids:
+                        raise RunnerInvocationConflict(
+                            runner_lineage_key, runner_retry_of,
+                            "retry lineage does not name this runner invocation")
+                    nonterminal = [record for record in prior if record.state != "completed"]
+                    if nonterminal:
+                        raise RunnerInvocationConflict(
+                            runner_lineage_key, nonterminal[-1].entity_id,
+                            "the runner invocation has a nonterminal or uncertain action")
+
+                self._connection.execute(
+                    "INSERT INTO actions(action_id, run_id, job_id, attempt_id, state, version, "
+                    "record_digest) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (action_identity, run_identity, job_identity, attempt_identity,
+                     created.state, created.version, _record_digest(created)),
+                )
+                self._connection.execute(
+                    "INSERT INTO transitions(run_id, entity_kind, entity_id, prev_state, next_state, "
+                    "entity_version, reason, evidence_digest) "
+                    "VALUES (?, ?, ?, NULL, ?, 0, ?, NULL)",
+                    (run_identity, EntityKind.ACTION.value, action_identity, created.state,
+                     TransitionReason.CREATED.value),
+                )
+                cursor = self._connection.execute(
+                    "INSERT INTO transitions(run_id, entity_kind, entity_id, prev_state, next_state, "
+                    "entity_version, reason, evidence_digest) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+                    (run_identity, EntityKind.ACTION.value, action_identity, created.state,
+                     planned.state, TransitionReason.PLANNED.value, digest),
+                )
+                transition_id = cursor.lastrowid
+                self._transaction_fault_point("after_transition_insert")
+
+                result = self._connection.execute(
+                    "UPDATE actions SET state = ?, version = ?, record_digest = ? "
+                    "WHERE action_id = ? AND version = 0",
+                    (planned.state, planned.version, _record_digest(planned), action_identity),
+                )
+                if result.rowcount != 1:
+                    actual_row = self._connection.execute(
+                        "SELECT version FROM actions WHERE action_id = ?", (action_identity,)
+                    ).fetchone()
+                    actual = -1 if actual_row is None else int(actual_row[0])
+                    raise EntityVersionConflict(
+                        EntityKind.ACTION, action_identity, created.version, actual)
+
+                for reference in references:
+                    if self._connection.execute(
+                            "SELECT 1 FROM artifacts WHERE reference_id = ?",
+                            (reference.reference_id,)).fetchone() is not None:
+                        raise AppendOnlyConflict("artifact reference", reference.reference_id)
+                    self._connection.execute(
+                        "INSERT INTO artifacts(reference_id, run_id, transition_id, entity_kind, "
+                        "entity_id, entity_version, reference_kind, digest, size) "
+                        "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                        (reference.reference_id, run_identity, transition_id,
+                         EntityKind.ACTION.value, action_identity, reference.kind.value,
+                         reference.digest, reference.size),
+                    )
+                self._transaction_fault_point("after_artifact_references")
+            return planned
+        except (StoreError, ValueError, TypeError):
+            raise
+        except sqlite3.IntegrityError as error:
+            raise StateDatabaseError("create planned effect action", str(error)) from error
+        except sqlite3.DatabaseError as error:
+            raise StateDatabaseError("create planned effect action", str(error)) from error
+
     def _row_to_record(
             self, entity_kind: EntityKind, row: sqlite3.Row, requested_id: str) -> EntityRecord:
         raw_run_id = row["run_id"]
@@ -1255,6 +1453,13 @@ class RunStore:
                 if current.version != expected_version:
                     raise EntityVersionConflict(
                         kind, identity, expected_version, current.version)
+                if (kind is EntityKind.ACTION
+                        and self._connection.execute(
+                            "SELECT 1 FROM artifacts WHERE reference_id = ? "
+                            "AND entity_kind = ? AND entity_id = ?",
+                            (f"effect-plan:{identity}", EntityKind.ACTION.value, identity),
+                        ).fetchone() is not None):
+                    raise GuardedEffectTransitionRequired(identity)
                 next_version = expected_version + 1
                 cursor = self._connection.execute(
                     "INSERT INTO transitions(run_id, entity_kind, entity_id, prev_state, next_state, "
@@ -1300,6 +1505,157 @@ class RunStore:
             raise StateDatabaseError("record transition", str(error)) from error
         except sqlite3.DatabaseError as error:
             raise StateDatabaseError("record transition", str(error)) from error
+
+    def _record_guarded_action_transition(
+            self, action_id: str, *, expected_version: int, owner_token: str,
+            fencing_epoch: int, next_state: str, reason: TransitionReason,
+            evidence_digest: str | None = None,
+            artifact_references: Sequence[ArtifactReference] = ()) -> EntityRecord:
+        """Advance one action and its exact lease tuple inside an existing guard transaction."""
+        identity = _nonempty(action_id, "action_id")
+        owner = _nonempty(owner_token, "owner_token")
+        state = _nonempty(next_state, "next_state")
+        if (isinstance(expected_version, bool) or not isinstance(expected_version, int)
+                or not 0 <= expected_version < (1 << 63) - 1):
+            raise ValueError(
+                "expected_version must be a non-negative incrementable signed 64-bit integer")
+        if (isinstance(fencing_epoch, bool) or not isinstance(fencing_epoch, int)
+                or not 1 <= fencing_epoch <= (1 << 63) - 1):
+            raise ValueError("fencing_epoch must be a positive signed 64-bit integer")
+        try:
+            typed_reason = TransitionReason(reason)
+        except (TypeError, ValueError) as error:
+            raise ValueError("reason must be a TransitionReason supported by schema v1") from error
+        if evidence_digest is not None:
+            evidence_digest = validate_sha256_digest(evidence_digest)
+        references = tuple(artifact_references)
+        seen_reference_ids: set[str] = set()
+        for reference in references:
+            if not isinstance(reference, ArtifactReference):
+                raise TypeError("artifact_references must contain ArtifactReference values")
+            if reference.reference_id in seen_reference_ids:
+                raise AppendOnlyConflict("artifact reference", reference.reference_id)
+            seen_reference_ids.add(reference.reference_id)
+
+        operation = "record guarded action transition"
+        try:
+            if not self._connection.in_transaction:
+                raise StateDatabaseError(
+                    operation, "requires an active LeaseManager guard transaction")
+
+            current = self._load_record(EntityKind.ACTION, identity)
+            if current.version != expected_version:
+                raise EntityVersionConflict(
+                    EntityKind.ACTION, identity, expected_version, current.version)
+            is_effect_action = self._connection.execute(
+                "SELECT 1 FROM artifacts WHERE reference_id = ? "
+                "AND entity_kind = ? AND entity_id = ?",
+                (f"effect-plan:{identity}", EntityKind.ACTION.value, identity),
+            ).fetchone() is not None
+            effect_edges = {
+                ("planned", "claimed", TransitionReason.CLAIMED),
+                ("claimed", "effect", TransitionReason.PROCESS_STARTED),
+                ("effect", "observed", TransitionReason.EFFECT_OBSERVED),
+                ("observed", "completed", TransitionReason.COMPLETED),
+            }
+            if (is_effect_action
+                    and (current.state, state, typed_reason) not in effect_edges):
+                raise InvalidEffectTransition(
+                    identity, current.state, state, typed_reason)
+            lease_rows = self._connection.execute(
+                "SELECT lease_id, run_id, entity_kind, entity_id, entity_version, "
+                "owner_token, fencing_epoch FROM leases "
+                "WHERE lease_id = ? OR (entity_kind = ? AND entity_id = ?)",
+                (identity, EntityKind.ACTION.value, identity),
+            ).fetchall()
+            if len(lease_rows) != 1:
+                raise StateDatabaseError(
+                    operation, "current action lease row is missing or ambiguous")
+            lease = lease_rows[0]
+            if (lease["lease_id"] != identity
+                    or lease["run_id"] != current.run_id
+                    or lease["entity_kind"] != EntityKind.ACTION.value
+                    or lease["entity_id"] != identity
+                    or lease["entity_version"] != expected_version
+                    or lease["owner_token"] != owner
+                    or lease["fencing_epoch"] != fencing_epoch):
+                raise StateDatabaseError(
+                    operation, "current action lease tuple does not exactly match")
+
+            next_version = expected_version + 1
+            cursor = self._connection.execute(
+                "INSERT INTO transitions(run_id, entity_kind, entity_id, prev_state, next_state, "
+                "entity_version, reason, evidence_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (current.run_id, EntityKind.ACTION.value, identity, current.state, state,
+                 next_version, typed_reason.value, evidence_digest),
+            )
+            transition_id = cursor.lastrowid
+            self._transaction_fault_point("after_transition_insert")
+
+            updated = replace(current, state=state, version=next_version)
+            result = self._connection.execute(
+                "UPDATE actions SET state = ?, version = ?, record_digest = ? "
+                "WHERE action_id = ? AND version = ?",
+                (updated.state, updated.version, _record_digest(updated), identity,
+                 expected_version),
+            )
+            if result.rowcount != 1:
+                actual_row = self._connection.execute(
+                    "SELECT version FROM actions WHERE action_id = ?", (identity,)
+                ).fetchone()
+                actual = -1 if actual_row is None else int(actual_row[0])
+                raise EntityVersionConflict(
+                    EntityKind.ACTION, identity, expected_version, actual)
+
+            for reference in references:
+                if self._connection.execute(
+                        "SELECT 1 FROM artifacts WHERE reference_id = ?",
+                        (reference.reference_id,)).fetchone() is not None:
+                    raise AppendOnlyConflict("artifact reference", reference.reference_id)
+                self._connection.execute(
+                    "INSERT INTO artifacts(reference_id, run_id, transition_id, entity_kind, "
+                    "entity_id, entity_version, reference_kind, digest, size) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (reference.reference_id, current.run_id, transition_id,
+                     EntityKind.ACTION.value, identity, next_version, reference.kind.value,
+                     reference.digest, reference.size),
+                )
+            self._transaction_fault_point("after_artifact_references")
+
+            lease_result = self._connection.execute(
+                "UPDATE leases SET entity_version = ? "
+                "WHERE lease_id = ? AND run_id = ? AND entity_kind = ? AND entity_id = ? "
+                "AND owner_token = ? AND fencing_epoch = ? AND entity_version = ?",
+                (next_version, identity, current.run_id, EntityKind.ACTION.value, identity,
+                 owner, fencing_epoch, expected_version),
+            )
+            if lease_result.rowcount != 1:
+                raise StateDatabaseError(
+                    operation, "lease entity-version CAS did not select one current row")
+
+            runtime = self._connection.execute(
+                "SELECT entity_version FROM action_runtime WHERE action_id = ?", (identity,)
+            ).fetchone()
+            if runtime is not None:
+                runtime_version = runtime["entity_version"]
+                if (isinstance(runtime_version, bool) or not isinstance(runtime_version, int)
+                        or runtime_version != expected_version):
+                    raise StateDatabaseError(
+                        operation, "action runtime entity version is incoherent")
+                runtime_result = self._connection.execute(
+                    "UPDATE action_runtime SET entity_version = ? "
+                    "WHERE action_id = ? AND entity_version = ?",
+                    (next_version, identity, expected_version),
+                )
+                if runtime_result.rowcount != 1:
+                    raise StateDatabaseError(
+                        operation,
+                        "action runtime entity-version CAS did not select one current row")
+            return updated
+        except (StoreError, ValueError, TypeError):
+            raise
+        except sqlite3.DatabaseError as error:
+            raise StateDatabaseError(operation, str(error)) from error
 
     def get_artifact_reference(self, reference_id: str) -> ArtifactReference:
         identity = _nonempty(reference_id, "reference_id")
