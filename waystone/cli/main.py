@@ -17,6 +17,7 @@ Groups:
   round    merge --pr N ...          deterministic merge guard
   improve  trace|reviews|evidence|audit|metrics|decide ...  project evidence, metrics, and decisions
   delegate run|status|show|verify|verdict|apply|discard ...  worktree runner + evidence-gated verdict
+  run      start|resume|status|watch|cancel|actions ...  one-task run engine (opt-in)
   overlay  add|...|promote-user|override|materialize|compose ...  four-layer adaptive policy
   consent  record <surface> <choice> ...  append a standard project-local consent event
   install  agents|hooks|statusline [--consent-recorded] ...  consent-gated managed surfaces
@@ -622,7 +623,7 @@ def _module_checks_project_state(argv: list[str]) -> bool:
     """Whitelist modules whose direct CLI entry point performs its own project-state check."""
     if not argv:
         return False
-    if argv[0] in {"task", "review", "delegate", "overlay", "check", "roadmap"}:
+    if argv[0] in {"task", "review", "delegate", "run", "overlay", "check", "roadmap"}:
         return True
     return argv[0] == "round" and len(argv) > 1 and argv[1] in {"close", "reclose"}
 
@@ -677,6 +678,9 @@ def main(argv: list[str]) -> int:
     if group == "delegate":
         import delegate
         return delegate.main(rest)
+    if group == "run":
+        from waystone.cli import run_group
+        return run_group.main(rest)
     if group == "overlay":
         import overlay
         return overlay.main(rest)

@@ -590,3 +590,17 @@ tasks:
     title: "PatchIntegrationEffect durable spec에 approval bundle digest 결속 + crash-reconcile 시 authority 재검증 hook: 현행은 apply_integration_decision의 이중 재검증 후 plan 저장되나, 저장~reconcile 사이 crash 경로에서 generic EffectEngine.reconcile이 approval 재검증 없이 실행 — PC-22 '실행 시점 재검증'의 crash 창 폐쇄 (m1b-verify 보고 ④1·⑤1, effects additive 확장)"
     status: "pending"
     deps: ["feat/run-effect-protocol", "feat/run-verify-decision"]
+  - id: chore/store-readonly-opener-public-api
+    title: "RunStore에 public read-only opener 제공: status/watch·observe가 RunStore.open(migration·WAL 협상·gitignore 생성 부작용)을 피하려고 package-private schema validation+construction token으로 read-only backup store를 조립 중 — public 경계로 승격 (m1b-bridge 보고 ④3·m1b-observe ④2)"
+    status: "pending"
+    severity: "minor"
+    deps: ["feat/run-store-kernel"]
+  - id: feat/run-production-assembly
+    title: "실 backend용 production RunAssembly factory: 실제 profile·backend(codex exec 등)에서 VerificationPlanDefinition·capability probe·exact RunnerInvocation(child env 포함 — supervisor invocation 확장 필요, bridge ④4)·verifier adapter 묶음을 컴파일하는 factory + front door 기본 배선 — M1-C cut-over의 전제 (m1b-bridge 보고 ④1·⑤1; gate smoke는 수동 조립으로 선행)"
+    status: "pending"
+    deps: ["feat/run-cli-bridge"]
+  - id: fix/run-cli-coverage-gaps
+    title: "run CLI 커버리지 공백 2건 보강: ⑴ cli_main.main→run_group.main 실제 dispatch 분기와 legacy state check 우회의 end-to-end 테스트(현행은 whitelist bool만 단언) ⑵ assembly 부재 시 run_engine_configuration_unavailable typed refusal(D2 anti-silent-fallback 가드) 테스트 (m1b-bridge opus 검증 minor 1·2)"
+    status: "pending"
+    severity: "minor"
+    deps: ["feat/run-cli-bridge"]
