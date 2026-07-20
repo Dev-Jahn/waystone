@@ -330,8 +330,29 @@ tasks:
     severity: "major"
     origin: "review-2026-07-20-fleet-fix-wave"
   - id: chore/m1a-suite-manifest-pin
+    result: "docs/m1a-suite-manifest.txt — AST 전수 830 = full gate 실행 계수 830 일치, approved-diffs 절 포함 — dev HEAD"
     title: "M1-A 착수 manifest: 시작 commit의 suite test-ID 전수(830)와 계수를 docs/m1a-suite-manifest.txt로 pin — ADR-0014 Amendment 2 §4(suite identity 고정), 이후 suite 변경은 test-ID 보존 이동 또는 main 승인 차이 기록만 허용"
-    status: "pending"
+    status: "done"
   - id: docs/m1a-mechanical-split-plan
+    result: "dev_docs/m1a-split-plan.md — 인벤토리·목표 배치·커밋 규율([m1a-move]/[m1a-adapter]·본문 diff 0·debt 수리 금지)·테스트 ID-보존 분할·wave 5-task 분해(의존 체인)·exit 4항·실행 시점(리뷰 triage 후) 확정"
     title: "M1-A 기계 분할 분해 계획: scripts/*.py 모놀리스의 분할 단위·이동 매핑·검증 절차 확정(동작 무변경, ADR-0014 순수 기계 ruling) + PC 마일스톤 귀속표 — main 설계 작업"
+    status: "done"
+  - id: chore/m1a-package-skeleton
+    title: "M1-A: waystone/ package 골격+composition root 신설, scripts/waystone.py dispatch를 waystone.cli로 이식, bin 진입점 전환 — 동작 무변경, [m1a-move]/[m1a-adapter] 커밋 분리"
     status: "pending"
+  - id: chore/m1a-core-project-split
+    title: "M1-A: common.py 분해 이동(core=오류·fs·lock·json/yaml 기저, project=root·profile·sunset detector, adapters.git=git probe·worktree) + 잔류 모듈 import adapter 커밋 — 본문 diff 0"
+    status: "pending"
+    deps: ["chore/m1a-package-skeleton"]
+  - id: chore/m1a-registry-move
+    title: "M1-A: tasks.py를 waystone/project로 이동(round text-surgery 의존 경계 유지) — 본문 diff 0"
+    status: "pending"
+    deps: ["chore/m1a-core-project-split"]
+  - id: chore/m1a-runs-move
+    title: "M1-A: delegate.py를 waystone/runs로 이동 + git 헬퍼 adapters 정렬 — 내부 재설계 0, I-10 특성화 oracle green 유지"
+    status: "pending"
+    deps: ["chore/m1a-core-project-split"]
+  - id: chore/m1a-test-suite-split
+    title: "M1-A: run_tests.py(21.8k줄/830)를 클러스터별 test_<area>.py로 ID-보존 분할, run_tests.py는 집계 진입점+기존 CLI 인자 계약 유지 — manifest 830 전수 green"
+    status: "pending"
+    deps: ["chore/m1a-registry-move", "chore/m1a-runs-move"]
