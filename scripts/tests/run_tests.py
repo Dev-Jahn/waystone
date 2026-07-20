@@ -10622,6 +10622,38 @@ class DelegateRunTests(unittest.TestCase):
     def _record_dir(self, root, home):
         return _run_with_home(home, lambda: sorted(delegate._delegations_dir(root).iterdir())[-1])
 
+    def test_run_refuses_symlinked_worktrees_cache_ancestor_without_external_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            external = Path(d) / "external-worktrees"
+            external.mkdir()
+            worktrees = home / ".waystone" / "cache" / "worktrees"
+            worktrees.parent.mkdir(parents=True)
+            worktrees.symlink_to(external, target_is_directory=True)
+
+            with self.assertRaises(delegate._RefusedWrite) as raised:
+                self._run(root, home, self._fake_runner({}))
+
+            self.assertIn(str(worktrees), str(raised.exception))
+            self.assertTrue(worktrees.is_symlink())
+            self.assertFalse((external / common._project_slug(root)).exists())
+
+    def test_run_refuses_worktrees_cache_outside_machine_root_without_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(d)
+            outside = Path(d) / "outside-worktrees"
+            original = delegate.worktrees_cache_dir
+            delegate.worktrees_cache_dir = lambda: outside
+            try:
+                with self.assertRaises(delegate._RefusedWrite) as raised:
+                    self._run(root, home, self._fake_runner({}))
+            finally:
+                delegate.worktrees_cache_dir = original
+
+            self.assertIn(str(outside), str(raised.exception))
+            self.assertIn(str(home / ".waystone"), str(raised.exception))
+            self.assertFalse((outside / common._project_slug(root)).exists())
+
     def test_success_path_contract_and_exposure(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(d)
@@ -18292,6 +18324,36 @@ class MigrationSunsetTests(unittest.TestCase):
             self.assertIn("does not migrate or repair", str(raised.exception))
             self.assertEqual(marker.read_bytes(), b"/legacy/worktree/did-pending")
 
+    def test_unsafe_marker_ancestor_is_refused_without_repair(self):
+        cases = (
+            ("cache-symlink", ("cache",), "symlink"),
+            ("cache-file", ("cache",), "file"),
+            ("worktrees-symlink", ("cache", "worktrees"), "symlink"),
+            ("worktrees-file", ("cache", "worktrees"), "file"),
+        )
+        for name, parts, kind in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                root, home = self._project(Path(d))
+                ancestor = (home / ".waystone").joinpath(*parts)
+                ancestor.parent.mkdir(parents=True)
+                if kind == "symlink":
+                    external = Path(d) / "external-markers"
+                    external.mkdir()
+                    ancestor.symlink_to(external, target_is_directory=True)
+                else:
+                    ancestor.write_bytes(b"not-a-marker-directory")
+
+                with self.assertRaises(common.Pre09StateError) as raised:
+                    _run_with_home(home, lambda: common.migrate_project_state(root))
+
+                self.assertEqual(raised.exception.paths, (ancestor,))
+                if kind == "symlink":
+                    self.assertTrue(ancestor.is_symlink())
+                    self.assertEqual(list(external.iterdir()), [])
+                else:
+                    self.assertEqual(ancestor.read_bytes(), b"not-a-marker-directory")
+                self.assertFalse((root / ".waystone").exists())
+
     def test_symlinked_marker_container_is_refused_without_repair(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(Path(d))
@@ -18348,7 +18410,7 @@ class MigrationSunsetTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), body)
             self.assertFalse((root / ".waystone" / "profile.yml").exists())
 
-    def test_preserved_profile_mismatching_live_is_refused_without_repair(self):
+    def test_preserved_profile_mismatching_live_is_accepted_without_repair(self):
         with tempfile.TemporaryDirectory() as d:
             root, home = self._project(Path(d))
             preserved_body = b"schema: waystone-profile-1\nbindings: {}\n"
@@ -18363,13 +18425,26 @@ class MigrationSunsetTests(unittest.TestCase):
             live.parent.mkdir()
             live.write_bytes(live_body)
 
-            with self.assertRaises(common.Pre09StateError) as raised:
-                _run_with_home(home, lambda: common.migrate_project_state(root))
+            self.assertFalse(_run_with_home(
+                home, lambda: common.migrate_project_state(root)))
 
-            self.assertEqual(set(raised.exception.paths), {*profiles, live.resolve()})
             for profile in profiles:
                 self.assertEqual(profile.read_bytes(), preserved_body)
             self.assertEqual(live.read_bytes(), live_body)
+
+    def test_preserved_profile_without_live_is_accepted_without_repair(self):
+        with tempfile.TemporaryDirectory() as d:
+            root, home = self._project(Path(d))
+            preserved = home / ".claude" / "waystone.pre-0.9" / "profile.yml"
+            preserved_body = b"schema: waystone-profile-1\nbindings: {}\n"
+            preserved.parent.mkdir(parents=True)
+            preserved.write_bytes(preserved_body)
+
+            self.assertFalse(_run_with_home(
+                home, lambda: common.migrate_project_state(root)))
+
+            self.assertEqual(preserved.read_bytes(), preserved_body)
+            self.assertFalse((root / ".waystone" / "profile.yml").exists())
 
     def test_completed_0_11_seed_and_empty_scaffolding_are_accepted(self):
         with tempfile.TemporaryDirectory() as d:

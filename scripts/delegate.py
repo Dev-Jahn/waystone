@@ -40,7 +40,7 @@ import yaml  # noqa: E402
 from common import (
     WorkflowError, _project_slug, canonical_scope_prefixes, ensure_project_state_dir,
     find_project_root, git_full_sha, hold_lock, hold_project_lock, load_config, load_tasks,
-    migrate_project_state, project_state_path, worktrees_cache_dir, write_text_atomic,
+    machine_dir, migrate_project_state, project_state_path, worktrees_cache_dir, write_text_atomic,
 )  # noqa: E402
 
 DELEG_REF_NS = "refs/waystone/delegations"
@@ -318,11 +318,39 @@ def _profile_path(root: Path) -> Path:
     return project_state_path(root) / "profile.yml"
 
 
-def _mkdir_or_refuse(path: Path) -> None:
+def _mkdir_or_refuse(path: Path, *, owned_root: Path) -> None:
+    path = Path(os.path.abspath(path))
+    owned_root = Path(os.path.abspath(owned_root))
+    try:
+        relative = path.relative_to(owned_root)
+    except ValueError as e:
+        raise _RefusedWrite(
+            f"plugin-local directory {path} is outside owned root {owned_root}") from e
+
+    components = [owned_root]
+    component = owned_root
+    for part in relative.parts:
+        component /= part
+        components.append(component)
+    for component in components:
+        try:
+            info = component.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as e:
+            raise _RefusedWrite(
+                f"cannot inspect plugin-local directory component {component}: {e}") from e
+        if stat.S_ISLNK(info.st_mode):
+            raise _RefusedWrite(
+                f"refusing symlinked plugin-local directory component {component}")
+        if not stat.S_ISDIR(info.st_mode):
+            raise _RefusedWrite(
+                f"plugin-local directory component is not a directory: {component}")
+
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        raise _RefusedWrite(f"cannot create plugin-local directory {path}: {e}")
+        raise _RefusedWrite(f"cannot create plugin-local directory {path}: {e}") from e
 
 
 def _ensure_project_state_or_refuse(root: Path) -> None:
@@ -2063,7 +2091,7 @@ def _claim_run(root: Path, plan: dict) -> tuple[str, Path]:
 
     did = _make_did(task_id)
     base_did, n = did, 2
-    _mkdir_or_refuse(_delegations_dir(root))
+    _mkdir_or_refuse(_delegations_dir(root), owned_root=project_state_path(root))
     while True:
         record_dir = _record_dir(root, did)
         try:
@@ -2127,8 +2155,8 @@ def _run_claimed_body(root: Path, plan: dict, did: str, record_dir: Path, human)
     json_events = plan.get("json_events", False)
     artifact_dir = record_dir / "artifact"
     worktree_path = _worktree_path(root, did)
-    _mkdir_or_refuse(artifact_dir)
-    _mkdir_or_refuse(worktree_path.parent)
+    _mkdir_or_refuse(artifact_dir, owned_root=project_state_path(root))
+    _mkdir_or_refuse(worktree_path.parent, owned_root=machine_dir())
 
     head_sha = git_full_sha(root, "HEAD")
     base_sha, dirty = _snapshot(root, f"waystone delegation snapshot: {task_id} {did}")

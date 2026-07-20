@@ -443,7 +443,6 @@ def _append_preserved_profile_conflicts(
         if stat.S_ISLNK(live_info.st_mode) or not stat.S_ISREG(live_info.st_mode):
             offenders.append(live)
             return
-        profiles.append(live)
 
     try:
         bodies = {profile.read_bytes() for profile in profiles}
@@ -478,7 +477,21 @@ def _unresolved_pre_0_9_project_paths(
         _append_children(source / "delegations" / slug, offenders)
         _append_children(source / "worktrees" / slug, offenders)
 
-    marker_dir = worktrees_cache_dir(home) / slug
+    marker_root = machine_dir(home)
+    marker_ancestors = (
+        marker_root,
+        marker_root / "cache",
+        worktrees_cache_dir(home),
+    )
+    for marker_ancestor in marker_ancestors:
+        marker_info = _checked_lstat(marker_ancestor)
+        if marker_info is None:
+            return offenders
+        if stat.S_ISLNK(marker_info.st_mode) or not stat.S_ISDIR(marker_info.st_mode):
+            offenders.append(marker_ancestor)
+            return offenders
+
+    marker_dir = marker_ancestors[-1] / slug
     marker_entries = _checked_entries(marker_dir)
     if marker_entries is not None:
         marker_info = _checked_lstat(marker_dir)
