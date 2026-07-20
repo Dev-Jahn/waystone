@@ -564,7 +564,7 @@ tasks:
     title: "m1b-spec 해석 일괄 판정: ①ADR-0010 acceptance envelope vs legacy 문자열(§2-6 tasks.yaml 불변과의 3자 충돌 — ADR-0010 amendment 필요) ②review decision null 허용 여부 ③no-retry 기본값(main 수용) ④RunSpec/snapshot의 EVIDENCE kind 재사용 ⑤canonical JSON·job id <run-uuid>:job 형식 고정(main 수용) ⑦PC-31 no-write 우선(main 수용) ⑧role binding은 preflight/VerificationPlan 소유(main 수용) — ①②④는 라운드 마감 시 ADR-0010 amendment로 확정 (m1b-spec 보고 ④)"
     status: "pending"
   - id: decision/run-engine-format-pinning-batch
-    ruling: "잠정 ruling 2026-07-21 (누적): 각 기체의 v1 표현 선택 전부 수용, gate/m1b-exit에서 docs/run-engine-formats.md(v1 format registry)로 명문화 — store(EVIDENCE kind·evidence digest cardinality), spec(canonical JSON·job id <run-uuid>:job), preflight(verification-plan:<run_id>·runner proof 7축·receipt schema), transport(wire format·exit enum 0/1/2/75·schema names). plan revision(run당 1건 immutable)·failed-preflight audit 부재·supervisor sidecar heartbeat 형식 v1 수용. GC: reclaim 경합 orphan bytes와 transport 2차 guard race의 unreferenced CAS bytes는 ADR-0007 orphan 범주로 정합(도달성 설계는 M1-C+ GC 구현 시 확정). perm: SQLite open O_NOFOLLOW 불가는 stdlib 한계 수용, 기존 object는 ADR 의미 조건 판정, corruption fixture 갱신 승인(계약 불변), lock path 결함의 state_path_* taxonomy 수용. transport 추가: 운영 blocked reason vocabulary는 필요 시 v-next migration(현행 typed idle로 충분), lease mismatch/unknown의 wire 구분은 cli-bridge에서 재평가, unclassified=비자동재시도(bool 유지)."
+    ruling: "잠정 ruling 2026-07-21 (누적): 각 기체의 v1 표현 선택 전부 수용, gate/m1b-exit에서 docs/run-engine-formats.md(v1 format registry)로 명문화 — store(EVIDENCE kind·evidence digest cardinality), spec(canonical JSON·job id), preflight(reference id·runner proof 7축·receipt schema), transport(wire format·exit enum 0/1/2/75), cancel(ADR-0003 세분 pending reason이 계획 요약 문언에 우선). GC: orphan bytes 3원(reclaim 경합·transport 2차 guard·cancel intent/terminal CAS)은 ADR-0007 orphan 범주 정합, 도달성은 M1-C+ GC에서. perm: SQLite open O_NOFOLLOW 한계 수용·기존 object 의미 조건 판정·fixture 갱신 승인·state_path_* taxonomy 수용. transport: blocked vocabulary는 필요 시 v-next migration·lease code wire 구분은 cli-bridge 재평가·unclassified=비자동재시도. verify: ④2 checkout-CAS TOCTOU 창은 ADR-0013 의도적 same-account 간섭 비보호 경계 내 수용, ④3 private integration ref target 수용(live-tree delivery는 M2 — bridge는 동등성 주장 금지), ④4 git_rc fail-closed 병용 수용, ⑨ criterion evidence digest availability 비강제 수용(별도 계약 승격 시 재론)."
     title: "신엔진 v1 표현 계약 일괄 고정: store EVIDENCE reference kind 재사용·evidence digest cardinality(store ④1·⑤) / RunSpec·plan의 canonical JSON(sorted-key compact UTF-8)+sha256:<hex>·job id <run-uuid>:job(spec ⑤) / preflight의 verification-plan:<run_id> reference·runner proof 7축 이름·receipt schema(preflight ①③⑩) — 소비자 확산 전 format registry로 고정 필요"
     status: "pending"
   - id: chore/profile-v1-bytes-public-api
@@ -586,3 +586,7 @@ tasks:
     status: "pending"
     severity: "minor"
     deps: ["feat/run-store-kernel"]
+  - id: fix/patch-effect-approval-reconcile-binding
+    title: "PatchIntegrationEffect durable spec에 approval bundle digest 결속 + crash-reconcile 시 authority 재검증 hook: 현행은 apply_integration_decision의 이중 재검증 후 plan 저장되나, 저장~reconcile 사이 crash 경로에서 generic EffectEngine.reconcile이 approval 재검증 없이 실행 — PC-22 '실행 시점 재검증'의 crash 창 폐쇄 (m1b-verify 보고 ④1·⑤1, effects additive 확장)"
+    status: "pending"
+    deps: ["feat/run-effect-protocol", "feat/run-verify-decision"]

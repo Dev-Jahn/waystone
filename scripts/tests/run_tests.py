@@ -116,6 +116,9 @@ from test_run_observe import (
 from test_run_preflight import (
     RunPreflightTests,
 )
+from test_run_verify import (
+    RunVerifyTests,
+)
 from test_run_prompt import (
     RunPromptTests,
 )
@@ -231,6 +234,7 @@ _TEST_CLASSES = (
     RunLeaseTests,
     RunObserveTests,
     RunPreflightTests,
+    RunVerifyTests,
     RunPromptTests,
     LockPrimitiveTests,
     LockWiringTests,
