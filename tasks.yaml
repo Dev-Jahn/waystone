@@ -665,4 +665,34 @@ tasks:
     deps: ["feat/run-verify-decision"]
   - id: spike/intent-redesign-plan
     title: "0.13 intent control plane 재설계 계획 수립 — 사용자 mandate(외부 리뷰 2건·omniphysics realign 사례) 기반: PROJECT_BRIEF/lifecycle stage/finding disposition/semantic work brief 전면 설계, 기존 0.12 계획·M1-C 분해 대체"
+    status: "done"
+  - id: feat/013-project-frame-work-brief
+    title: "0.13 A1: PROJECT_BRIEF typed fact parser(ProjectFrame) + Semantic WorkBrief/CompletionContract 스키마·CAS ingress·semantic prompt renderer + brief config"
+    status: "pending"
+  - id: feat/013-finding-disposition
+    title: "0.13 B1: finding claim/validation/disposition 3-immutable-chain + review layout/CLI + selected-work materialization (REAL→task 자동 연결 제거)"
+    status: "pending"
+  - id: feat/013-staged-run-context-resume
+    title: "0.13 A2: ProjectContext·production RunAssembly·RunSpec/store v2·worker result union·context_request/waiting_context resume·typed run start"
+    status: "pending"
+    deps: ["feat/013-project-frame-work-brief"]
+  - id: feat/013-stage-assurance
+    title: "0.13 B2: stage별 AssurancePlan action DAG·candidate/evaluation freeze·promotion lineage·review cycle budget·test lifecycle"
+    status: "pending"
+    deps: ["feat/013-staged-run-context-resume", "feat/013-finding-disposition"]
+  - id: feat/013-outcome-status
+    title: "0.13 C1: OutcomeDelta·outcome ledger first-parent CAS publication·objective-first status/advisory projection"
+    status: "pending"
+    deps: ["feat/013-stage-assurance"]
+  - id: feat/013-realignment-surface-cutover
+    title: "0.13 C2: skill/CLI/plugin/hook 단일 cutover + ideate framing/realignment + legacy delegate/round/ssot/lanes 삭제 + docs/ADR 정합"
+    status: "pending"
+    deps: ["feat/013-outcome-status"]
+  - id: gate/013-intent-control-plane
+    title: "0.13 exit gate: 핵심 e2e 7·touched kernel focused regression·real backend smoke·독립 적대 리뷰·삭제 audit"
+    status: "pending"
+    deps: ["feat/013-realignment-surface-cutover"]
+  - id: decision/013-plan-open-questions
+    ruling: "Q1–Q6 전부 기체 잠정안 채택 (2026-07-22 main, 세션 자율권한). Q1 Prototype scope=commitment subtype / Q2 owner confirmation digest 결속으로 충분 / Q3 owner-only accept-risk 경계 확정 / Q4 compiler 제안값 2, engine default 없음 / Q5 coordinator 기록·independent evidence 필수 / Q6 principal:null accepted risk. 전문: dev_docs/0.13-redesign-plan.md §12"
+    title: "0.13 계획 열린 질문 Q1–Q6 ruling — 전부 설계 잠정안 채택(상세: 계획서 §12 인수 기록)"
     status: "pending"
