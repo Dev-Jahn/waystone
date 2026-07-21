@@ -663,3 +663,6 @@ tasks:
     status: "pending"
     severity: "minor"
     deps: ["feat/run-verify-decision"]
+  - id: spike/intent-redesign-plan
+    title: "0.13 intent control plane 재설계 계획 수립 — 사용자 mandate(외부 리뷰 2건·omniphysics realign 사례) 기반: PROJECT_BRIEF/lifecycle stage/finding disposition/semantic work brief 전면 설계, 기존 0.12 계획·M1-C 분해 대체"
+    status: "pending"
