@@ -699,5 +699,5 @@ tasks:
     status: "pending"
   - id: fix/013-gate-closure
     title: "0.13 gate FAIL 폐쇄 — G013-01~05: public staged 실행 조립(start→DAG→close happy path)·WorkerResult outcome lineage·review-cycle head 영속화·failed child 종결·legacy config 잔재 (RED-first, evidence: dev_docs/0.13-gate-evidence.md)"
-    status: "pending"
+    status: "done"
     severity: "blocker"
