@@ -679,7 +679,7 @@ tasks:
     deps: ["feat/013-project-frame-work-brief"]
   - id: feat/013-stage-assurance
     title: "0.13 B2: stage별 AssurancePlan action DAG·candidate/evaluation freeze·promotion lineage·review cycle budget·test lifecycle"
-    status: "pending"
+    status: "done"
     deps: ["feat/013-staged-run-context-resume", "feat/013-finding-disposition"]
   - id: feat/013-outcome-status
     title: "0.13 C1: OutcomeDelta·outcome ledger first-parent CAS publication·objective-first status/advisory projection"
