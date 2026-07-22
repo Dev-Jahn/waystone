@@ -2,6 +2,16 @@
 
 round 단위 작업 이력이 이 파일에 축적된다. 활성 task와 의존성은 `tasks.yaml`(CLI: `waystone task`)과 생성 파일 `ROADMAP.md` 참조.
 
+## 2026-07-22-013-intent-control-plane
+
+- **Goal**: 사용자 mandate(외부 리뷰 2건 + omniphysics realign 실증)에 따른 **0.13 전면 재설계** — M1-B trust kernel 위에 intent control plane 6축을 얹어 새 정의("불확실한 가설은 탐색 가능하게, 검증·리뷰 비용은 승격 위험에 비례, worker에게 목적에 충분한 맥락")를 구현. 기존 0.12 계획·M1-C 분해 폐기. mandate verbatim: `dev_docs/0.13-redesign-mandate.md`(binding) + `dev_docs/reference/{omniphysics-realign,methodology-notes}.md`.
+- **설계**: codex 설계 기체(sol xhigh)가 `dev_docs/0.13-redesign-plan.md` 작성(D1–D18·자산 처분표·task 7·e2e 7) → main 인수 + §12 ruling(Q1–Q6·R1–R4). 계획 자체가 비례 검증을 자기 적용(1099 suite green을 exit에서 제외, §11 금지선).
+- **Shipped (구현 6 + fix 3 + gate)**: A1 ProjectFrame typed facts·WorkBrief provenance·CompletionContract(evidence bytes 재검증) · B1 finding claim/validation/disposition 3-immutable-chain(REAL→task 자동 연결 구조 제거) · A2 ProjectContext·production RunAssembly·RunSpec/store v2·context_request→waiting_context resume FSM · B2 stage별 exact action DAG(explore 경량/evaluate read-only/promote 전체 사슬)·candidate/evaluation freeze·promotion lineage·비초기화 review cycle budget·marker v2 · C1 OutcomeDelta·`refs/waystone/outcomes` first-parent CAS ledger·objective-first status/advisory · C2 canonical surface 단일 cutover(brief/run/review/status·ideate framing/realignment 이원화·legacy delegate/round/ssot/lanes **30파일 삭제**·docs 정합) · fix/013-gate-closure(G013-01~05) · fix/013-worker-result-schema-compat(G013-06) · fix/013-worker-result-null-decode(G013-07).
+- **Gate (5회 판정 사이클, `dev_docs/0.13-gate-evidence.md`)**: 1차 FAIL(claim 5 — 최종 조립 seam 무소유) → 수리 → 2차 e2e 4·5·6 PASS·신규 G013-06 → 수리 → 3차 G013-07 → 수리 → 4차 제품 finding 0(gate 하네스 오류) → **5차 PASS**: real backend smoke 완주(run `019f885f-…` completed·marker v2·candidate publish·ledger `1d506b46`·digest 3종 CAS 일치·context-resume 야생 실증 포함). **e2e 7/7 + suite + smoke + audit 전부 충족 — 0.13 exit PASS** @ dev `60c6305`. finding 전량이 새 disposition flow(claim→validation→disposition→선택 materialize)로 처리됨 — 자동 task화 0.
+- **suite**: 1099 → **234**(보존 kernel + 신설 focused만; 목표했던 수축). flaky 1건(G013-04 폴링)은 main이 직접 결정론화(25/25).
+- **운영**: 새 orchestration policy 첫 적용(codex exec 전면 라우팅, sol/luna·effort 매 작업, ruling 자율권). 사고 1건 — A1 1차 기체가 worktree의 waystone 하네스로 재위임(336k 토큰 손실) → 재위임 금지 조항 표준화(메모리 §3.4) 후 재발진 성공.
+- **Next**: chore/013-legacy-migration-script(일회성 — SSOT.md→PROJECT_BRIEF.md·ssot:→brief:·waystone repo 자신 포함), M1-B 후속 minor 잔여 재평가(새 disposition 기준으로), release 준비는 별도 결정(README·release-to-main.sh SHIP_PATHS가 신 surface 미반영).
+
 ## 2026-07-21-m1b-vertical-slice
 
 - **Goal**: M1-B one-task vertical slice 전체 — 분해 설계(main)부터 신엔진 15 task 구현·exit gate까지 하루 완주. main은 관제탑(브리핑·회수·ruling·인수), 구현은 codex 기체 12기(wave A~E ultra, bridge부터 사용자 지시로 high) + opus 보조 2기(fixture 수리·smoke).
