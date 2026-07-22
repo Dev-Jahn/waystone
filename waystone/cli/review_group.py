@@ -310,10 +310,6 @@ def main(argv: list[str] | None = None) -> int:
 FindingError = findings.FindingError
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
 def attach_review(root: Path, promotion_run_id: str, review_run_id: str):
     """Attach one ingested reviewer result to its exact frozen promotion lineage."""
     from waystone.jobs.domain import Role
@@ -423,3 +419,7 @@ def main(argv: list[str] | None = None) -> int:
     except (FindingError, ReviewGroupError, WorkflowError, OSError, yaml.YAMLError) as error:
         print(f"waystone review: {error}", file=sys.stderr)
         return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
