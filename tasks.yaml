@@ -711,4 +711,4 @@ tasks:
     severity: "blocker"
   - id: chore/013-legacy-migration-script
     title: "기존 프로젝트용 일회성 migration script — SSOT.md→PROJECT_BRIEF.md(fact marker 부여)·ssot:→brief: config·legacy 상태 이관 (사용자 지시: 임시 script 1개, waystone repo 자신 포함)"
-    status: "active"
+    status: "done"
