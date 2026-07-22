@@ -716,3 +716,33 @@ tasks:
     notes: "staleness 조사(2026-07-22): ①README·docs/CONVENTIONS.md·references/·skills/·templates/·hooks는 이미 0.13 현행으로 확인 — 재작성 불요, docs gate 통과 여부만 확인 ②release-to-main.sh 정리 필요: SHIP_PATHS에 삭제된 스크립트 6종 잔존(dashboard/delegate/lanes/review/round/ssot.py)+waystone/ 패키지·신 CLI 모듈 미반영 여부 점검, DEV_ONLY_PATHS의 SSOT.md, L112 'SSOT §3' 주석 좌표 소멸 ③templates/project-policy-schema.json의 delegation-*-v1 rule 2종 소비자 grep 0건 — 생사 확정 후 처분 ④(0.11.x의) run_tests.py 버전 핀 규율이 0.13 suite에 없음 — 버전 결속 게이트 재도입 여부 판단"
     title: "0.13 release 준비 — README·docs를 신 canonical surface로 재작성, release-to-main.sh SHIP_PATHS 갱신(삭제된 SSOT.md 참조 제거·PROJECT_BRIEF.md/waystone 패키지 반영), docs gate 충족 확인; 착수 시점은 owner 결정"
     status: "pending"
+  - id: fix/promote-actor-evidence-separation
+    title: "promote의 verifier/reviewer/decision actor·evidence 실분리: engine promote handler가 independent-verify·integration-decision·adversarial-review 결과를 전부 evaluation evidence digest로 alias(engine.py:894-902)하고 execute_assurance_dag는 action 이름 집합·mutation 경계만 검사 — VerifierEvidence 실제 생성/로드, 별도 coordinator decision artifact, lineage-결속 ReviewCycle 소비, accepted-risks→declared_risks 컴파일 연결(public run start 미전달로 risk-gated review 사실상 비활성) + 회귀 3종(동일 artifact/actor 겸직 거부·declared risk에 reviewer artifact 부재 거부·타 candidate digest 참조 거부) (외부 리뷰 필수수정 1)"
+    status: "pending"
+    severity: "blocker"
+    origin: "review-2026-07-22-013-intent-control-plane"
+  - id: fix/review-disposition-authority-binding
+    title: "review disposition의 objective/evidence authority 실검증: evidence_refs는 kind·digest 형식만, objective_ref는 필드 shape만 검사 후 CLI가 곧바로 append(findings.py:197-232, review_group.py:176·184) — objective_ref를 ProjectFactRef/AuthorityRef로 parse해 exact commit의 PROJECT_BRIEF fact digest·binding 재검증, validation evidence는 최소 CAS 존재 확인, decided_by/reported_by binding_digest는 target run frozen profile binding 대조 — completion contract가 쓰는 authority machinery 재사용, review 전용 resolver 신설 금지 (외부 리뷰 필수수정 2)"
+    status: "pending"
+    severity: "blocker"
+    origin: "review-2026-07-22-013-intent-control-plane"
+  - id: fix/brief-role-model-realignment
+    title: "PROJECT_BRIEF commitment/roles-over-model-names(6-role: main·orchestrator·implementer·clerk·verifier·reviewer)를 canonical 4-role(coordinator/worker/verifier/reviewer)로 realignment 후 재-adopt: binding commitment가 코드(jobs/domain.py:9-13)와 모순 — fact 개정 + owner adoption record 재결속, 코드를 6-role로 되돌리지 않음 (외부 리뷰 정합성 지적; ruling 자율확정: 0.13 mandate의 4-role이 canonical)"
+    status: "pending"
+    severity: "major"
+    origin: "review-2026-07-22-013-intent-control-plane"
+  - id: feat/workbrief-scaffold
+    title: "coordinator burden 축소용 deterministic scaffold: run start --work-brief·close --outcome이 canonical sorted compact JSON 수제작 요구(run_group.py:53·79·84) — brief_id/revision·ProjectFactRef·binding digest·lineage·schema boilerplate·CAS ref는 harness script가 생성하고 모델은 why-now·desired delta·semantic context·fixed/free/escalation·expected evidence만 작성하게 skill 내부 scaffold 제공, 신규 사용자 명령 추가 없이 (외부 리뷰 UX 권고)"
+    status: "pending"
+    severity: "major"
+    origin: "review-2026-07-22-013-intent-control-plane"
+  - id: spike/013-lifecycle-dogfood
+    title: "0.13 lifecycle 관료제화 검증 dogfood 3종: ① 불확실한 architecture exploration(semantic brief·context request가 판단 품질을 실제로 높이는가) ② confirmed major+accept-risk(task 미생성·objective-first status 정상 확인) ③ 평범한 국소 bugfix(가짜 hypothesis나 과잉 evaluation ceremony를 요구하는지 — explore learning criterion은 hypothesis/question만 허용, owner-request 불가: jobs/completion.py:594-600) — 불편이 실제 반복되기 전 구현 금지, 필요시 owner request의 nonbinding explore objective 허용·low-risk maintenance assurance profile·deterministic focused check의 최소 evidence 인정 검토 (외부 리뷰 전략 권고)"
+    status: "pending"
+    severity: "minor"
+    origin: "review-2026-07-22-013-intent-control-plane"
+  - id: docs/013-v1-execution-scope
+    title: "0.13 v1 실행 범위 문서 한정: staged execution이 non-external을 거부하고 직접 실행 가능한 Codex binding만 허용(runs/engine.py:429) — v1 지원 범위를 'external Codex worker/evaluator'로 명시하고 in-session/subagent carrier 지원 주장 금지, context-transfer-cost 기반 canonical routing은 미구현임을 문서화, README 재작성(chore/013-release-prep)과 정합 (외부 리뷰 §3 남은 한계)"
+    status: "pending"
+    severity: "minor"
+    origin: "review-2026-07-22-013-intent-control-plane"
