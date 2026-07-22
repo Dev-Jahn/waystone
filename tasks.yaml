@@ -713,6 +713,6 @@ tasks:
     title: "기존 프로젝트용 일회성 migration script — SSOT.md→PROJECT_BRIEF.md(fact marker 부여)·ssot:→brief: config·legacy 상태 이관 (사용자 지시: 임시 script 1개, waystone repo 자신 포함)"
     status: "done"
   - id: chore/013-release-prep
-    notes: "staleness 조사(2026-07-22) 추가 발견: release-to-main.sh SHIP_PATHS에 삭제된 스크립트 6종 잔존(dashboard/delegate/lanes/review/round/ssot.py) + DEV_ONLY_PATHS의 SSOT.md + L112 'SSOT §3' 주석 좌표 소멸; templates/project-policy-schema.json의 delegation-verification-evidence-v1·delegation-scope-drift-v1 rule은 소비자 grep 0건 — 생사 확정 후 처분"
+    notes: "staleness 조사(2026-07-22): ①README·docs/CONVENTIONS.md·references/·skills/·templates/·hooks는 이미 0.13 현행으로 확인 — 재작성 불요, docs gate 통과 여부만 확인 ②release-to-main.sh 정리 필요: SHIP_PATHS에 삭제된 스크립트 6종 잔존(dashboard/delegate/lanes/review/round/ssot.py)+waystone/ 패키지·신 CLI 모듈 미반영 여부 점검, DEV_ONLY_PATHS의 SSOT.md, L112 'SSOT §3' 주석 좌표 소멸 ③templates/project-policy-schema.json의 delegation-*-v1 rule 2종 소비자 grep 0건 — 생사 확정 후 처분 ④(0.11.x의) run_tests.py 버전 핀 규율이 0.13 suite에 없음 — 버전 결속 게이트 재도입 여부 판단"
     title: "0.13 release 준비 — README·docs를 신 canonical surface로 재작성, release-to-main.sh SHIP_PATHS 갱신(삭제된 SSOT.md 참조 제거·PROJECT_BRIEF.md/waystone 패키지 반영), docs gate 충족 확인; 착수 시점은 owner 결정"
     status: "pending"
