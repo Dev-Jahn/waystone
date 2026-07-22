@@ -687,7 +687,7 @@ tasks:
     deps: ["feat/013-stage-assurance"]
   - id: feat/013-realignment-surface-cutover
     title: "0.13 C2: skill/CLI/plugin/hook 단일 cutover + ideate framing/realignment + legacy delegate/round/ssot/lanes 삭제 + docs/ADR 정합"
-    status: "pending"
+    status: "done"
     deps: ["feat/013-outcome-status"]
   - id: gate/013-intent-control-plane
     title: "0.13 exit gate: 핵심 e2e 7·touched kernel focused regression·real backend smoke·독립 적대 리뷰·삭제 audit"
