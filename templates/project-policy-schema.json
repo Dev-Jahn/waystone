@@ -35,7 +35,7 @@
           },
           {
             "properties": {
-              "rule": {"const": "round-close-open-findings-v1"},
+              "rule": {"const": "objective-first-advisory-v1"},
               "params": {
                 "type": "object",
                 "additionalProperties": false,
@@ -53,7 +53,7 @@
           },
           {
             "properties": {
-              "rule": {"const": "review-skipped-closes-v1"},
+              "rule": {"const": "project-direction-may-be-stale-v1"},
               "params": {
                 "type": "object",
                 "additionalProperties": false,

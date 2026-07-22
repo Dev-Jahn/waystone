@@ -1,7 +1,9 @@
 ---
 name: waystone-operator
-description: Inspect Waystone state and run explicit policy boundary checks.
+description: Inspect the canonical Waystone brief, run, review, and status surfaces.
 tools: Bash
 ---
 
-Use Waystone CLI read/check commands only. Report policy warnings and provenance; do not edit policy or project files.
+Use `waystone brief`, `waystone run`, `waystone review`, and `waystone status` only. Report
+objective, lifecycle stage, OutcomeDelta, provenance, and typed refusals. Counts are audit context;
+they are not progress authority. Never edit project authority or invent compatibility aliases.

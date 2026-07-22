@@ -59,7 +59,6 @@ from waystone.core import (  # noqa: E402, F401
     write_text_atomic,
     write_bytes_atomic,
     load_yaml,
-    slugify,
 )
 
 from waystone.project import (  # noqa: E402, F401

@@ -3,39 +3,26 @@
 # requires-python = ">=3.10"
 # dependencies = ["pyyaml"]
 # ///
-"""Unified front door for waystone scripts: `waystone <group> <args>`.
+"""Unified front door for the canonical Waystone surfaces.
 
 Groups:
-  validate [tasks.yaml]              validate the task registry
-  task     list|show|add|set|drop|archive ...  structured registry access (`set --scope-add` for boundaries)
-  roadmap  [root]                    regenerate ROADMAP.md
-  ssot     split|digest|check [root] SSOT generated views
-  status   [--project N]             cross-project dashboard
-  remote   verify|drift [root]       is HEAD pushed / how far behind; verify --round gates packets
-  review   freeze|status|pending|prepare|ingest|triage ...  review publication, pending, ingest, and triage
-  approve  --pr N --sha X            SHA-bound human approval
-  round    merge --pr N ...          deterministic merge guard
+  brief    check|show|adopt           canonical project-frame surface
+  run      start|context|close        canonical run surface
+  review   ingest|validate|disposition|materialize  canonical finding surface
+  status   [--project PATH] [--json]  objective-first read model
+  task     list|show|add|set|drop|archive ...  selected-work registry access
   improve  trace|reviews|evidence|audit|metrics|decide ...  project evidence, metrics, and decisions
-  delegate run|status|show|verify|verdict|apply|discard ...  worktree runner + evidence-gated verdict
-  run      start|resume|status|watch|cancel|actions ...  one-task run engine (opt-in)
-  overlay  add|...|promote-user|override|materialize|compose ...  four-layer adaptive policy
-  consent  record <surface> <choice> ...  append a standard project-local consent event
-  install  agents|hooks|statusline [--consent-recorded] ...  consent-gated managed surfaces
   statusline                            one-line current-project status (read-only, no model)
-  check    [--root DIR]               evaluate active overlay deltas at an explicit boundary (never blocks)
   paths    [--root DIR] [--json]      show resolved machine and project storage paths
   project  register|unregister|alias|list ...  manage the cross-project registry
-
-Existing hook/skill call sites that invoke sibling scripts directly keep working; this is an
-additive convenience front door (GPT review: consolidate under one `waystone` CLI).
 """
 from __future__ import annotations
 
 import json
 import os
-import runpy
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 import yaml
@@ -47,7 +34,6 @@ import common  # noqa: E402
 _STATUS_RESET = "\033[0m"
 _STATUS_BOLD_CYAN = "\033[1;38;5;81m"
 _STATUS_GREEN = "\033[38;5;114m"
-_STATUS_YELLOW = "\033[38;5;221m"
 _STATUS_MAGENTA = "\033[38;5;176m"
 _STATUS_RED = "\033[38;5;210m"
 _STATUS_DIM = "\033[38;5;245m"
@@ -71,17 +57,10 @@ def _statusline_render(data: dict, pending_count: int) -> str:
     tasks = data["tasks"]
     done = sum(task.get("status") == "done" for task in tasks)
     blocked = sum(task.get("status") == "blocked" for task in tasks)
-    active_rounds = sorted({
-        task["round"] for task in tasks
-        if task.get("status") == "active" and task.get("round")
-    })
-    current_round = (active_rounds[-1] if active_rounds else
-                     max((task.get("round") or "" for task in tasks), default="") or "—")
     separator = f" {_STATUS_DIM}│{_STATUS_RESET} "
     return separator.join((
         f"{_STATUS_BOLD_CYAN}◆ waystone{_STATUS_RESET}",
         f"{_STATUS_GREEN}✓ tasks {done}/{len(tasks)}{_STATUS_RESET}",
-        f"{_STATUS_YELLOW}◷ round {current_round}{_STATUS_RESET}",
         f"{_STATUS_MAGENTA}◇ reviews {pending_count}{_STATUS_RESET}",
         f"{_STATUS_RED}⛔ blockers {blocked}{_STATUS_RESET}",
     ))
@@ -120,8 +99,6 @@ def _statusline_main(argv: list[str]) -> int:
     try:
         import contextlib
         import io
-        import review
-
         # Path.glob swallows scandir permission errors, which would silently render an
         # unreadable reviews directory as "reviews 0" — probe readability explicitly first.
         reviews_dir = root / cfg["reviews_dir"]
@@ -130,20 +107,15 @@ def _statusline_main(argv: list[str]) -> int:
         # Reuse the single pending-review derivation. Diagnostics are suppressed because this
         # display owns stdout and must never damage the surrounding prompt line.
         with contextlib.redirect_stderr(io.StringIO()):
-            pending_count = len(review.pending_reviews(root))
+            pending_count = sum(
+                1 for claim in (root / "docs" / "reviews" / "runs").glob(
+                    "*/findings/*/claim.yaml") if claim.is_file())
     except Exception:  # noqa: BLE001 — damaged review artifacts remain visible, but non-fatal
         print(_statusline_error("reviews unreadable"))
         return 0
 
     print(_statusline_render(data, pending_count))
     return 0
-
-
-def _run_module_main(modname: str, argv: list[str]) -> int:
-    """Invoke a sibling module's main() that reads sys.argv (legacy scripts)."""
-    sys.argv = [modname, *argv]
-    ns = runpy.run_path(str(HERE / f"{modname}.py"), run_name="__waystone_dispatch__")
-    return int(ns["main"]() or 0)
 
 
 def _resolved(path: Path) -> str:
@@ -181,18 +153,12 @@ def _paths_main(argv: list[str]) -> int:
         "registry": _resolved(common.registry_path()),
     }
     if root is not None:
-        import delegate
-        import overlay
-
         paths.update({
             "project_root": _resolved(root),
             "project_state": _resolved(common.project_state_path(root)),
             "resume": _resolved(common.resume_path(root)),
             "start_here": _resolved(common.start_here_path(root)),
-            "delegations": _resolved(delegate._delegations_dir(root)),
-            "overlay": _resolved(overlay._overlay_dir(root)),
-            "exposure": _resolved(overlay._exposure_dir(root)),
-            "profile": _resolved(delegate._profile_path(root)),
+            "profile": _resolved(common.project_state_path(root) / "profile.yml"),
             "project_improve": _resolved(common.project_state_path(root) / "improve"),
         })
 
@@ -564,7 +530,12 @@ def _project_main(argv: list[str]) -> int:
             if any(_entry_path(entry) == root for entry in projects):
                 print(f"already registered: {name}\t{root}")
                 return 0
-            projects.append({"name": name, "path": str(root), "aliases": []})
+            projects.append({
+                "project_id": f"project:{uuid.uuid4().hex}",
+                "name": name,
+                "path": str(root),
+                "aliases": [],
+            })
             common.validate_registry_path_uniqueness(projects, path)
             _write_registry(path, registry)
             print(f"registered: {name}\t{root}")
@@ -595,10 +566,7 @@ def _check_command_project_state(argv: list[str]) -> None:
         index = rest.index("--root")
         if index + 1 < len(rest):
             candidates.append(Path(rest[index + 1]).expanduser())
-    positional_root_groups = {
-        "validate", "task", "roadmap", "ssot", "remote", "review", "approve",
-        "round", "lanes", "resume", "project",
-    }
+    positional_root_groups = {"task", "review", "run", "brief", "status", "project"}
     if group in positional_root_groups:
         for index, arg in enumerate(rest):
             if arg.startswith("-") or (index > 0 and rest[index - 1].startswith("-")):
@@ -623,9 +591,9 @@ def _module_checks_project_state(argv: list[str]) -> bool:
     """Whitelist modules whose direct CLI entry point performs its own project-state check."""
     if not argv:
         return False
-    if argv[0] in {"task", "review", "delegate", "run", "overlay", "check", "roadmap"}:
+    if argv[0] in {"task", "review", "run", "brief", "status", "overlay", "check"}:
         return True
-    return argv[0] == "round" and len(argv) > 1 and argv[1] in {"close", "reclose"}
+    return False
 
 
 def main(argv: list[str]) -> int:
@@ -669,15 +637,18 @@ def main(argv: list[str]) -> int:
     if group == "task":
         import tasks
         return tasks.main(rest)
+    if group == "brief":
+        from waystone.cli import brief_group
+        return brief_group.main(rest)
     if group == "review":
-        import review
-        return review.main(rest)
+        from waystone.cli import review_group
+        return review_group.main(rest)
+    if group == "status":
+        from waystone.cli import status_group
+        return status_group.main(rest)
     if group == "improve":
         import improve
         return improve.main(rest)
-    if group == "delegate":
-        import delegate
-        return delegate.main(rest)
     if group == "run":
         from waystone.cli import run_group
         return run_group.main(rest)
@@ -693,27 +664,9 @@ def main(argv: list[str]) -> int:
         import importlib
         mod = importlib.import_module("remote")
         return mod.main(rest)
-    if group == "approve":
-        import merge
-        return merge.main(["approve", *rest])
-    if group == "round":
-        if rest and rest[0] == "merge":
-            import merge
-            return merge.main(["merge", *rest[1:]])
-        if rest and rest[0] in {"close", "reclose"}:
-            return _run_module_main("round", rest)
-        print("waystone round: expected 'close', 'reclose', or 'merge'", file=sys.stderr)
+    if group in {"approve", "round", "delegate", "lanes", "ssot", "dashboard"}:
+        print(f"waystone: legacy group {group!r} is not supported; use the canonical surface", file=sys.stderr)
         return 1
-    if group == "lanes":
-        return _run_module_main("lanes", rest)
-    if group == "resume":
-        return _run_module_main("resume", rest)
-
-    # legacy modules with main() reading sys.argv
-    legacy = {"validate": "validate", "roadmap": "roadmap",
-              "ssot": "ssot", "status": "dashboard"}
-    if group in legacy:
-        return _run_module_main(legacy[group], rest)
 
     print(f"waystone: unknown group {group!r}\n{__doc__}", file=sys.stderr)
     return 1

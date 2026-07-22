@@ -1,49 +1,23 @@
-schema: waystone-routing-policy-1
+schema: waystone-routing-policy-2
 questions:
   - id: reasoning
-    prompt: What level of reasoning does the task require?
-    prefer:
-      roles: [implementer, reviewer]
-      executions: [forked-subagent, external-runner]
+    prompt: Does this work require independent reasoning beyond bounded execution?
   - id: context-inheritance
-    prompt: Must the worker inherit the current context?
-    prefer:
-      roles: [implementer, clerk]
-      executions: [forked-subagent]
+    prompt: Is the semantic context transfer complete and provenance-preserving?
   - id: independent-perspective
-    prompt: Does the task require an independent perspective?
-    prefer:
-      roles: [verifier, reviewer]
-      executions: [clean-subagent, external-runner]
+    prompt: Is an independent perspective required by the selected stage?
   - id: bounded-scope
-    prompt: Is the scope clear and bounded?
-    prefer:
-      roles: [implementer, clerk]
-      executions: [clean-subagent, deterministic-workflow, external-runner]
+    prompt: Is the scope bounded enough for the selected execution form?
   - id: repetitive-tools
-    prompt: Is repetitive tool execution the main work?
-    prefer:
-      roles: [clerk]
-      executions: [deterministic-workflow]
+    prompt: Is the work repetitive and deterministic?
   - id: retry-cost
-    prompt: How costly is a failed attempt and retry?
-    prefer:
-      roles: [orchestrator, verifier]
-      executions: [clean-subagent, deterministic-workflow]
+    prompt: Would a failed transfer or retry be materially expensive?
   - id: independent-verification
-    prompt: Who independently verifies final quality?
-    prefer:
-      roles: [verifier, reviewer]
-      executions: [clean-subagent, external-runner]
+    prompt: Does the assurance plan require independent verification?
   - id: budget-sensitivity
-    prompt: Is the user sensitive to execution budget?
-    prefer:
-      roles: [orchestrator, clerk]
-      executions: [deterministic-workflow]
+    prompt: Is the selected route within the owner budget?
 roles:
-  main: Route and accept.
-  orchestrator: Coordinate bounded work.
-  implementer: Implement and verify scope.
-  clerk: Run repeatable work.
-  verifier: Verify independently.
-  reviewer: Review adversarially.
+  coordinator: Main owns routing, acceptance, and final decisions.
+  worker: Implement and verify the declared scope.
+  verifier: Verify independently against frozen inputs.
+  reviewer: Review adversarially and report evidence-backed claims.

@@ -3,13 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["pyyaml"]
 # ///
-"""Write a deterministic re-entry snapshot before the context window is summarized.
-
-Closes the "update memory before compaction" loop the user used to run by hand every round.
-The snapshot is a compact pointer (HEAD, branch, active round, active/blocked tasks, what to
-pick up next) written to a plugin-local ephemeral file (NOT committed to the repo). The
-SessionStart hook reads it back after a compaction/resume. Called by PreCompact / SessionEnd
-hooks and at round close.
+"""Write an objective-first re-entry snapshot before context is summarized.
 
 Usage (also `waystone resume`): resume.py [root]   |   resume.py --path [root]
 """
@@ -21,36 +15,35 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
-    WorkflowError, ensure_project_state_dir, find_project_root, git, git_branch_info,
-    git_full_sha, load_tasks, next_actionable, resume_path, start_here_path, write_text_atomic,
+    WorkflowError, ensure_project_state_dir, find_project_root, git_branch_info,
+    git_full_sha, resume_path, start_here_path, write_text_atomic,
 )
+from waystone.project.context import resolve_project_context  # noqa: E402
+from waystone.runs.engine import ReadOnlyStoreUnavailable, open_read_only_store  # noqa: E402
+from waystone.runs.observe import project_status_projection  # noqa: E402
 
 
 def snapshot(root: Path) -> str:
-    data = load_tasks(root)
     g = git_branch_info(root)
-    head = git(root, "log", "-1", "--format=%h %s") or "(no commits)"
-    tasks = [t for t in data.get("tasks", []) if isinstance(t, dict) and t.get("id")]
-    active = [t for t in tasks if t.get("status") == "active"]
-    blocked = [t for t in tasks if t.get("status") == "blocked"]
-    rounds = sorted({t["round"] for t in active if t.get("round")})
-    nxt = next_actionable(data, cap=6)
-
+    context = resolve_project_context(root)
+    try:
+        with open_read_only_store(context.canonical_root) as store:
+            status = project_status_projection(context.canonical_root, store)
+    except ReadOnlyStoreUnavailable:
+        status = project_status_projection(context.canonical_root)
+    objective = status.objective_ref
+    active = status.active_run or {}
+    delta = status.last_delta or {}
+    waiting = active.get("state") == "waiting_context" if isinstance(active, dict) else False
     L = [f"captured_head: {git_full_sha(root, 'HEAD') or 'none'}",
          f"captured_at: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
-         f"[waystone resume] {data.get('project', root.name)} — re-entry pointer",
-         f"branch: {g['branch']} ({'dirty +' + str(g['dirty']) if g['dirty'] else 'clean'}) | HEAD: {head}"]
-    if rounds:
-        L.append(f"active round: {', '.join(rounds)}")
-    for t in active[:8]:
-        L.append(f"  active: {t['id']} — {t.get('title', '')}")
-    for t in blocked[:6]:
-        L.append(f"  blocked: {t['id']} — {t.get('title', '')}")
-    if nxt:
-        L.append("next actionable (deps satisfied):")
-        for tid, title in nxt:
-            L.append(f"  → {tid} — {title}")
-    L.append("Authoritative state: tasks.yaml + PROGRESS.md + ROADMAP.md (this is only a pointer).")
+         f"[waystone resume] objective re-entry pointer",
+         f"branch: {g['branch']} ({'dirty +' + str(g['dirty']) if g['dirty'] else 'clean'})",
+         f"objective: {objective!r}",
+         f"stage: {active.get('lifecycle_stage') or 'none'}",
+         f"waiting-context: {'yes' if waiting else 'no'}",
+         f"last-delta: {delta!r}",
+         "Authority: status read model (objective, stage, waiting context, OutcomeDelta)."]
     return "\n".join(L) + "\n"
 
 

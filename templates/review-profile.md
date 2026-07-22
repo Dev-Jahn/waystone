@@ -1,7 +1,7 @@
 # Review Profile — {project}
 
-Standing priorities for every external review of this repo. The per-round brief points the
-reviewer here, so you write the project's domain lens once instead of repeating it each round.
+Standing priorities for every review of this repo. The run request points the reviewer here,
+so the domain lens is separate from finding disposition.
 
 **Setup:** copy this file into the repo as `docs/review-profile.md` and tune it to the domain.
 Delete the example block at the bottom once you have written your own.

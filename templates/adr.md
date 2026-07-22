@@ -2,8 +2,8 @@
 
 - Status: proposed | accepted | superseded by ADR-XXXX
 - Date: {YYYY-MM-DD}
-- Round: {round-id}
-- SSOT sections affected: {§-anchors}
+- Source run: {run-id or none}
+- Brief facts affected: {fact ids}
 - Tasks: {task ids}
 
 ## Context
@@ -12,7 +12,7 @@
 
 ## Decision
 
-{The decision, normative and terse. What changes in the SSOT.}
+{The decision, normative and terse. What changes in the canonical project contract.}
 
 ## Consequences
 

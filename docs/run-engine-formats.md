@@ -1,8 +1,18 @@
-# Run engine v1 표현/형식 계약 registry
+# Run engine v2 표현/형식 계약 registry
 
-**Status:** v1 confirmed — `gate/m1b-exit`
+**Status:** v2 canonical surface — 0.13 C2 cutover. v1 runtime input is refused; migration is a
+separate one-time operation and is not a compatibility path.
 **소유 결정:** `decision/run-engine-format-pinning-batch` (각 기체의 v1 표현을 gate에서 명문화, 이후 변경은 migration 경유 강제)
-**원천:** `waystone/runs/{store,artifacts,lease,effects,spec,preflight,prompt,transport,observe,cancel,verify,supervisor}.py`, `waystone/jobs/domain.py`, `waystone/core/__init__.py` (dev HEAD `7cfe763`) + `docs/meta/agent-reports-2026-07-21/*.md` ④절
+**원천:** canonical v2 `ProjectContext`, `ProjectFrame`, `WorkBrief`, `AssurancePlan`, `RunSpec`,
+`OutcomeDelta`, and the preserved M1-B kernel.
+
+## 0.13 v2 surface
+
+`RunSpec` freezes one `lifecycle_stage` (`explore|evaluate|promote`), the used fact/owner-source
+references, semantic WorkBrief digest, CompletionContract, AssurancePlan, and revision. Objective
+progress is published as one typed OutcomeDelta through `run close`; status reads the objective,
+stage, waiting-context, and latest delta before audit counts. No v1 name or legacy CLI alias is
+accepted as v2 success.
 
 ## 0. 변경 규칙 (binding)
 

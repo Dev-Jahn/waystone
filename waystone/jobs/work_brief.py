@@ -680,7 +680,7 @@ def render_semantic_prompt(brief: WorkBrief, contract: CompletionContract) -> st
     lines.append("Fixed decisions:")
     lines.extend(_render_items(brief.decisions.fixed, "None recorded."))
     lines.append("Worker may choose:")
-    lines.extend(_render_items(brief.decisions.worker_may_choose, "No delegated choices recorded."))
+    lines.extend(_render_items(brief.decisions.worker_may_choose, "No worker choices recorded."))
     lines.append("Escalate before crossing:")
     lines.extend(_render_items(brief.decisions.requires_escalation, "No additional boundary recorded."))
     if brief.constraints:

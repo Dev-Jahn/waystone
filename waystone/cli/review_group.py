@@ -274,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     disposition_parser.add_argument("--root")
     materialize_parser = sub.add_parser("materialize")
     materialize_parser.add_argument("finding_id")
-    materialize_parser.add_argument("--run-id", required=True)
+    materialize_parser.add_argument("--run-id")
     materialize_parser.add_argument("--root")
     args = parser.parse_args(argv)
     try:
@@ -292,7 +292,8 @@ def main(argv: list[str] | None = None) -> int:
             result = disposition_file(root, run_id, args.finding_id, args.file)
             print(f"review disposition: recorded {result.payload['revision']:04d}.yaml")
         else:
-            task_id = materialize(root, args.run_id, args.finding_id)
+            run_id = args.run_id or resolve_finding_run(root, args.finding_id)
+            task_id = materialize(root, run_id, args.finding_id)
             print(f"review materialize: {task_id}")
         return 0
     except (FindingError, ReviewGroupError, OSError, yaml.YAMLError) as error:

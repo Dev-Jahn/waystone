@@ -92,8 +92,15 @@ manifest를 수행하는 내부 orchestration procedure이고, host carrier와 l
   잘못 추론하지 않는다.
 - legacy command, profile, artifact 판독에는 adapter가 필요하지만 canonical store에는 legacy
   이름을 복제하지 않는다.
-- 1.0까지 `/waystone:round`와 `/waystone:run`의 동작을 함께 검증해야 한다. alias 제거 또는 추가
-  유지가 필요하면 1.0 경계에서 별도 결정을 기록한다.
+- 0.13부터 `/waystone:run`이 유일한 실행 표면이며 `/waystone:round`, `delegate`, `ssot`는
+  canonical alias가 아니다. Historical artifacts may remain readable only as historical records;
+  runtime success never falls back to them.
+
+## Amendment (2026-07-22, 0.13 C2)
+
+`PROJECT_BRIEF.md`/`brief:` and the `brief/run/review/status` groups supersede the old public
+workflow vocabulary. `ideate` is framing when no brief exists and realignment otherwise; its
+output is provisional until the typed adoption gate.
 
 ## Alternatives considered
 

@@ -1,4 +1,4 @@
-"""Project discovery, configuration, storage, registry, and legacy-state helpers."""
+"""Project discovery, configuration, storage, and registry helpers."""
 from __future__ import annotations
 
 import hashlib
@@ -121,8 +121,8 @@ def registry_path(home: Path | None = None) -> Path:
 # promote-user transaction owns all three leading locks itself because its evidence read and user
 # overlay write must be one machine-wide snapshot.
 # Intentionally unlocked (§2.4): warnings/decisions JSONL use one O_APPEND write; improve outputs are
-# reproducible; SSOT views inherit round close's project lock (standalone regeneration is idempotent);
-# start-here follows its single-writer round-close convention.
+# reproducible; status projections inherit the project lock when they are materialized;
+# start-here follows its single-writer status projection convention.
 
 def registry_lock_path(home: Path | None = None) -> Path:
     return machine_dir(home) / "registry.lock"
@@ -484,11 +484,9 @@ def normalize_config(cfg: dict | None, *, source: Path | None = None) -> dict:
     cfg.setdefault("adr_dir", "docs/adr")
     cfg.setdefault("reviews_dir", "docs/reviews")
     cfg.setdefault("progress_archive_dir", "docs/progress")
-    cfg.setdefault("generated_dir", "docs/ssot")
+    if "generated_dir" in cfg:
+        raise ValueError("generated_dir: is not supported; status owns the canonical read model")
     cfg.setdefault("digest_max_lines", 150)
-    gen = Path(cfg["generated_dir"])
-    if gen.is_absolute() or ".." in gen.parts:
-        raise ValueError(f"generated_dir must be a relative path inside the repo: {cfg['generated_dir']!r}")
     rv = cfg.setdefault("review", {})
     if not isinstance(rv, dict):
         raise ValueError("review: must be a mapping (mode/reviewers/require_ci/approvers/operators)")
@@ -584,15 +582,10 @@ def _project_slug(root: Path) -> str:
 
 
 def resume_path(root: Path) -> Path:
-    """Project-local EPHEMERAL re-entry snapshot (NOT committed to the repo). Written
-    deterministically by the PreCompact/SessionEnd hook (structured: HEAD/round/tasks) and CONSUMED
-    by the next SessionStart."""
+    """Project-local ephemeral re-entry snapshot consumed by the next session."""
     return project_state_path(root) / "resume.md"
 
 
 def start_here_path(root: Path) -> Path:
-    """Project-local PERSISTENT re-entry pointer (NOT committed, NOT consumed). The
-    MODEL overwrites it at round close / after review with a bounded live-frontier narrative; the
-    SessionStart hook injects it so a new/resumed session picks up without a manual 'pick up where
-    we left off'. Complements the ephemeral structured resume_path — narrative vs. structured."""
+    """Project-local persistent re-entry pointer for the status-derived session capsule."""
     return project_state_path(root) / "start-here.md"

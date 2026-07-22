@@ -1,6 +1,6 @@
 # ADR-0014: M1-A acceptance basis를 invariants·accepted ADR·승격 계약으로 전환한다
 
-- Status: accepted
+- Status: historical — superseded by 0.13 C2 surface cutover
 - Date: 2026-07-20
 - Round: —
 - SSOT sections affected: 없음 — 0.12 재설계의 milestone acceptance authority를 확정한다

@@ -22,7 +22,7 @@ CONFIG_NAME = ".waystone.yml"
 
 REASON = (
     "tasks.yaml is the long machine-validated registry — read it through the CLI, not whole:\n"
-    "  waystone task list [--status S|--type T|--milestone M|--round R]   (compact view)\n"
+    "  waystone task list [--status S|--type T|--milestone M]             (compact view)\n"
     "  waystone task show <id>                                            (one task's record)\n"
     "Mutate it the same way: waystone task add/set/drop (validated, comment-preserving) — not Edit.\n"
     "(If you genuinely need the raw file, read it via the shell with `cat`.)"

@@ -6,14 +6,10 @@
 """Remote reconciliation: is the local HEAD actually pushed, and how far behind is it.
 
 Subcommands (also reachable as `waystone remote <sub>`):
-  verify [root] [--round ID]  exit 0 if HEAD is pushed; with --round, also verify the packet
-                              request and latest binding are byte-identical in the remote tree and
-                              the binding's closeout SHA is contained in that remote (direct binding)
+  verify [root]                exit 0 if HEAD is pushed
   drift  [root]   print how many commits the local HEAD is behind upstream (informational)
 
-Deterministic git plus repo-artifact checks. Used by the round skill to refuse announcing a
-review packet that is not byte-present in the pushed remote tree, and by the dashboard to surface
-remote drift.
+Deterministic Git reachability evidence for operators.
 """
 from __future__ import annotations
 
@@ -25,21 +21,13 @@ from common import find_project_root, head_pushed  # noqa: E402
 
 
 def _root(argv: list[str]) -> Path | None:
-    positional = [arg for index, arg in enumerate(argv)
-                  if not arg.startswith("--")
-                  and (index == 0 or argv[index - 1] != "--round")]
+    positional = [arg for arg in argv if not arg.startswith("--")]
     if positional:
         return Path(positional[-1]).resolve()
     return find_project_root(Path.cwd())
 
 
-def verify(root: Path, round_id: str | None = None) -> int:
-    if round_id is not None:
-        # The direct-binding gate fetches and pins the exact live upstream branch. The local
-        # HEAD's relationship to that branch is deliberately not consulted — a diverged local
-        # HEAD must not reject a genuinely published packet.
-        import review
-        return 0 if review.verify_packet_publication(root, round_id) == 0 else 3
+def verify(root: Path) -> int:
     pushed, info = head_pushed(root, fetch=True)
     if "reason" in info:
         print(f"remote: cannot verify — {info['reason']}", file=sys.stderr)
@@ -74,17 +62,7 @@ def main(argv: list[str]) -> int:
     if root is None:
         print("remote: no initialized project (missing .waystone.yml)", file=sys.stderr)
         return 1
-    round_id = None
-    if "--round" in rest:
-        index = rest.index("--round")
-        if index + 1 >= len(rest):
-            print("remote verify: --round requires an id", file=sys.stderr)
-            return 1
-        round_id = rest[index + 1]
-    if sub == "drift" and round_id is not None:
-        print("remote drift: --round is valid only with verify", file=sys.stderr)
-        return 1
-    return verify(root, round_id) if sub == "verify" else drift(root)
+    return verify(root) if sub == "verify" else drift(root)
 
 
 if __name__ == "__main__":

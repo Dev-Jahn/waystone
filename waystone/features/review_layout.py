@@ -1,4 +1,4 @@
-"""Canonical and legacy addressing for Git-tracked review artifacts."""
+"""Canonical addressing for Git-tracked review artifacts."""
 from __future__ import annotations
 
 import json
@@ -338,18 +338,6 @@ def scan_canonical_request_bindings(
         except ReviewLayoutError as error:
             rejected.append((path, error))
     return tuple(artifacts), tuple(rejected)
-
-
-def rejected_binding_round_claim(reviews_dir: Path, path: Path) -> str | None:
-    """Return only a bounded, untrusted round claim used to isolate one rejected owner."""
-    artifact_path = Path(path)
-    try:
-        _require_safe_canonical_path(Path(reviews_dir), artifact_path)
-        payload = _json_object(artifact_path.read_bytes(), artifact_path)
-    except (OSError, ReviewLayoutError):
-        return None
-    claim = payload.get("round_id")
-    return claim if isinstance(claim, str) else None
 
 
 def _canonical_address(reviews_dir: Path, path: Path) -> tuple[str, str, str | None]:

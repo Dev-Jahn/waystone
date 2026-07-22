@@ -3,276 +3,59 @@
 # requires-python = ">=3.10"
 # dependencies = ["pyyaml"]
 # ///
-"""Aggregate entry point for the mechanically split Waystone test suite.
-
-Run: uv run scripts/tests/run_tests.py [Class[.method] ...]
-"""
+"""Run the focused 0.13 contract suite; retired legacy modules are not imported."""
 from __future__ import annotations
 
+import importlib
 import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+TEST_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(TEST_ROOT))
+sys.path.insert(0, str(TEST_ROOT.parent.parent))
 
-from test_delegate_cli import (
-    DelegateFanoutPlanTests,
-    DelegatePacketDigestTests,
-    DelegateExpectAndCarrierTests,
-    DelegateJsonEventsTests,
-    DelegateStatusJsonTests,
-    DelegateFanoutTemplateLintTests,
-    DelegateMainContractTests,
-    DelegateCliTests,
-)
-from test_delegate_core import (
-    DelegateSnapshotTests,
-    DelegateProfileTests,
-    DelegatePacketTests,
-    DelegateRunTests,
-    CodexRunnerVerificationGateTests,
-)
-from test_delegate_lifecycle import (
-    DelegateEffortTests,
-    DelegateApplyTests,
-    DelegateVerdictTests,
-    DelegateCorruptRecordTests,
-)
-from test_delegate_verify import (
-    DelegateVerifyTests,
-    UvCacheTests,
-    ContractInjectTests,
-    CodexVerifierTests,
-)
-from test_improve import (
-    CclogParseTests,
-    CclogLayoutTests,
-    ImproveDiscoveryTests,
-    ImproveTraceTests,
-    ImproveSelfSessionTests,
-    ImproveReviewsTests,
-    ImproveAuditTests,
-    ImproveDecideTests,
-    ImproveMetricsTests,
-    ImproveScopeTests,
-    ImproveM1DefectTests,
-    EvidenceTests,
-    ImproveL2BTests,
-    ImproveL2BAdversarialTests,
-    CodexTraceTests,
-    L2CImproveFeedbackTests,
-)
-from test_migrations import (
-    MigrationSunsetTests,
-    MigrationV2HookTests,
-    MigrationTests,
-    M2DocsTests,
-    CodexHookTests,
-)
-from test_overlay import (
-    OverlayStoreTests,
-    OverlayRuleTests,
-    BoundaryWarnTests,
-    DelegateExposureOverlayTests,
-    ReplayTests,
-)
-from test_policy import (
-    L2CGuardTests,
-    L2CAdversarialFixTests,
-    L2DPolicyMachineTests,
-    L2DAdversarialFindingTests,
-    CodexPluginContractTests,
-    L3GapClosureAcceptanceTests,
-)
-from test_project import (
-    ResumeStartHereTests,
-    StoragePathTests,
-    DashboardLockingTests,
-    WaystoneStorageCliTests,
-    ConfigTests,
-    TextSurgeryTests,
-    NextActionableTests,
-    LaneTests,
-    RoundCloseTests,
-)
-from test_release import (
-    ReleaseToMainTests,
-)
-from test_run_cancel import (
-    RunCancelTests,
-)
-from test_run_cli import (
-    RunCliTests,
-)
-from test_run_domain import (
-    RunDomainTests,
-)
-from test_run_effects import (
-    RunEffectTests,
-)
-from test_run_lease import (
-    RunLeaseTests,
-)
-from test_run_observe import (
-    RunObserveTests,
-)
-from test_run_preflight import (
-    RunPreflightTests,
-)
-from test_run_verify import (
-    RunVerifyTests,
-)
-from test_run_prompt import (
-    RunPromptTests,
-)
-from test_review_protocol import (
-    LockPrimitiveTests,
-    LockWiringTests,
-    MarkerTests,
-    MergeGateTests,
-    TasksGateTests,
-    RemoteTests,
-    PacketPublicationTests,
-    RoundExposureTests,
-)
-from test_review_runs_layout import ReviewRunsLayoutTests
-from test_review_settlement import (
-    BasePolicyTests,
-    IngestTests,
-    PendingReviewTests,
-    StatuslineTests,
-    FrozenAcceptanceTests,
-    IntegrationSmokeTests,
-)
-from test_tasks import (
-    TaskCliTests,
-    UninitializedRootGateTests,
-    TaskArchiveTests,
-    ParkedTaskContractTests,
-    TaskReadNudgeTests,
-    TaskRegressionTests,
-    AcceptFieldTests,
-)
-from test_run_store import (
-    ArtifactStoreTests,
-    RunStoreTests,
-)
-from test_run_supervisor import (
-    RunSupervisorTests,
-)
-from test_run_transport import (
-    RunTransportTests,
-)
-from test_run_spec import (
-    RunSpecTests,
+MODULES = (
+    "test_completion_contract",
+    "test_project_brief",
+    "test_project_context",
+    "test_project",
+    "test_work_brief",
+    "test_worker_result",
+    "test_run_assurance",
+    "test_run_cancel",
+    "test_run_domain",
+    "test_run_prompt",
+    "test_run_effects",
+    "test_run_lease",
+    "test_run_store",
+    "test_run_supervisor",
+    "test_run_transport",
+    "test_run_verify",
+    "test_run_spec",
+    "test_run_outcome",
+    "test_run_preflight",
+    "test_run_observe",
+    "test_run_cli",
+    "test_review_runs_layout",
+    "test_review_findings",
+    "test_review_protocol",
+    "test_review_settlement",
+    "test_improve",
+    "test_overlay",
+    "test_policy",
+    "test_release",
+    "test_hooks",
 )
 
-_TEST_CLASSES = (
-    DelegateFanoutPlanTests,
-    DelegatePacketDigestTests,
-    DelegateExpectAndCarrierTests,
-    DelegateJsonEventsTests,
-    DelegateStatusJsonTests,
-    DelegateFanoutTemplateLintTests,
-    DelegateMainContractTests,
-    DelegateCliTests,
-    DelegateSnapshotTests,
-    DelegateProfileTests,
-    DelegatePacketTests,
-    DelegateRunTests,
-    CodexRunnerVerificationGateTests,
-    DelegateEffortTests,
-    DelegateApplyTests,
-    DelegateVerdictTests,
-    DelegateCorruptRecordTests,
-    DelegateVerifyTests,
-    UvCacheTests,
-    ContractInjectTests,
-    CodexVerifierTests,
-    CclogParseTests,
-    CclogLayoutTests,
-    ImproveDiscoveryTests,
-    ImproveTraceTests,
-    ImproveSelfSessionTests,
-    ImproveReviewsTests,
-    ImproveAuditTests,
-    ImproveDecideTests,
-    ImproveMetricsTests,
-    ImproveScopeTests,
-    ImproveM1DefectTests,
-    EvidenceTests,
-    ImproveL2BTests,
-    ImproveL2BAdversarialTests,
-    CodexTraceTests,
-    L2CImproveFeedbackTests,
-    MigrationSunsetTests,
-    MigrationV2HookTests,
-    MigrationTests,
-    M2DocsTests,
-    CodexHookTests,
-    OverlayStoreTests,
-    OverlayRuleTests,
-    BoundaryWarnTests,
-    DelegateExposureOverlayTests,
-    ReplayTests,
-    L2CGuardTests,
-    L2CAdversarialFixTests,
-    L2DPolicyMachineTests,
-    L2DAdversarialFindingTests,
-    CodexPluginContractTests,
-    L3GapClosureAcceptanceTests,
-    ResumeStartHereTests,
-    StoragePathTests,
-    DashboardLockingTests,
-    WaystoneStorageCliTests,
-    ConfigTests,
-    TextSurgeryTests,
-    NextActionableTests,
-    LaneTests,
-    RoundCloseTests,
-    ReleaseToMainTests,
-    RunCancelTests,
-    RunCliTests,
-    RunDomainTests,
-    RunEffectTests,
-    RunLeaseTests,
-    RunObserveTests,
-    RunPreflightTests,
-    RunVerifyTests,
-    RunPromptTests,
-    LockPrimitiveTests,
-    LockWiringTests,
-    MarkerTests,
-    MergeGateTests,
-    TasksGateTests,
-    RemoteTests,
-    PacketPublicationTests,
-    RoundExposureTests,
-    ReviewRunsLayoutTests,
-    BasePolicyTests,
-    IngestTests,
-    PendingReviewTests,
-    StatuslineTests,
-    FrozenAcceptanceTests,
-    IntegrationSmokeTests,
-    TaskCliTests,
-    UninitializedRootGateTests,
-    TaskArchiveTests,
-    ParkedTaskContractTests,
-    TaskReadNudgeTests,
-    TaskRegressionTests,
-    AcceptFieldTests,
-    ArtifactStoreTests,
-    RunStoreTests,
-    RunSupervisorTests,
-    RunTransportTests,
-    RunSpecTests,
-)
 
-for _test_class in _TEST_CLASSES:
-    _test_class.__module__ = __name__
-del _test_class
+def suite() -> unittest.TestSuite:
+    loader = unittest.defaultTestLoader
+    result = unittest.TestSuite()
+    for name in MODULES:
+        result.addTests(loader.loadTestsFromModule(importlib.import_module(name)))
+    return result
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    raise SystemExit(0 if unittest.TextTestRunner(verbosity=2).run(suite()).wasSuccessful() else 1)

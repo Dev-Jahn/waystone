@@ -916,7 +916,7 @@ class RunEngine:
         if self.assembly is None:
             raise EngineConfigurationUnavailable(
                 "no explicit VerificationPlan/backend assembly is configured; "
-                "legacy delegate execution is not a fallback")
+                "an alternate execution path is not a fallback")
         return self.assembly
 
     @staticmethod

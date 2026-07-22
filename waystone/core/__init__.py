@@ -349,10 +349,3 @@ def write_bytes_atomic(path: Path, content: bytes) -> None:
 def load_yaml(path: Path):
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
-
-
-def slugify(text: str, max_len: int = 40) -> str:
-    """Filename slug for generated SSOT sections. Keeps Hangul (Korean headings stay
-    readable); task IDs are NOT slugified with this — their grammar stays ASCII."""
-    slug = re.sub(r"[^a-z0-9가-힣]+", "-", text.lower()).strip("-")
-    return slug[:max_len].rstrip("-") or "section"

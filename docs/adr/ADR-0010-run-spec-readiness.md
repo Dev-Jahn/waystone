@@ -284,3 +284,10 @@ envelope(+deterministic validator·독립 critic)는 현행 task registry의 `ac
    원천이 생기면 그쪽이 우선한다.
 
 이 Amendment는 본문 계약의 목표 상태를 바꾸지 않는다 — 이행기 형태와 그 소유를 고정할 뿐이다.
+
+## Amendment (2026-07-22, 0.13 C2)
+
+Readiness is stage-scoped and compiled into the frozen `AssurancePlan`; there is no blanket
+requirement that every run contain an independent check or review. WorkBrief semantic context and
+its item-level provenance are part of the frozen input. Review claims remain separate from
+validation/disposition, and only selected disposition may materialize work.

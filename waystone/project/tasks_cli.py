@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = ["pyyaml"]
 # ///
-"""Structured task-registry CLI — read and mutate tasks.yaml without slurping/hand-editing it.
+"""Structured selected-work registry CLI — read and mutate tasks.yaml safely.
 
 A long-lived registry grows to thousands of lines; reading or `Edit`-ing it whole is slow and
 error-prone. These verbs give the agent a small surface so it never touches the raw file:
@@ -17,7 +17,7 @@ error-prone. These verbs give the agent a small surface so it never touches the 
   waystone task drop   <id> [root]                                                  status -> dropped
   waystone task archive [root] [--threshold N] [--keep K]                           relocate old done/dropped
 
-Mutations are comment-preserving (the AST-bounded text surgery from round) and validate the
+Mutations are comment-preserving AST-bounded text surgery and validate the
 result before writing — a write that would break the schema is refused, nothing is written.
 `archive` moves done/dropped tasks (most-recent-by-round kept live, oldest archived, and never one a
 remaining task still depends on) into `tasks.archive.yaml` once the registry passes a size
@@ -26,6 +26,7 @@ threshold; the live registry stays small.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -33,7 +34,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 import yaml  # noqa: E402
 
-import round  # noqa: E402  — reuse the AST-bounded text-surgery helpers
 import validate  # noqa: E402
 from common import (
     WorkflowError, canonical_scope_prefixes, find_project_root, hold_project_lock, load_tasks,
@@ -58,6 +58,68 @@ ACCEPT_REJECT_MSG = ("accept is a YAML list of free-text criteria — use repeat
                      "`waystone task set <id> --accept-add <criterion>` or pass --accept at delegation time")
 SCOPE_REJECT_MSG = ("scope is a YAML list of repo-relative path prefixes — use repeated "
                     "`waystone task set <id> --scope-add <prefix>`")
+
+
+def _compose_mapping(text: str) -> "yaml.MappingNode":
+    node = yaml.compose(text)
+    if not isinstance(node, yaml.MappingNode):
+        raise WorkflowError("document top level must be a mapping")
+    return node
+
+
+def _top_level(root: "yaml.MappingNode", key: str):
+    found = [value for name, value in root.value
+             if isinstance(name, yaml.ScalarNode) and name.value == key]
+    if len(found) > 1:
+        raise WorkflowError(f"ambiguous document: {len(found)} top-level {key!r} keys")
+    return found[0] if found else None
+
+
+def _task_item_span(text: str, task_id: str) -> tuple[int, int]:
+    tasks = _top_level(_compose_mapping(text), "tasks")
+    if tasks is None:
+        raise KeyError("no top-level 'tasks' sequence")
+    if not isinstance(tasks, yaml.SequenceNode):
+        raise WorkflowError("'tasks' is not a list")
+    matches = []
+    for item in tasks.value:
+        if not isinstance(item, yaml.MappingNode):
+            continue
+        ids = [value.value for name, value in item.value
+               if isinstance(name, yaml.ScalarNode) and name.value == "id"
+               and isinstance(value, yaml.ScalarNode)]
+        if len(ids) > 1:
+            raise WorkflowError(f"task near line {item.start_mark.line + 1} has multiple id keys")
+        if ids and ids[0] == task_id:
+            matches.append((item.start_mark.line, item.end_mark.line))
+    if len(matches) > 1:
+        raise WorkflowError(f"ambiguous registry: duplicate task id {task_id!r}")
+    if not matches:
+        raise KeyError(f"task id not found in registry: {task_id}")
+    start, end = matches[0]
+    lines = text.splitlines(keepends=True)
+    if lines and end == len(lines) - 1 and not lines[-1].endswith("\n"):
+        end = len(lines)
+    return start, end
+
+
+def set_task_field(text: str, task_id: str, field: str, value: str) -> str:
+    lines = text.splitlines(keepends=True)
+    start, end = _task_item_span(text, task_id)
+    end = min(end, len(lines))
+    nl = "\r\n" if lines[start].endswith("\r\n") else "\n"
+    field_indent = len(lines[start]) - len(lines[start].lstrip()) + 2
+    field_re = re.compile(rf"^ {{{field_indent}}}{re.escape(field)}:\s*.*$")
+    for index in range(start + 1, end):
+        if field_re.match(lines[index]):
+            finish = index + 1
+            while (finish < end and lines[finish].strip()
+                   and len(lines[finish]) - len(lines[finish].lstrip()) > field_indent):
+                finish += 1
+            lines[index:finish] = [f"{' ' * field_indent}{field}: {value}{nl}"]
+            return "".join(lines)
+    lines.insert(start + 1, f"{' ' * field_indent}{field}: {value}{nl}")
+    return "".join(lines)
 
 
 # ---- pure helpers ------------------------------------------------------------
@@ -111,8 +173,8 @@ def append_task_block(text: str, fields: dict) -> str:
         f"    {k}: {_fmt(fields[k])}{nl}" for k in _FIELD_ORDER if fields.get(k) is not None
     )
 
-    root = round._compose_mapping(text)
-    node = round._top_level(root, "tasks")
+    root = _compose_mapping(text)
+    node = _top_level(root, "tasks")
     lines = text.splitlines(keepends=True)
 
     if isinstance(node, yaml.SequenceNode) and node.value:
@@ -131,7 +193,7 @@ def append_task_block(text: str, fields: dict) -> str:
     key_lines = [k.start_mark.line for k, _ in root.value
                  if isinstance(k, yaml.ScalarNode) and k.value == "tasks"]
     if not key_lines:
-        raise round.WorkflowError("document has no top-level 'tasks' key")
+            raise WorkflowError("document has no top-level 'tasks' key")
     i = key_lines[0]
     lines[i] = f"tasks:{nl}"
     lines.insert(i + 1, block)
@@ -173,7 +235,7 @@ def remove_task_blocks(text: str, ids: list[str]) -> str:
     spans = []
     for tid in ids:
         try:
-            s, e = round._task_item_span(text, tid)
+            s, e = _task_item_span(text, tid)
         except KeyError:
             continue
         spans.append((s, min(e, len(lines))))
@@ -204,7 +266,7 @@ def cmd_add(root: Path, fields: dict) -> int:
     tasks_path = root / "tasks.yaml"
     try:
         new_text = append_task_block(tasks_path.read_text(encoding="utf-8"), fields)
-    except round.WorkflowError as e:
+    except WorkflowError as e:
         print(f"task add: {e}", file=sys.stderr)
         return 1
     rc = _write_validated(tasks_path, new_text, "add")
@@ -224,8 +286,8 @@ def cmd_set(root: Path, task_id: str, field: str, value: str) -> int:
         # produce a malformed document; the schema check then catches semantically-wrong values.
         formatted = _fmt(value)
     try:
-        new_text = round.set_task_field(tasks_path.read_text(encoding="utf-8"), task_id, field, formatted)
-    except (KeyError, round.WorkflowError) as e:
+        new_text = set_task_field(tasks_path.read_text(encoding="utf-8"), task_id, field, formatted)
+    except (KeyError, WorkflowError) as e:
         print(f"task set: {e}", file=sys.stderr)
         return 1
     rc = _write_validated(tasks_path, new_text, "set")
@@ -255,9 +317,9 @@ def cmd_accept_add(root: Path, task_id: str, criteria: list[str]) -> int:
         if criterion not in acceptance:
             acceptance.append(criterion)
     try:
-        new_text = round.set_task_field(
+        new_text = set_task_field(
             tasks_path.read_text(encoding="utf-8"), task_id, "accept", _fmt(acceptance))
-    except (KeyError, round.WorkflowError) as e:
+    except (KeyError, WorkflowError) as e:
         print(f"task set: {e}", file=sys.stderr)
         return 1
     rc = _write_validated(tasks_path, new_text, "set")
@@ -292,9 +354,9 @@ def cmd_scope_add(root: Path, task_id: str, prefixes: list[str]) -> int:
             scope.append(prefix)
     tasks_path = root / "tasks.yaml"
     try:
-        new_text = round.set_task_field(
+        new_text = set_task_field(
             tasks_path.read_text(encoding="utf-8"), task_id, "scope", _fmt(scope))
-    except (KeyError, round.WorkflowError) as e:
+    except (KeyError, WorkflowError) as e:
         print(f"task set: {e}", file=sys.stderr)
         return 1
     rc = _write_validated(tasks_path, new_text, "set")
