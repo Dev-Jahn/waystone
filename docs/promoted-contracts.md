@@ -15,7 +15,7 @@ This is the canonical public contract for the 0.13 surface cutover. The durable 
 | PC-08 | Status is an objective-first read model exposing stage, waiting context, last delta, and typed unknown/degraded state. |
 | PC-09 | Session and resume hooks consume the status read model and remain optional, bounded, and honest about unavailable state. |
 | PC-10 | Legacy `delegate`, `round`, `ssot`, `lanes`, and `dashboard` groups have no aliases or read fallbacks. |
-| PC-11 | Generated `docs/ssot/*` views and retired delegate/round templates are deleted; `SSOT.md` migration remains a separate owner concern. |
+| PC-11 | Generated `docs/ssot/*` views and retired delegate/round templates are deleted; `SSOT.md` migration completed 2026-07-22 (chore/013-legacy-migration-script — brief adopted, `SSOT.md` removed). |
 | PC-12 | Uncertainty is preserved: hypotheses, confirmed findings, probes, and coordinator summaries do not silently gain stronger authority. |
 
 ## Retired contracts
