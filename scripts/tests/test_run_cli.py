@@ -22,7 +22,7 @@ from unittest import mock
 import yaml
 
 from test_work_brief import init_project, item, payload
-from waystone.cli import run_group
+from waystone.cli import review_group, run_group
 from waystone.features.review_layout import new_run_id
 from waystone.jobs import completion
 from waystone.jobs.domain import Role
@@ -332,7 +332,7 @@ class RunCliTests(unittest.TestCase):
         records = {
             "regression-contract:fixture": artifacts.write(b"representative regression\n"),
             "supported-scope:fixture": artifacts.write(b"candidate.txt\n"),
-            "accepted-risks:fixture": artifacts.write(b"none\n"),
+            "accepted-risks:fixture": artifacts.write(b"public-contract\n"),
         }
         promote_payload = payload(self.head, self.frame, new_run_id())
         promote_payload["lifecycle_stage"] = "promote"
@@ -371,6 +371,30 @@ class RunCliTests(unittest.TestCase):
                 "--stage", "promote",
             ]), 0, output.getvalue())
             promote_id = output.getvalue().split()[1]
+            promote_spec = load_run_spec(promote_id, start=self.root)
+            reviewer_binding = read_profile(
+                self.root / ".waystone" / "profile.yml").binding_for(
+                    Role.REVIEWER).binding_digest
+            review_run_id = new_run_id()
+            feedback_path = self.base / "promotion-review.yaml"
+            feedback_path.write_text(yaml.safe_dump({
+                "target": {
+                    "run_spec_digest": promote_spec.run_spec_digest,
+                    "result_digest": promote_spec.candidate["producer_result_digest"],
+                },
+                "binding_digest": reviewer_binding,
+                "reported_by": {
+                    "role": "reviewer",
+                    "binding_digest": reviewer_binding,
+                    "principal": None,
+                },
+                "findings": [],
+            }, sort_keys=False), encoding="utf-8")
+            review_group.ingest_feedback(
+                self.root, review_run_id, feedback_path,
+                binding_digest=reviewer_binding,
+            )
+            review_group.attach_review(self.root, promote_id, review_run_id)
             self._resume_until_closeout(output, promote_id)
 
         self.assertEqual(git(self.root, "rev-parse", "HEAD").stdout.strip(), candidate_oid)
@@ -380,6 +404,24 @@ class RunCliTests(unittest.TestCase):
                     filesystem="apfs", mount_point=Path("/"), writable=True)), \
                 RunStore.open(self.root) as store:
             self.assertEqual(store.get_run(promote_id).state, "closeout-ready")
+            verifier_ref = store.get_artifact_reference(
+                f"verifier-evidence:{promote_id}:typed-independent-verify")
+            decision_ref = store.get_artifact_reference(
+                f"integration-decision:{promote_id}:integration-decision")
+            review_ref = store.get_artifact_reference(
+                f"review-cycle:{promote_spec.promotion_lineage.id}:1")
+            self.assertEqual(len({
+                verifier_ref.digest, decision_ref.digest, review_ref.digest,
+            }), 3)
+            decision = json.loads(ArtifactStore(self.root).read_reference(
+                decision_ref).decode("utf-8"))
+            self.assertEqual(
+                decision["candidate_digest"], promote_spec.candidate["digest"])
+            self.assertEqual(
+                decision["evaluation_evidence_digest"],
+                promote_spec.evaluation["evidence"]["digest"],
+            )
+            self.assertEqual(len(decision["reviewer_artifact_digests"]), 1)
             attempts = store._connection.execute(  # noqa: SLF001
                 "SELECT attempt_id, state FROM attempts WHERE run_id = ?", (promote_id,)
             ).fetchall()

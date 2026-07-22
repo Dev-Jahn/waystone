@@ -21,6 +21,7 @@ CANDIDATE_SCHEMA = "waystone-candidate-1"
 EVALUATION_SPEC_SCHEMA = "waystone-evaluation-spec-1"
 EVALUATION_EVIDENCE_SCHEMA = "waystone-evaluation-evidence-1"
 REVIEW_CYCLE_SCHEMA = "waystone-review-cycle-1"
+REVIEWER_EVIDENCE_SCHEMA = "waystone-promotion-review-evidence-1"
 
 _OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _STAGE_ACTIONS = {
@@ -723,6 +724,76 @@ class ReviewCycle:
         return digest_bytes(self.canonical_bytes())
 
 
+@dataclass(frozen=True)
+class ReviewerEvidence:
+    promotion_lineage_id: str
+    target_run_spec_digest: str
+    candidate_digest: str
+    target_result_digest: str
+    review_artifact_digest: str
+    actor: Mapping[str, str]
+    finding_digests: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _nonempty(self.promotion_lineage_id, "promotion_lineage_id")
+        for field in (
+                "target_run_spec_digest", "candidate_digest", "target_result_digest",
+                "review_artifact_digest"):
+            _digest(getattr(self, field), field)
+        if (not isinstance(self.actor, Mapping)
+                or set(self.actor) != {"actor_id", "role"}
+                or self.actor.get("role") != "reviewer"):
+            raise PromotionLineageRefusal(
+                "reviewer evidence actor must be an exact reviewer identity")
+        _nonempty(self.actor.get("actor_id"), "reviewer actor_id")
+        findings = tuple(_digest(item, "reviewer finding digest")
+                         for item in self.finding_digests)
+        if len(findings) != len(set(findings)):
+            raise PromotionLineageRefusal("reviewer finding digests must be unique")
+        object.__setattr__(self, "actor", dict(self.actor))
+        object.__setattr__(self, "finding_digests", tuple(sorted(findings)))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema": REVIEWER_EVIDENCE_SCHEMA,
+            "promotion_lineage_id": self.promotion_lineage_id,
+            "target_run_spec_digest": self.target_run_spec_digest,
+            "candidate_digest": self.candidate_digest,
+            "target_result_digest": self.target_result_digest,
+            "review_artifact_digest": self.review_artifact_digest,
+            "actor": dict(self.actor),
+            "finding_digests": list(self.finding_digests),
+        }
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_json(self.to_dict())
+
+    @property
+    def digest(self) -> str:
+        return digest_bytes(self.canonical_bytes())
+
+
+def parse_reviewer_evidence_bytes(content: bytes) -> ReviewerEvidence:
+    row = _canonical_document(content, REVIEWER_EVIDENCE_SCHEMA, "reviewer evidence")
+    if set(row) != {
+            "schema", "promotion_lineage_id", "target_run_spec_digest",
+            "candidate_digest", "target_result_digest", "review_artifact_digest",
+            "actor", "finding_digests"}:
+        raise PromotionLineageRefusal("reviewer evidence fields are not canonical")
+    finding_digests = row["finding_digests"]
+    if not isinstance(finding_digests, list):
+        raise PromotionLineageRefusal("reviewer finding digests must be a list")
+    return ReviewerEvidence(
+        row["promotion_lineage_id"],
+        row["target_run_spec_digest"],
+        row["candidate_digest"],
+        row["target_result_digest"],
+        row["review_artifact_digest"],
+        row["actor"],
+        tuple(finding_digests),
+    )
+
+
 def parse_review_cycle_bytes(content: bytes) -> ReviewCycle:
     row = _canonical_document(content, REVIEW_CYCLE_SCHEMA, "review cycle")
     if set(row) != {
@@ -912,12 +983,14 @@ __all__ = [
     "CandidateRefusal", "EVALUATION_EVIDENCE_SCHEMA", "EVALUATION_SPEC_SCHEMA",
     "EvaluationEvidence", "EvaluationFreezeRefusal", "EvaluationSpec",
     "HoldoutGenerationInvalidated", "PromotionBlocked", "PromotionLineageRefusal",
-    "REVIEW_CYCLE_SCHEMA", "ReviewCycle", "ReviewCycleExhausted",
+    "REVIEW_CYCLE_SCHEMA", "REVIEWER_EVIDENCE_SCHEMA", "ReviewCycle",
+    "ReviewCycleExhausted", "ReviewerEvidence",
     "StageExecutionRefusal", "StageMutationRefusal",
     "assert_evaluation_generation_available", "assert_promotion_unblocked", "canonical_json",
     "compile_assurance_plan", "digest_bytes", "execute_assurance_dag",
     "parse_assurance_plan_bytes",
     "parse_candidate_bytes", "parse_evaluation_evidence_bytes", "parse_evaluation_spec_bytes",
-    "parse_review_cycle_bytes", "promotion_blockers", "select_lifecycle_stage",
+    "parse_review_cycle_bytes", "parse_reviewer_evidence_bytes", "promotion_blockers",
+    "select_lifecycle_stage",
     "validate_review_cycle_chain",
 ]

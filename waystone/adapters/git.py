@@ -24,7 +24,7 @@ class GitReadError(RuntimeError):
 
 
 _READ_ONLY_BYTE_COMMANDS = frozenset({
-    "diff", "ls-files", "ls-tree", "rev-parse", "show", "status",
+    "cat-file", "diff", "ls-files", "ls-tree", "rev-parse", "show", "status",
 })
 
 

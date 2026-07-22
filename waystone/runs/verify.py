@@ -25,7 +25,11 @@ from waystone.runs.artifacts import (
     ArtifactStore,
     validate_sha256_digest,
 )
-from waystone.runs.assurance import AssurancePlan
+from waystone.runs.assurance import (
+    AssurancePlan,
+    parse_assurance_plan_bytes,
+    parse_reviewer_evidence_bytes,
+)
 from waystone.runs.effects import (
     ArtifactWriteEffect,
     EffectEngine,
@@ -360,6 +364,9 @@ class DecisionInput:
     engine_check_reference_id: str
     engine_check_artifact_digest: str
     blocker_overrides: tuple[BlockerOverride, ...] = ()
+    candidate_digest: str | None = None
+    evaluation_evidence_digest: str | None = None
+    reviewer_artifact_digests: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -379,6 +386,9 @@ class IntegrationDecision:
     blocker_overrides: tuple[BlockerOverride, ...]
     producer_effect_digest: str
     artifact_reference: ArtifactReference
+    candidate_digest: str | None = None
+    evaluation_evidence_digest: str | None = None
+    reviewer_artifact_digests: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -595,21 +605,37 @@ def _read_result_worktree_entry(
     return content
 
 
+def _read_result_object_entry(
+        repository: Path, raw_path: bytes, mode: str, oid: str) -> bytes:
+    content = _read_repository_bytes(repository, "cat-file", "blob", oid)
+    if _blob_oid(content, len(oid)) != oid:
+        raise VerifierBindingRefusal(
+            "Git result object bytes differ from their tree entry")
+    if mode == "120000":
+        _safe_symlink_target(raw_path, content)
+    return content
+
+
 def _result_tree_entries(
         repository: Path, result_ref: str, result: GitResultTriple,
+        *, require_registered_worktree: bool = True,
         ) -> tuple[tuple[bytes, str, bytes], ...]:
-    worktrees = _registered_worktrees(repository)
-    matches = tuple(record for record in worktrees
-                    if record.get("branch") == result_ref
-                    and record["HEAD"] == result.result_oid)
-    if len(matches) != 1:
-        raise VerifierBindingRefusal(
-            "exact result ref is not checked out in one registered worker worktree")
-    try:
-        result_worktree = Path(matches[0]["worktree"]).resolve(strict=True)
-    except OSError as error:
-        raise VerifierBindingRefusal(
-            f"registered result worktree is unavailable: {error}") from error
+    if not isinstance(require_registered_worktree, bool):
+        raise TypeError("require_registered_worktree must be boolean")
+    result_worktree = None
+    if require_registered_worktree:
+        worktrees = _registered_worktrees(repository)
+        matches = tuple(record for record in worktrees
+                        if record.get("branch") == result_ref
+                        and record["HEAD"] == result.result_oid)
+        if len(matches) != 1:
+            raise VerifierBindingRefusal(
+                "exact result ref is not checked out in one registered worker worktree")
+        try:
+            result_worktree = Path(matches[0]["worktree"]).resolve(strict=True)
+        except OSError as error:
+            raise VerifierBindingRefusal(
+                f"registered result worktree is unavailable: {error}") from error
     raw = _read_repository_bytes(
         repository, "ls-tree", "-r", "-z", "--full-tree", result.result_oid)
     if raw and not raw.endswith(b"\0"):
@@ -631,8 +657,11 @@ def _result_tree_entries(
             raise VerifierBindingRefusal(
                 "result tree contains an unsupported entry")
         _safe_result_path(raw_path)
-        content = _read_result_worktree_entry(
-            result_worktree, raw_path, mode, oid)
+        content = (
+            _read_result_worktree_entry(result_worktree, raw_path, mode, oid)
+            if result_worktree is not None else
+            _read_result_object_entry(repository, raw_path, mode, oid)
+        )
         entries.append((raw_path, mode, content))
     paths = tuple(path for path, _mode, _content in entries)
     if len(paths) != len(set(paths)):
@@ -665,8 +694,14 @@ def _restore_materialized_permissions(root: Path) -> None:
 
 @contextmanager
 def _materialized_result_root(
-        repository: Path, result_ref: str, result: GitResultTriple, *, read_only: bool):
-    entries = _result_tree_entries(repository, result_ref, result)
+        repository: Path, result_ref: str, result: GitResultTriple, *, read_only: bool,
+        require_registered_worktree: bool = True):
+    entries = _result_tree_entries(
+        repository,
+        result_ref,
+        result,
+        require_registered_worktree=require_registered_worktree,
+    )
     with tempfile.TemporaryDirectory(prefix="waystone-verify-") as temporary:
         root = Path(temporary)
         try:
@@ -1192,7 +1227,8 @@ def execute_verifier(
         check_executor: EngineCheckExecutor, verifier_adapter: VerifierAdapter, *,
         retry_of: str | None = None,
         start: Path | None = None,
-        assurance_plan: AssurancePlan | None = None) -> VerifierEvidence:
+        assurance_plan: AssurancePlan | None = None,
+        require_registered_result_worktree: bool = True) -> VerifierEvidence:
     """Serialize one verifier lineage through terminal evidence publication."""
     if assurance_plan is not None:
         if not isinstance(assurance_plan, AssurancePlan):
@@ -1200,6 +1236,8 @@ def execute_verifier(
         if assurance_plan.verification.get("independent") != "required":
             raise EvidenceBindingRefusal(
                 "frozen stage assurance does not authorize independent verification")
+    if not isinstance(require_registered_result_worktree, bool):
+        raise TypeError("require_registered_result_worktree must be boolean")
     root = Path(repository).resolve(strict=True)
     authority_root = root if start is None else Path(start).resolve(strict=True)
     if authority_root != root:
@@ -1218,6 +1256,7 @@ def execute_verifier(
             verifier_adapter,
             retry_of=retry_of,
             start=root,
+            require_registered_result_worktree=require_registered_result_worktree,
         )
 
 
@@ -1226,7 +1265,8 @@ def _execute_verifier_locked(
         result_ref: str, worker_actor_id: str, actor: ActorIdentity,
         check_executor: EngineCheckExecutor, verifier_adapter: VerifierAdapter, *,
         retry_of: str | None,
-        start: Path) -> VerifierEvidence:
+        start: Path,
+        require_registered_result_worktree: bool) -> VerifierEvidence:
     """Run frozen engine checks and publish evidence while holding the project lock."""
     root = Path(repository).resolve(strict=True)
     authority_root = Path(start).resolve(strict=True)
@@ -1276,7 +1316,9 @@ def _execute_verifier_locked(
     def run_fixture(intent) -> None:
         try:
             with _materialized_result_root(
-                    root, result_ref, result, read_only=False) as execution_root:
+                    root, result_ref, result, read_only=False,
+                    require_registered_worktree=(
+                        require_registered_result_worktree)) as execution_root:
                 results = tuple(_validated_engine_check_output(
                     root,
                     action,
@@ -1294,7 +1336,9 @@ def _execute_verifier_locked(
                     "engine check output does not cover the exact frozen action set")
             captured_checks.extend(results)
             with _materialized_result_root(
-                    root, result_ref, result, read_only=True) as review_root:
+                    root, result_ref, result, read_only=True,
+                    require_registered_worktree=(
+                        require_registered_result_worktree)) as review_root:
                 review_before = _fingerprint_materialized_root(review_root)
                 try:
                     request = VerifierRequest(
@@ -2164,7 +2208,10 @@ def _override_payload(value: BlockerOverride) -> dict[str, str]:
 
 def _decision_lineage_key(spec: RunSpec, decision: DecisionInput) -> str:
     return _digest(_canonical_json({
+        "candidate_digest": decision.candidate_digest,
+        "evaluation_evidence_digest": decision.evaluation_evidence_digest,
         "job_id": spec.job_id,
+        "reviewer_artifact_digests": list(decision.reviewer_artifact_digests),
         "run_id": spec.run_id,
         "verifier_reference_id": decision.verifier_reference_id,
     }))
@@ -2182,12 +2229,15 @@ def _decision_intent_payload(
             _override_payload(item) for item in decision.blocker_overrides
         ],
         "criteria": list(decision.criteria),
+        "candidate_digest": decision.candidate_digest,
         "decision_lineage_key": _decision_lineage_key(spec, decision),
         "engine_check_artifact_digest": decision.engine_check_artifact_digest,
         "engine_check_reference_id": decision.engine_check_reference_id,
+        "evaluation_evidence_digest": decision.evaluation_evidence_digest,
         "job_id": spec.job_id,
         "outcome": outcome.value,
         "result_digest": decision.result_digest,
+        "reviewer_artifact_digests": list(decision.reviewer_artifact_digests),
         "run_id": spec.run_id,
         "schema": _DECISION_INTENT_SCHEMA,
         "verifier_artifact_digest": decision.verifier_artifact_digest,
@@ -2240,10 +2290,62 @@ def _validate_decision(
             != evidence.engine_checks.artifact_reference.reference_id
             or engine_digest != evidence.engine_checks.artifact_reference.digest):
         raise DecisionResultDigestRefusal("decision names different engine check evidence")
+    stage = spec.lifecycle_stage.value
+    reviewer_actor_ids: tuple[str, ...] = ()
+    if stage == "promote":
+        candidate = spec.candidate
+        evaluation = spec.evaluation
+        evidence_ref = None if evaluation is None else evaluation.get("evidence")
+        if not isinstance(candidate, dict) or not isinstance(evidence_ref, dict):
+            raise DecisionResultDigestRefusal(
+                "promotion decision requires frozen candidate and evaluation evidence")
+        try:
+            candidate_digest = validate_sha256_digest(decision.candidate_digest)
+            evaluation_digest = validate_sha256_digest(
+                decision.evaluation_evidence_digest)
+            reviewer_digests = tuple(validate_sha256_digest(item)
+                                     for item in decision.reviewer_artifact_digests)
+        except (TypeError, ValueError) as error:
+            raise DecisionResultDigestRefusal(str(error)) from error
+        if (candidate_digest != candidate.get("digest")
+                or evaluation_digest != evidence_ref.get("digest")
+                or len(reviewer_digests) != len(set(reviewer_digests))):
+            raise DecisionResultDigestRefusal(
+                "promotion decision names different candidate, evaluation, or reviewer evidence")
+        plan = parse_assurance_plan_bytes(
+            ArtifactStore(root).read(spec.assurance_plan.digest))
+        if plan.requires("adversarial-review") != bool(reviewer_digests):
+            raise DecisionResultDigestRefusal(
+                "promotion decision reviewer evidence differs from frozen review requirement")
+        if plan.requires("adversarial-review") and len(reviewer_digests) != 1:
+            raise DecisionResultDigestRefusal(
+                "promotion decision requires exactly one attached review-cycle artifact")
+        reviewers = tuple(parse_reviewer_evidence_bytes(
+            ArtifactStore(root).read(digest)) for digest in reviewer_digests)
+        if any(
+                reviewer.promotion_lineage_id
+                != plan.review.get("promotion_lineage_id")
+                or reviewer.target_run_spec_digest != spec.run_spec_digest
+                or reviewer.candidate_digest != candidate_digest
+                or reviewer.target_result_digest
+                != candidate.get("producer_result_digest")
+                or reviewer.digest != digest
+                for reviewer, digest in zip(reviewers, reviewer_digests)):
+            raise DecisionResultDigestRefusal(
+                "promotion decision reviewer evidence names a different lineage or result")
+        reviewer_actor_ids = tuple(
+            reviewer.actor["actor_id"] for reviewer in reviewers)
+    elif (decision.candidate_digest is not None
+            or decision.evaluation_evidence_digest is not None
+            or decision.reviewer_artifact_digests):
+        raise DecisionResultDigestRefusal(
+            "non-promotion decision cannot carry promotion evidence inputs")
     actor = decision.actor
     if (not isinstance(actor, ActorIdentity) or actor.role is not Role.COORDINATOR
             or actor.actor_id == evidence.worker_actor_id
-            or actor.actor_id == evidence.actor.actor_id):
+            or actor.actor_id == evidence.actor.actor_id
+            or actor.actor_id in reviewer_actor_ids
+            or evidence.actor.actor_id in reviewer_actor_ids):
         raise DecisionActorRefusal(
             "integration decision must be a distinct coordinator, never the worker/verifier")
     try:
@@ -2485,6 +2587,9 @@ def _record_integration_decision_locked(
         engine_check_reference_id=evidence.engine_checks.artifact_reference.reference_id,
         engine_check_artifact_digest=evidence.engine_checks.artifact_reference.digest,
         blocker_overrides=overrides,
+        candidate_digest=decision_input.candidate_digest,
+        evaluation_evidence_digest=decision_input.evaluation_evidence_digest,
+        reviewer_artifact_digests=decision_input.reviewer_artifact_digests,
     )
     producer_effect_digest = _digest(candidate_payload)
     normalized_payload = _canonical_json(_decision_payload(
@@ -2525,6 +2630,9 @@ def _record_integration_decision_locked(
         blocker_overrides=overrides,
         producer_effect_digest=producer_effect_digest,
         artifact_reference=reference,
+        candidate_digest=normalized.candidate_digest,
+        evaluation_evidence_digest=normalized.evaluation_evidence_digest,
+        reviewer_artifact_digests=normalized.reviewer_artifact_digests,
     )
 
 
@@ -2545,10 +2653,12 @@ def _parse_decision_document(
         value: object, *, schema: str, producer_digest: bool,
         label: str) -> tuple[dict[str, object], DecisionInput, str, str]:
     expected = {
-        "action_id", "actor", "attempt_id", "blocker_overrides", "criteria",
+        "action_id", "actor", "attempt_id", "blocker_overrides", "candidate_digest",
+        "criteria",
         "decision_lineage_key", "engine_check_artifact_digest",
-        "engine_check_reference_id", "job_id", "outcome", "result_digest",
-        "run_id", "schema", "verifier_artifact_digest", "verifier_reference_id",
+        "engine_check_reference_id", "evaluation_evidence_digest", "job_id", "outcome",
+        "result_digest", "reviewer_artifact_digests", "run_id", "schema",
+        "verifier_artifact_digest", "verifier_reference_id",
     }
     if producer_digest:
         expected.add("producer_effect_digest")
@@ -2558,11 +2668,14 @@ def _parse_decision_document(
             raise ApplyBindingRefusal(f"{label} schema is invalid")
         raw_criteria = row["criteria"]
         raw_overrides = row["blocker_overrides"]
+        raw_reviewers = row["reviewer_artifact_digests"]
         if not isinstance(raw_criteria, list) or not all(
                 isinstance(item, str) for item in raw_criteria):
             raise ApplyBindingRefusal(f"{label} criteria are malformed")
         if not isinstance(raw_overrides, list):
             raise ApplyBindingRefusal(f"{label} overrides are malformed")
+        if not isinstance(raw_reviewers, list):
+            raise ApplyBindingRefusal(f"{label} reviewer evidence is malformed")
         decision_input = DecisionInput(
             actor=_parse_actor(row["actor"]),
             outcome=DecisionOutcome(row["outcome"]),
@@ -2578,6 +2691,15 @@ def _parse_decision_document(
             engine_check_artifact_digest=validate_sha256_digest(  # type: ignore[arg-type]
                 row["engine_check_artifact_digest"]),
             blocker_overrides=tuple(_parse_override(item) for item in raw_overrides),
+            candidate_digest=(
+                None if row["candidate_digest"] is None
+                else validate_sha256_digest(row["candidate_digest"])),  # type: ignore[arg-type]
+            evaluation_evidence_digest=(
+                None if row["evaluation_evidence_digest"] is None
+                else validate_sha256_digest(  # type: ignore[arg-type]
+                    row["evaluation_evidence_digest"])),
+            reviewer_artifact_digests=tuple(
+                validate_sha256_digest(item) for item in raw_reviewers),
         )
         attempt_id = _nonempty(row["attempt_id"], f"{label} attempt_id")
         action_id = _nonempty(row["action_id"], f"{label} action_id")
@@ -2635,6 +2757,9 @@ def _load_integration_decision(
         engine_check_reference_id=evidence.engine_checks.artifact_reference.reference_id,
         engine_check_artifact_digest=evidence.engine_checks.artifact_reference.digest,
         blocker_overrides=overrides,
+        candidate_digest=decision_input.candidate_digest,
+        evaluation_evidence_digest=decision_input.evaluation_evidence_digest,
+        reviewer_artifact_digests=decision_input.reviewer_artifact_digests,
     )
     expected_payload = _canonical_json(_decision_payload(
         spec=spec,
@@ -2696,6 +2821,9 @@ def _load_integration_decision(
         engine_check_reference_id=evidence.engine_checks.artifact_reference.reference_id,
         engine_check_artifact_digest=evidence.engine_checks.artifact_reference.digest,
         blocker_overrides=intent_overrides,
+        candidate_digest=intent_input.candidate_digest,
+        evaluation_evidence_digest=intent_input.evaluation_evidence_digest,
+        reviewer_artifact_digests=intent_input.reviewer_artifact_digests,
     )
     if normalized_intent != normalized:
         raise ApplyBindingRefusal(
@@ -2716,6 +2844,9 @@ def _load_integration_decision(
         blocker_overrides=overrides,
         producer_effect_digest=producer_effect_digest,
         artifact_reference=reference,
+        candidate_digest=normalized.candidate_digest,
+        evaluation_evidence_digest=normalized.evaluation_evidence_digest,
+        reviewer_artifact_digests=normalized.reviewer_artifact_digests,
     )
 
 

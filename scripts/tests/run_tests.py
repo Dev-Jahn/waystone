@@ -23,6 +23,7 @@ MODULES = (
     "test_work_brief",
     "test_worker_result",
     "test_run_assurance",
+    "test_promote_evidence",
     "test_run_cancel",
     "test_run_domain",
     "test_run_prompt",

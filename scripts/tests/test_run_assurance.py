@@ -26,6 +26,7 @@ from waystone.runs.assurance import (
     PromotionLineageRefusal,
     ReviewCycle,
     ReviewCycleExhausted,
+    ReviewerEvidence,
     StageMutationRefusal,
     assert_evaluation_generation_available,
     assert_promotion_unblocked,
@@ -435,6 +436,11 @@ class PromotionLineageTests(unittest.TestCase):
                 spec = SimpleNamespace(
                     run_id=run.run_id,
                     job_id=job_id,
+                    run_spec_digest=self.d(36),
+                    candidate={
+                        "digest": self.d(33),
+                        "producer_result_digest": self.d(34),
+                    },
                     assurance_plan=SimpleNamespace(digest=plan_artifact.digest),
                     promotion_lineage=PromotionLineage(
                         lineage_id, self.d(32), "refs/heads/main", None,
@@ -446,11 +452,17 @@ class PromotionLineageTests(unittest.TestCase):
                 )
                 assembly = ProductionRunAssembly(
                     context, None, {}, store, artifacts, None, None, None, None)
+                reviewer = ReviewerEvidence(
+                    lineage_id, spec.run_spec_digest, spec.candidate["digest"],
+                    self.d(34), self.d(35),
+                    {"actor_id": "reviewer", "role": "reviewer"}, (),
+                )
+                artifacts.write(reviewer.canonical_bytes())
                 with mock.patch("waystone.runs.engine.load_run_spec", return_value=spec):
                     cycle = StagedRunEngine(assembly).append_review_cycle(
                         run.run_id,
                         target_result_digest=self.d(34),
-                        review_digest=self.d(35),
+                        review_digest=reviewer.digest,
                     )
 
                 reference = store.get_artifact_reference(

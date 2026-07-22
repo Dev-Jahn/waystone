@@ -15,6 +15,7 @@ from waystone.project.brief import ProjectFactRef, read_project_frame_at_commit
 from waystone.project.context import resolve_project_context
 from waystone.runs.artifacts import ArtifactReference, ArtifactReferenceKind
 from waystone.runs.assurance import (
+    PromotionLineageRefusal,
     compile_assurance_plan,
     digest_bytes,
     parse_candidate_bytes,
@@ -206,6 +207,26 @@ def _one_evidence_source(brief, prefix: str) -> Mapping[str, object]:
     return matches[0]
 
 
+def _parse_declared_risks_bytes(content: bytes) -> tuple[str, ...]:
+    if not isinstance(content, bytes):
+        raise TypeError("accepted-risks content must be bytes")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise PromotionLineageRefusal(
+            "accepted-risks record must be UTF-8") from error
+    lines = tuple(line.strip() for line in text.splitlines())
+    if not lines or any(not line for line in lines):
+        raise PromotionLineageRefusal(
+            "accepted-risks record must contain non-empty risk lines or exactly 'none'")
+    if lines == ("none",):
+        return ()
+    if "none" in lines or len(lines) != len(set(lines)):
+        raise PromotionLineageRefusal(
+            "accepted-risks cannot mix 'none' with risks or repeat a risk id")
+    return tuple(sorted(lines))
+
+
 def _candidate_input(assembly: ProductionRunAssembly, brief):
     source = _one_evidence_source(brief, "candidate:")
     candidate = parse_candidate_bytes(
@@ -365,8 +386,14 @@ def _start_with_assembly(
                 raise ActionPlanRefusal("promotion integration target is not locally reachable")
             result_policy = ResultPolicy(
                 "integration-ref", inherited.integration_target_ref, expected_oid)
+    declared_risks = ()
+    if brief.lifecycle_stage == "promote":
+        risks_source = _one_evidence_source(brief, "accepted-risks:")
+        declared_risks = _parse_declared_risks_bytes(
+            assembly.artifact_store.read(risks_source["digest"]))
     assurance_content = compile_assurance_plan(
         brief.lifecycle_stage,
+        declared_risks=declared_risks,
         evaluation_spec=evaluation_spec,
         completion_contract={
             "reference_id": "completion-contract:<pending>",

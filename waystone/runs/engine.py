@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import stat
@@ -28,17 +29,20 @@ from waystone.runs.artifacts import (
     ArtifactReference, ArtifactReferenceKind, ArtifactStore, validate_sha256_digest,
 )
 from waystone.runs.assurance import (
+    AssurancePlan,
     Candidate,
     EvaluationEvidence,
     assert_evaluation_generation_available,
     ReviewCycleExhausted,
     ReviewCycle,
+    ReviewerEvidence,
     assert_promotion_unblocked,
     execute_assurance_dag,
     parse_assurance_plan_bytes,
     parse_candidate_bytes,
     parse_evaluation_evidence_bytes,
     parse_evaluation_spec_bytes,
+    parse_reviewer_evidence_bytes,
     parse_review_cycle_bytes,
     canonical_json as assurance_json,
 )
@@ -62,14 +66,23 @@ from waystone.runs.observe import (
 from waystone.runs.preflight import (
     CapabilitySet,
     DispatchReady,
+    EnvironmentPreparationReceipt,
     MaterializedToolchain,
+    NetworkCacheRequirements,
+    ObservationStatus,
+    RoleCapability,
+    RunnerCapabilities,
     RunnerContext,
     RunnerProof,
+    RuntimeObservation,
+    SandboxContract,
     VerificationPlan,
     VerificationPlanDefinition,
     freeze_verification_plan,
     load_dispatch_ready,
+    load_verification_plan,
     preflight_for_dispatch,
+    record_runner_proof,
 )
 from waystone.runs.outcome import OutcomePublication, publish_outcome
 from waystone.runs.spec import (
@@ -107,11 +120,18 @@ from waystone.runs.worker_result import (
 from waystone.runs.verify import (
     ActorIdentity,
     ApplyResult,
+    CriterionResult,
     DecisionInput,
+    DecisionOutcome,
     EngineCheckExecutor,
+    FixtureVerifierResult,
     IntegrationDecision,
     VerifierAdapter,
+    VerifierBlocker,
     VerifierEvidence,
+    VerifierOutput,
+    execute_verifier,
+    record_integration_decision,
 )
 from waystone.runs import store as store_module
 
@@ -280,6 +300,91 @@ def load_review_cycle_chain(
     return ordered
 
 
+def validate_promotion_evidence(
+    plan: AssurancePlan,
+    *,
+    expected_run_id: str,
+    expected_run_spec_digest: str,
+    expected_candidate_digest: str,
+    expected_candidate_oid: str,
+    expected_evaluation_evidence_digest: str,
+    expected_target_result_digest: str,
+    verifier: object,
+    review: tuple[ReviewCycle, ReviewerEvidence] | None,
+    decision: object,
+) -> None:
+    """Refuse promotion unless verifier, reviewer, and coordinator evidence stays separate."""
+    if not isinstance(plan, AssurancePlan) or plan.lifecycle_stage.value != "promote":
+        raise EngineBindingRefusal("promotion evidence requires a frozen promote AssurancePlan")
+    if not isinstance(verifier, VerifierEvidence):
+        raise EngineBindingRefusal(
+            "independent-verify must return a typed VerifierEvidence artifact")
+    if (verifier.run_id != expected_run_id
+            or verifier.run_spec_digest != expected_run_spec_digest
+            or verifier.actor.role is not Role.VERIFIER
+            or verifier.verifier_sandbox.filesystem != "read-only"
+            or verifier.result.result_oid != expected_candidate_oid):
+        raise EngineBindingRefusal(
+            "VerifierEvidence is not bound to the exact read-only promotion candidate")
+
+    reviewer_digest = None
+    reviewer_actor_id = None
+    if plan.requires("adversarial-review"):
+        if (not isinstance(review, tuple) or len(review) != 2
+                or not isinstance(review[0], ReviewCycle)
+                or not isinstance(review[1], ReviewerEvidence)):
+            raise EngineBindingRefusal(
+                "risk-gated promotion requires a typed ReviewCycle and reviewer artifact")
+        cycle, reviewer = review
+        if (cycle.promotion_lineage_id != plan.review.get("promotion_lineage_id")
+                or cycle.target_result_digest != expected_target_result_digest
+                or cycle.review_digest != reviewer.digest
+                or reviewer.promotion_lineage_id != cycle.promotion_lineage_id
+                or reviewer.target_run_spec_digest != expected_run_spec_digest
+                or reviewer.candidate_digest != expected_candidate_digest
+                or reviewer.target_result_digest != expected_target_result_digest):
+            raise EngineBindingRefusal(
+                "reviewer evidence names a different promotion lineage, candidate, or result")
+        reviewer_digest = reviewer.digest
+        reviewer_actor_id = reviewer.actor["actor_id"]
+    elif review is not None:
+        raise EngineBindingRefusal(
+            "reviewer evidence cannot be added outside the frozen review action")
+
+    if not isinstance(decision, IntegrationDecision):
+        raise EngineBindingRefusal(
+            "integration-decision must return a typed coordinator decision artifact")
+    expected_reviewers = () if reviewer_digest is None else (reviewer_digest,)
+    if (decision.run_id != expected_run_id
+            or decision.actor.role is not Role.COORDINATOR
+            or decision.outcome.value != "accept"
+            or decision.result_digest != verifier.result.result_digest
+            or decision.verifier_reference_id != verifier.artifact_reference.reference_id
+            or decision.verifier_artifact_digest != verifier.artifact_reference.digest
+            or decision.candidate_digest != expected_candidate_digest
+            or decision.evaluation_evidence_digest
+            != expected_evaluation_evidence_digest
+            or decision.reviewer_artifact_digests != expected_reviewers):
+        raise EngineBindingRefusal(
+            "integration decision does not bind the exact promotion evidence tuple")
+
+    actor_ids = [verifier.actor.actor_id, decision.actor.actor_id]
+    if reviewer_actor_id is not None:
+        actor_ids.append(reviewer_actor_id)
+    artifact_digests = [
+        verifier.artifact_reference.digest,
+        decision.artifact_reference.digest,
+    ]
+    if reviewer_digest is not None:
+        artifact_digests.append(reviewer_digest)
+    if len(actor_ids) != len(set(actor_ids)):
+        raise EngineBindingRefusal(
+            "verifier, reviewer, and coordinator actor identities must be distinct")
+    if len(artifact_digests) != len(set(artifact_digests)):
+        raise EngineBindingRefusal(
+            "verifier, reviewer, and decision artifacts must be distinct")
+
+
 class StagedRunEngine:
     """A2 production entry point over an already assembled canonical kernel graph."""
 
@@ -289,6 +394,94 @@ class StagedRunEngine:
         self.assembly = assembly
         self.root = assembly.context.canonical_root
         self.input_root = assembly.context.active_worktree_root
+
+    @staticmethod
+    def _observed_digest(value: bytes) -> str:
+        return "sha256:" + hashlib.sha256(value).hexdigest()
+
+    def _prepare_promotion_verification(self, spec: RunSpec) -> None:
+        """Freeze and prove the existing check-free verifier path for one promote run."""
+        sandbox = SandboxContract("read-only", "isolated", "denied")
+        definition = VerificationPlanDefinition(
+            required_checks=(),
+            required_toolchains=(),
+            environment_preparation=(),
+            network_cache_requirements=NetworkCacheRequirements(
+                False, (), "promotion-verifier", True),
+            verifier_sandbox=sandbox,
+        )
+        plan = freeze_verification_plan(spec.run_id, definition, start=self.root)
+        worker = self.assembly.profile.binding_for(Role.WORKER).binding
+        verifier = self.assembly.profile.binding_for(Role.VERIFIER).binding
+        runner = RunnerCapabilities(
+            execution_categories=tuple(sorted(
+                {worker.execution_category, verifier.execution_category},
+                key=lambda item: item.value,
+            )),
+            engine_sandboxes=(),
+            role_capabilities=(
+                RoleCapability(worker, sandbox, False, False, False, False),
+                RoleCapability(verifier, sandbox, True, True, True, True),
+            ),
+        )
+        preparation = EnvironmentPreparationReceipt(
+            plan.environment_preparation_digest,
+            plan.network_cache_requirements,
+            (),
+        )
+        capabilities = CapabilitySet(runner, (preparation,), (), ())
+        executable = shutil.which("codex")
+        if executable is None:
+            raise EngineBindingRefusal(
+                "codex executable is unavailable for the frozen verifier binding")
+        try:
+            executable_bytes = Path(executable).read_bytes()
+            project_bytes = (self.root / ".waystone.yml").read_bytes()
+            profile_bytes = (self.root / ".waystone" / "profile.yml").read_bytes()
+        except OSError as error:
+            raise EngineBindingRefusal(
+                f"promotion verifier capability bytes are unavailable: {error}") from error
+        observations = (
+            RuntimeObservation(
+                "cache-boundary", "engine:cache-boundary", ObservationStatus.OBSERVED,
+                self._observed_digest(plan.network_cache_requirements.cache_namespace.encode())),
+            RuntimeObservation(
+                "platform-kernel", "engine:platform-kernel", ObservationStatus.OBSERVED,
+                self._observed_digest(repr(os.uname()).encode())),
+            RuntimeObservation(
+                "process-security", "engine:process-security",
+                ObservationStatus.NOT_OBSERVED, None),
+            RuntimeObservation(
+                "runner-binary", "runner-adapter:binary", ObservationStatus.OBSERVED,
+                self._observed_digest(executable_bytes)),
+            RuntimeObservation(
+                "runner-config-content", "runner-adapter:config",
+                ObservationStatus.NOT_OBSERVED, None),
+            RuntimeObservation(
+                "runner-version", "runner-adapter:version", ObservationStatus.OBSERVED,
+                self._observed_digest(executable_bytes)),
+            RuntimeObservation(
+                "sandbox-contract", "engine:sandbox-contract", ObservationStatus.OBSERVED,
+                self._observed_digest(repr(sandbox).encode())),
+        )
+        context = RunnerContext(
+            checkout_identity=self._observed_digest(
+                self.assembly.context.checkout_identity.encode()),
+            machine_identity=self._observed_digest(repr(os.uname()).encode()),
+            principal_identity=self._observed_digest(
+                f"uid={os.getuid()};gid={os.getgid()}".encode()),
+            project_config_digest=self._observed_digest(project_bytes),
+            profile_config_digest=self._observed_digest(profile_bytes),
+            runtime_observations=observations,
+        )
+        preflight_for_dispatch(
+            spec.run_id,
+            capabilities=capabilities,
+            materialized_toolchains=(),
+            current_runner_context=context,
+            reusable_runner_proof=record_runner_proof(context, runner),
+            start=self.root,
+        )
 
     def start(
         self,
@@ -321,17 +514,22 @@ class StagedRunEngine:
             run_store=self.assembly.store,
             start=self.input_root,
         )
+        if spec.lifecycle_stage.value == "promote":
+            self._prepare_promotion_verification(spec)
         store = self.assembly.store
         run = store.get_run(spec.run_id)
-        ready = store.record_transition(
-            EntityKind.RUN,
-            spec.run_id,
-            expected_version=run.version,
-            next_state="dispatch-ready",
-            reason=TransitionReason.PLANNED,
-            evidence_digest=spec.run_spec_digest,
-        )
-        del ready
+        if run.state == "frozen-ready":
+            store.record_transition(
+                EntityKind.RUN,
+                spec.run_id,
+                expected_version=run.version,
+                next_state="dispatch-ready",
+                reason=TransitionReason.PLANNED,
+                evidence_digest=spec.run_spec_digest,
+            )
+        elif run.state != "dispatch-ready":
+            raise EngineBindingRefusal(
+                "stage start did not reach its frozen dispatch-ready authority")
         job = store.get_entity(EntityKind.JOB, spec.job_id)
         store.record_transition(
             EntityKind.JOB,
@@ -446,8 +644,13 @@ class StagedRunEngine:
             completion_contract=contract,
         )
         schema = self._worker_result_schema(
-            spec, attempt_id, evaluation=spec.lifecycle_stage.value == "evaluate")
-        sandbox = "read-only" if spec.lifecycle_stage.value == "evaluate" else "workspace-write"
+            spec, attempt_id,
+            evaluation=spec.lifecycle_stage.value in {"evaluate", "promote"})
+        sandbox = (
+            "read-only"
+            if spec.lifecycle_stage.value in {"evaluate", "promote"}
+            else "workspace-write"
+        )
         return RunnerInvocation((
             executable,
             "exec",
@@ -464,7 +667,11 @@ class StagedRunEngine:
         ), self.input_root)
 
     def _runner_action_id(self, attempt_id: str, stage: str) -> str:
-        action = "worker" if stage == "explore" else "read-only-evaluator"
+        action = {
+            "explore": "worker",
+            "evaluate": "read-only-evaluator",
+            "promote": "independent-verify",
+        }[stage]
         return f"{attempt_id}:{action}"
 
     def _ensure_stage_runner(self, spec: RunSpec, attempt_id: str) -> str:
@@ -494,7 +701,7 @@ class StagedRunEngine:
         return action_id
 
     def _ensure_stage_started(self, spec: RunSpec, attempt_id: str) -> None:
-        if spec.lifecycle_stage.value in {"explore", "evaluate"}:
+        if spec.lifecycle_stage.value in {"explore", "evaluate", "promote"}:
             self._ensure_stage_runner(spec, attempt_id)
 
     def observe_worker_result(
@@ -831,10 +1038,138 @@ class StagedRunEngine:
             required.append(digest)
         return required[0], required[1], required[2]
 
+    def _publish_promotion_verifier(
+        self,
+        spec: RunSpec,
+        attempt_id: str,
+        adapted: AdaptedWorkerResult,
+        plan: AssurancePlan,
+    ) -> VerifierEvidence:
+        if not isinstance(adapted.result, CompletedWorkerResult):
+            raise EngineBindingRefusal(
+                "promotion verifier did not publish a completed typed result")
+        actor = ActorIdentity(
+            self.assembly.profile.binding_for(Role.VERIFIER).binding_digest,
+            Role.VERIFIER,
+        )
+        evidence_digests = tuple(
+            item.digest for item in adapted.result.evidence_refs)
+        passed = adapted.result.result_summary == "pass"
+
+        def verifier_executor(request) -> FixtureVerifierResult:
+            criteria = tuple(CriterionResult(
+                criterion,
+                passed,
+                evidence_digests,
+            ) for criterion in request.owner_criteria)
+            blockers = () if passed else (VerifierBlocker(
+                "promotion-verifier-rejected",
+                "the verifier binding rejected the exact promotion candidate",
+            ),)
+            return FixtureVerifierResult(0, VerifierOutput(
+                actor=actor,
+                result_digest=request.result.result_digest,
+                criterion_results=criteria,
+                blockers=blockers,
+                summary=(
+                    "promotion verifier accepted the exact candidate"
+                    if passed else
+                    "promotion verifier rejected the exact candidate"
+                ),
+            ))
+
+        verification_plan = load_verification_plan(spec.run_id, start=self.root)
+        adapter = VerifierAdapter(
+            verification_plan.binding_for(Role.VERIFIER).binding,
+            verification_plan.verifier_sandbox,
+            verifier_executor,
+        )
+
+        def no_engine_check(_request):
+            raise EngineBindingRefusal(
+                "check-free promotion verification cannot execute an engine check")
+
+        assert spec.candidate is not None
+        return execute_verifier(
+            spec.run_id,
+            attempt_id,
+            f"{spec.run_id}:typed-independent-verify",
+            self.root,
+            spec.candidate["target_ref"],
+            self.assembly.profile.binding_for(Role.WORKER).binding_digest,
+            actor,
+            no_engine_check,
+            adapter,
+            start=self.root,
+            assurance_plan=plan,
+            require_registered_result_worktree=False,
+        )
+
+    def _promotion_review(
+        self, spec: RunSpec, plan: AssurancePlan,
+    ) -> tuple[ReviewCycle, ReviewerEvidence] | None:
+        if not plan.requires("adversarial-review"):
+            return None
+        assert spec.promotion_lineage is not None
+        cycles = load_review_cycle_chain(
+            self.assembly,
+            spec.promotion_lineage.id,
+            spec.promotion_lineage.review_cycle_head_digest,
+        )
+        if not cycles:
+            raise EngineBindingRefusal(
+                "declared promotion risk requires an attached reviewer artifact")
+        cycle = cycles[-1]
+        reviewer = parse_reviewer_evidence_bytes(
+            self.assembly.artifact_store.read(cycle.review_digest))
+        return cycle, reviewer
+
+    def _record_promotion_decision(
+        self,
+        spec: RunSpec,
+        attempt_id: str,
+        verifier: VerifierEvidence,
+        review: tuple[ReviewCycle, ReviewerEvidence] | None,
+    ) -> IntegrationDecision:
+        assert spec.candidate is not None and spec.evaluation is not None
+        evidence_ref = spec.evaluation["evidence"]
+        assert isinstance(evidence_ref, Mapping)
+        accepted = (
+            all(item.passed for item in verifier.criterion_results)
+            and not verifier.blockers
+        )
+        decision_input = DecisionInput(
+            actor=ActorIdentity(
+                self.assembly.profile.binding_for(Role.COORDINATOR).binding_digest,
+                Role.COORDINATOR,
+            ),
+            outcome=(DecisionOutcome.ACCEPT if accepted else DecisionOutcome.REJECT),
+            criteria=tuple(item.criterion for item in verifier.criterion_results),
+            result_digest=verifier.result.result_digest,
+            verifier_reference_id=verifier.artifact_reference.reference_id,
+            verifier_artifact_digest=verifier.artifact_reference.digest,
+            engine_check_reference_id=(
+                verifier.engine_checks.artifact_reference.reference_id),
+            engine_check_artifact_digest=(
+                verifier.engine_checks.artifact_reference.digest),
+            candidate_digest=spec.candidate["digest"],
+            evaluation_evidence_digest=evidence_ref["digest"],
+            reviewer_artifact_digests=(
+                () if review is None else (review[1].digest,)
+            ),
+        )
+        return record_integration_decision(
+            spec.run_id,
+            attempt_id,
+            f"{spec.run_id}:integration-decision",
+            decision_input,
+            start=self.root,
+        )
+
     def _execute_public_stage(
             self, spec: RunSpec, attempt_id: str) -> tuple[tuple[str, object], ...] | None:
         stage = spec.lifecycle_stage.value
-        if stage in {"explore", "evaluate"}:
+        if stage in {"explore", "evaluate", "promote"}:
             action_id = self._runner_action_id(attempt_id, stage)
             adapted = self.observe_worker_result(spec.run_id, attempt_id, action_id)
             if isinstance(adapted.result, ContextRequestedWorkerResult):
@@ -888,18 +1223,47 @@ class StagedRunEngine:
         assert isinstance(evidence_ref, Mapping)
         evidence = parse_evaluation_evidence_bytes(
             self.assembly.artifact_store.read(evidence_ref["digest"]))
-        evidence_digest = validate_sha256_digest(evidence_ref["digest"])
-        handlers = {
-            "evaluated-candidate-freeze": lambda: spec.candidate["digest"],  # type: ignore[index]
-            "independent-verify": lambda: evidence_digest,
-            "integration-decision": lambda: evidence_digest,
-            "target-ref-apply": lambda: self._apply_candidate(spec, attempt_id),
-            "completion": lambda: evidence_digest,
-        }
+        del evidence
+        verifier = None
+        review = None
+        decision = None
         plan = parse_assurance_plan_bytes(
             self.assembly.artifact_store.read(spec.assurance_plan.digest))
+
+        def publish_verifier() -> VerifierEvidence:
+            nonlocal verifier
+            verifier = self._publish_promotion_verifier(
+                spec, attempt_id, adapted, plan)
+            return verifier
+
+        def consume_review() -> tuple[ReviewCycle, ReviewerEvidence]:
+            nonlocal review
+            review = self._promotion_review(spec, plan)
+            if review is None:
+                raise EngineBindingRefusal(
+                    "frozen adversarial-review action has no reviewer artifact")
+            return review
+
+        def publish_decision() -> IntegrationDecision:
+            nonlocal decision
+            if verifier is None:
+                raise EngineBindingRefusal(
+                    "integration decision requires completed VerifierEvidence")
+            decision = self._record_promotion_decision(
+                spec, attempt_id, verifier, review)
+            return decision
+
+        handlers = {
+            "evaluated-candidate-freeze": lambda: spec.candidate["digest"],  # type: ignore[index]
+            "independent-verify": publish_verifier,
+            "integration-decision": publish_decision,
+            "target-ref-apply": lambda: self._apply_candidate(spec, attempt_id),
+            "completion": lambda: (
+                decision.artifact_reference.digest
+                if decision is not None else None),
+        }
         if plan.requires("adversarial-review"):
-            handlers["adversarial-review"] = lambda: evidence_digest
+            handlers["adversarial-review"] = consume_review
         return self.execute_stage(
             spec.run_id,
             handlers,
@@ -924,7 +1288,7 @@ class StagedRunEngine:
             return self.assembly.transport.actions_next(run_id)
         spec = load_run_spec(run_id, start=self.root)
         attempt_id = self._latest_attempt_id(spec)
-        if spec.lifecycle_stage.value in {"explore", "evaluate"}:
+        if spec.lifecycle_stage.value in {"explore", "evaluate", "promote"}:
             action_id = self._ensure_stage_runner(spec, attempt_id)
             action = self.assembly.store.get_entity(EntityKind.ACTION, action_id)
             if action.state != "completed":
@@ -1019,6 +1383,53 @@ class StagedRunEngine:
                     review["consumed_cycles"], review["max_cycles"])
                 self._wait_for_review_budget(spec, exhausted)
                 raise exhausted
+            original_handlers = dict(handlers)
+            promotion_results: dict[str, object] = {}
+
+            def independent_verify() -> object:
+                result = original_handlers["independent-verify"]()
+                if not isinstance(result, VerifierEvidence):
+                    raise EngineBindingRefusal(
+                        "independent-verify must return typed VerifierEvidence")
+                promotion_results["independent-verify"] = result
+                return result
+
+            handlers = dict(handlers)
+            handlers["independent-verify"] = independent_verify
+            if plan.requires("adversarial-review"):
+                def adversarial_review() -> object:
+                    result = original_handlers["adversarial-review"]()
+                    if (not isinstance(result, tuple) or len(result) != 2
+                            or not isinstance(result[0], ReviewCycle)
+                            or not isinstance(result[1], ReviewerEvidence)):
+                        raise EngineBindingRefusal(
+                            "adversarial-review must return ReviewCycle and reviewer evidence")
+                    promotion_results["adversarial-review"] = result
+                    return result
+
+                handlers["adversarial-review"] = adversarial_review
+
+            def integration_decision() -> object:
+                result = original_handlers["integration-decision"]()
+                promotion_results["integration-decision"] = result
+                evidence_ref = spec.evaluation["evidence"]
+                assert isinstance(evidence_ref, Mapping)
+                validate_promotion_evidence(
+                    plan,
+                    expected_run_id=spec.run_id,
+                    expected_run_spec_digest=spec.run_spec_digest,
+                    expected_candidate_digest=spec.candidate["digest"],
+                    expected_candidate_oid=spec.candidate["target_oid"],
+                    expected_evaluation_evidence_digest=evidence_ref["digest"],
+                    expected_target_result_digest=(
+                        spec.candidate["producer_result_digest"]),
+                    verifier=promotion_results.get("independent-verify"),
+                    review=promotion_results.get("adversarial-review"),  # type: ignore[arg-type]
+                    decision=result,
+                )
+                return result
+
+            handlers["integration-decision"] = integration_decision
         results = execute_assurance_dag(
             plan,
             handlers,
@@ -1214,6 +1625,27 @@ class StagedRunEngine:
                 or plan.review.get("promotion_lineage_id") != spec.promotion_lineage.id
                 or not plan.requires("adversarial-review")):
             raise EngineBindingRefusal("run has no frozen risk-gated review action")
+        if not isinstance(spec.candidate, Mapping):
+            raise EngineBindingRefusal("review attachment requires a frozen candidate")
+        expected_result = validate_sha256_digest(
+            spec.candidate.get("producer_result_digest"))  # type: ignore[arg-type]
+        if validate_sha256_digest(target_result_digest) != expected_result:
+            raise EngineBindingRefusal(
+                "review attachment names a different promotion result")
+        reviewer = parse_reviewer_evidence_bytes(
+            self.assembly.artifact_store.read(review_digest))
+        if (reviewer.promotion_lineage_id != spec.promotion_lineage.id
+                or reviewer.target_run_spec_digest != spec.run_spec_digest
+                or reviewer.candidate_digest != spec.candidate.get("digest")
+                or reviewer.target_result_digest != expected_result
+                or reviewer.digest != review_digest):
+            raise EngineBindingRefusal(
+                "review attachment artifact differs from the frozen promotion lineage")
+        if self.assembly.profile is not None:
+            expected_actor = self.assembly.profile.binding_for(Role.REVIEWER).binding_digest
+            if reviewer.actor["actor_id"] != expected_actor:
+                raise EngineBindingRefusal(
+                    "review attachment actor differs from the frozen reviewer binding")
         cycles = load_review_cycle_chain(
             self.assembly,
             spec.promotion_lineage.id,
@@ -1746,5 +2178,7 @@ __all__ = [
     "StagedRunEngine",
     "StagedStartResult",
     "StartResult",
+    "load_review_cycle_chain",
     "open_read_only_store",
+    "validate_promotion_evidence",
 ]

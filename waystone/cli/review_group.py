@@ -312,3 +312,114 @@ FindingError = findings.FindingError
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def attach_review(root: Path, promotion_run_id: str, review_run_id: str):
+    """Attach one ingested reviewer result to its exact frozen promotion lineage."""
+    from waystone.jobs.domain import Role
+    from waystone.jobs.profile import assemble_run
+    from waystone.project.context import resolve_project_context
+    from waystone.runs.assurance import ReviewerEvidence
+    from waystone.runs.engine import StagedRunEngine
+    from waystone.runs.spec import load_run_spec
+
+    root = Path(root).resolve()
+    require_initialized_root(root)
+    reviews_dir = _reviews_dir(root)
+    feedback = review_layout.read_canonical_artifact(
+        reviews_dir,
+        review_layout.canonical_artifact_path(
+            reviews_dir, review_run_id, review_layout.FEEDBACK),
+    )
+    raw = feedback["bytes"]
+    body = raw.split(b"\n", 1)[1] if raw.startswith(b"<!-- waystone-review-artifact:") else raw
+    metadata, _rows = _parse_structured(body)
+    if metadata is None:
+        raise ReviewGroupError(
+            "review attach requires structured ingested feedback metadata")
+    context = resolve_project_context(root)
+    with assemble_run(context) as assembly:
+        spec = load_run_spec(promotion_run_id, start=assembly.context.canonical_root)
+        if (spec.lifecycle_stage.value != "promote"
+                or spec.promotion_lineage is None
+                or not isinstance(spec.candidate, Mapping)):
+            raise ReviewGroupError("review attach target is not a frozen promotion run")
+        target = metadata.get("target")
+        if not isinstance(target, Mapping):
+            raise ReviewGroupError("review attach feedback lacks target metadata")
+        feedback_digest = findings.artifact_digest(raw)
+        expected_result = spec.candidate["producer_result_digest"]
+        if (target.get("run_spec_digest") != spec.run_spec_digest
+                or target.get("result_digest") != expected_result
+                or target.get("review_artifact_digest", feedback_digest) != feedback_digest):
+            raise ReviewGroupError(
+                "review attach feedback names a different RunSpec, candidate result, or artifact")
+        expected_binding = assembly.profile.binding_for(Role.REVIEWER).binding_digest
+        reported_by = metadata.get("reported_by")
+        if reported_by is None:
+            reported_by = {
+                "role": "reviewer",
+                "binding_digest": metadata.get("binding_digest"),
+                "principal": None,
+            }
+        if (not isinstance(reported_by, Mapping)
+                or reported_by.get("role") != "reviewer"
+                or reported_by.get("binding_digest") != expected_binding):
+            raise ReviewGroupError(
+                "review attach actor differs from the frozen reviewer binding")
+
+        finding_digests = []
+        findings_root = review_layout.canonical_run_directory(
+            reviews_dir, review_run_id) / "findings"
+        if findings_root.is_dir() and not findings_root.is_symlink():
+            for finding_dir in sorted(findings_root.iterdir()):
+                if not finding_dir.is_dir() or finding_dir.is_symlink():
+                    raise ReviewGroupError("review attach finding directory is unsafe")
+                claim = findings.read_claim(
+                    reviews_dir, review_run_id, finding_dir.name)
+                claim_target = claim.payload["target"]
+                claim_actor = claim.payload["reported_by"]
+                if (claim_target["run_spec_digest"] != spec.run_spec_digest
+                        or claim_target["result_digest"] != expected_result
+                        or claim_target["review_artifact_digest"] != feedback_digest
+                        or claim_actor["binding_digest"] != expected_binding):
+                    raise ReviewGroupError(
+                        "review attach claim differs from feedback target or reviewer binding")
+                finding_digests.append(claim.digest)
+        reviewer = ReviewerEvidence(
+            promotion_lineage_id=spec.promotion_lineage.id,
+            target_run_spec_digest=spec.run_spec_digest,
+            candidate_digest=spec.candidate["digest"],
+            target_result_digest=expected_result,
+            review_artifact_digest=feedback_digest,
+            actor={"actor_id": expected_binding, "role": "reviewer"},
+            finding_digests=tuple(finding_digests),
+        )
+        artifact = assembly.artifact_store.write(reviewer.canonical_bytes())
+        if artifact.digest != reviewer.digest:
+            raise ReviewGroupError("review attach manifest digest changed in canonical CAS")
+        return StagedRunEngine(assembly).append_review_cycle(
+            promotion_run_id,
+            target_result_digest=expected_result,
+            review_digest=artifact.digest,
+        )
+
+
+_finding_main = main
+
+
+def main(argv: list[str] | None = None) -> int:
+    if not argv or argv[0] != "attach":
+        return _finding_main(argv)
+    parser = argparse.ArgumentParser(prog="waystone review")
+    sub = parser.add_subparsers(dest="command", required=True)
+    attach_parser = sub.add_parser("attach"); attach_parser.add_argument("promotion_run_id"); attach_parser.add_argument("review_run_id"); attach_parser.add_argument("--root")
+    args = parser.parse_args(argv)
+    try:
+        root = _root(args.root)
+        cycle = attach_review(root, args.promotion_run_id, args.review_run_id)
+        print(f"review attach: recorded promotion cycle {cycle.cycle}")
+        return 0
+    except (FindingError, ReviewGroupError, WorkflowError, OSError, yaml.YAMLError) as error:
+        print(f"waystone review: {error}", file=sys.stderr)
+        return 1
