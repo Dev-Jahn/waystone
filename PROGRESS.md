@@ -2,6 +2,25 @@
 
 round 단위 작업 이력이 이 파일에 축적된다. 활성 task와 의존성은 `tasks.yaml`(CLI: `waystone task`)과 생성 파일 `ROADMAP.md` 참조.
 
+## 2026-07-23-013-review-closure
+
+- **Goal**: 0.13 외부 아키텍처 리뷰 회신 ingest → 전 finding 코드 검증·triage → 파생 작업 전량 폐쇄. 하루 두 wave(w0723 blocker 2기 + w0723b 6기 병렬), 전부 codex exec(sol high/xhigh) + main 독립 재검증.
+- **Shipped**:
+  - fix/promote-actor-evidence-separation — promote 3-action evidence alias 제거·typed 결속·risk-gate 배선 (done; a2c661d, 수리 2회전)
+  - fix/review-disposition-authority-binding — disposition/validation exact authority 결속 (done; 16350e0)
+  - fix/brief-role-model-realignment — fact 4-role 개정·ADR-0015·재adopt (done; d6a8990+fc4c20a)
+  - feat/workbrief-scaffold — semantic draft 입력 경로·run_scaffold.py (done; 027ec38)
+  - docs/013-v1-execution-scope — v1=external Codex 전용 명시 (done; 3ed33ae)
+  - spike/013-lifecycle-dogfood — S2 PASS·S3 FAIL(관료제 실확인)·S1 차단 (done; repo 수정 0)
+  - fix/promote-reject-terminal-closeout — reject terminal closeout·retry lineage (done; 1e94eb7)
+  - chore/store-transient-read-ioerror — WAL/SHM 선제 생성 root-cause 수리 (done; 5a63f82)
+  - chore/013-release-prep — 핵심분(SHIP_PATHS·smoke·v1 docs) 완료, 실 release는 owner 대기 (touched; 3ed33ae)
+- **Gates**: full suite 234→258 green @ 027ec38 (wave 조합 gate) · 독립 release 리허설 PASS(/tmp 클론에서 release-to-main.sh 전체 실행, main@20359b1 빌드) · brief adoption record 결속 검증(fc4c20a) — 상세는 이 파일의 w0723/w0723b bullet.
+- **SSOT**: PROJECT_BRIEF `commitment/roles-over-model-names` 4-role 개정 + 재adopt, ADR-0015 ratified.
+- **Decisions pending**: 실 release 실행 시점(owner — decision task 미등록, ruling 자율권 정책에 따라 chore/013-release-prep notes에 기록).
+- **Review**: requested (docs/reviews/2026-07-23-013-review-closure-request.md); 직전 회신은 ingested (REAL 8 — blocker 2/major 2/minor 2/관찰 1 + 기존 승계 1, 전량 폐쇄).
+- **Next**: dogfood 파생 major 2건(feat/lifecycle-maintenance-path·fix/run-start-refusal-diagnosability) → M1-B 후속 minor 재평가(새 disposition 기준) → 실 release.
+
 ## 2026-07-22-013-intent-control-plane
 
 - **Goal**: 사용자 mandate(외부 리뷰 2건 + omniphysics realign 실증)에 따른 **0.13 전면 재설계** — M1-B trust kernel 위에 intent control plane 6축을 얹어 새 정의("불확실한 가설은 탐색 가능하게, 검증·리뷰 비용은 승격 위험에 비례, worker에게 목적에 충분한 맥락")를 구현. 기존 0.12 계획·M1-C 분해 폐기. mandate verbatim: `dev_docs/0.13-redesign-mandate.md`(binding) + `dev_docs/reference/{omniphysics-realign,methodology-notes}.md`.

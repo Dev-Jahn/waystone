@@ -8,3 +8,7 @@ digest_max_lines: 150
 policy:
   start_level: warn-allowed
 brief: PROJECT_BRIEF.md
+# release(0.11.1) round CLI 호환용 — 0.13 migration이 제거했던 키 복원 (2026-07-23).
+# 값은 직전 외부 리뷰가 검토한 SHA(45b2fa9)로 설정: 이번 round의 diff base = 리뷰어가 본 상태.
+state:
+  last_round_commit: 3c411b2cba4ac6e757f768bb094aef737b4151b2
