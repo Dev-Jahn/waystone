@@ -278,32 +278,32 @@ tasks:
     origin: "review-2026-07-22-013-intent-control-plane"
   - id: fix/run-start-refusal-diagnosability
     title: "public run start refusal의 진단 가능성: 실패 envelope가 {code:action_plan_invalid|unclassified}만 반환해 expected authority refusal과 harness/preflight 실패를 구별 불가 — dogfood S1이 이것 때문에 차단됐고 main의 e2e6 root-cause도 envelope patch 계측이 필요했음. typed code의 세분화 또는 안전한 detail 채널(비밀 누출 없는 사유 문자열/하위 code) 설계, 실패 은닉 금지 계약 유지 (spike S1 + w0723 e2e6 디버깅 실측)"
-    status: "pending"
+    status: "active"
     severity: "major"
     origin: "review-2026-07-22-013-intent-control-plane"
   - id: fix/promote-verifier-candidate-context
     notes: "verifier v023 CONFIRMED(major 적정): cwd=input_root(engine.py:733·462), sandbox만 read-only(715-719), pass replay(1264-1286), candidate 재결속(verify.py:1586-1634). E2E가 HEAD≠candidate를 명시 구성(test_run_cli.py:618-627), fixture는 content-blind(79-108). 수정: 리뷰어 6개 구조 + 대안(VerifierAdapter.executor가 review_root에서 실제 외부 실행). 회귀 2방향(integration PASS/candidate FAIL 및 역방향)은 evaluate·promote 각각. fix/promote-authority-published-reload와 engine.py/verify.py 공유 — 병렬 금지, 순차."
     scope: ["waystone/runs/engine.py", "waystone/runs/verify.py", "waystone/runs/supervisor.py"]
     title: "promote/evaluate 외부 verifier·evaluator를 exact candidate materialization cwd에서 실행 — 판단 provenance를 evidence provenance에 결속, post-hoc pass replay adapter 제거 + launch record에 candidate OID/root fingerprint 결속 (WS-GPT-023)"
-    status: "pending"
+    status: "active"
     severity: "major"
     origin: "review-2026-07-23-013-review-closure"
   - id: fix/promote-authority-published-reload
     notes: "verifier v024: 메커니즘 CONFIRMED(validator 순수 field 비교 engine.py:396-451, apply에 publication 전제 없음 1194-1213), 단 severity는 minor 이견 — canonical resume 경로는 내부 publisher로 닫혀 있고 현행 carrier/retry에 handler 주입 호출점 없음(도달은 비문서화 Python composition 전제). main ruling: round의 binding 목표(authority 분리)와 release gate 결속으로 major 유지. 최소 수정: 기존 reload_integration_decision 계열 primitive(verify.py:2881-2913·2978-3017) 활용 + execute_stage authority handler를 engine private로. RunAssembly 통주입은 과잉(verifier 의견 채택). fix/promote-verifier-candidate-context와 파일 공유 — 순차."
     scope: ["waystone/runs/engine.py", "waystone/runs/verify.py"]
     title: "promotion 검증·apply의 authority를 handler 반환 in-memory 객체에서 store/CAS reload된 published artifact로 교체 — execute_stage의 authority handler 주입 봉쇄(private composition) + unpublished-tuple negative 회귀 (WS-GPT-024)"
-    status: "pending"
+    status: "active"
     severity: "major"
     origin: "review-2026-07-23-013-review-closure"
   - id: fix/disposition-current-objective-binding
     notes: "verifier v025 CONFIRMED(major 적정): resolver가 ref.commit만 조회(completion.py:430-440), current_commit/superseded 기능 실재하나 미사용(brief.py:432·452-472), 기존 test는 commit을 새 HEAD로 치환해 사각(test_review_findings.py:252). 구현 함정: superseded(과거라는 이유만)로 곧장 거부하면 'unrelated commit 허용' 규칙과 충돌 — (a)ancestry (b)HEAD frame의 동일 fact digest/binding 대조 (c)불일치만 objective-superseded로. materialize는 기존 재검사 경유(신규 호출부 불요). 회귀: unchanged old_ref append 거부 + B 이전 append분의 B 이후 materialize 거부 + 무관 commit 후 동일 fact 허용. 연계: 리뷰 open Q3(evaluate scaffold의 task_id-only candidate 선택) — objective continuity를 selector로 확장할지 이 task에서 함께 판단."
     scope: ["waystone/reviews/findings.py", "waystone/jobs/completion.py", "waystone/project/brief.py"]
     title: "disposition objective_ref에 current-objective 검증 추가 — referenced commit의 HEAD ancestry + current brief의 동일 fact digest/binding 대조, 불일치 시 objective-superseded typed refusal (WS-GPT-025)"
-    status: "pending"
+    status: "active"
     severity: "major"
     origin: "review-2026-07-23-013-review-closure"
   - id: chore/promote-retry-failure-taxonomy
     title: "promotion reject retry 허용 조건의 실패 등급 구분 — process/backend 실패·malformed output만 동일 candidate retry 허용, verifier의 semantic fail은 새 candidate 또는 owner ruling 요구 (리뷰 open Q2)"
-    status: "pending"
+    status: "active"
     severity: "minor"
     origin: "review-2026-07-23-013-review-closure"
