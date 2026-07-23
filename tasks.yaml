@@ -203,7 +203,7 @@ tasks:
     status: "pending"
   - id: chore/013-release-prep
     session_id: "cae0dbfa-210c-456c-b0f0-f4c687d5243e"
-    round: 2026-07-23-013-review-closure
+    round: 2026-07-23-013-provenance-closure
     notes: "README 재작성 완료(w0723c, 머지 2adb1b4) — 실 CLI 대조·보증 5종·Status 절. 잔여: templates/project-policy-schema.json delegation-*-v1 rule 처분, run_tests.py 버전핀 재도입 여부(owner 판단 2건), release-to-main.sh는 리허설 완료 상태 유지. 신규 major 3건(WS-GPT-023/024/025)도 폐쇄됨 — 리뷰어의 release 미승인 사유 해소, 재리뷰 요청 후 release 권고"
     title: "0.13 release 준비 — README·docs를 신 canonical surface로 재작성, release-to-main.sh SHIP_PATHS 갱신(삭제된 SSOT.md 참조 제거·PROJECT_BRIEF.md/waystone 패키지 반영), docs gate 충족 확인; 착수 시점은 owner 결정"
     status: "active"
@@ -277,39 +277,49 @@ tasks:
     severity: "major"
     origin: "review-2026-07-22-013-intent-control-plane"
   - id: fix/run-start-refusal-diagnosability
+    session_id: "cae0dbfa-210c-456c-b0f0-f4c687d5243e"
+    round: 2026-07-23-013-provenance-closure
     result: "머지 0610253(원 2de2132): envelope detail 채널+preflight_failed 3부류, exit code 불변, 비밀 비노출 상한 테스트. base-RED(transport KeyError detail·cli 5건) main 독립 재현, 표적 게이트 28+11 OK. 보고서 w0723c-refusal.md"
     title: "public run start refusal의 진단 가능성: 실패 envelope가 {code:action_plan_invalid|unclassified}만 반환해 expected authority refusal과 harness/preflight 실패를 구별 불가 — dogfood S1이 이것 때문에 차단됐고 main의 e2e6 root-cause도 envelope patch 계측이 필요했음. typed code의 세분화 또는 안전한 detail 채널(비밀 누출 없는 사유 문자열/하위 code) 설계, 실패 은닉 금지 계약 유지 (spike S1 + w0723 e2e6 디버깅 실측)"
-    status: "done"
+    status: done
     severity: "major"
     origin: "review-2026-07-22-013-intent-control-plane"
   - id: fix/promote-verifier-candidate-context
+    session_id: "cae0dbfa-210c-456c-b0f0-f4c687d5243e"
+    round: 2026-07-23-013-provenance-closure
     result: "머지 057708a(원 fa57c41): evaluate detached materialization·promote review_root를 외부 실행 cwd로, replay adapter 제거, launch에 OID/fingerprint/digest 결속+fail-closed 재검증, 양방향 경계 회귀. base-RED main 재현(promote_evidence 4건+ImportError 구조 RED), suite 261(worktree)→271(머지 후) green"
     notes: "verifier v023 CONFIRMED(major 적정): cwd=input_root(engine.py:733·462), sandbox만 read-only(715-719), pass replay(1264-1286), candidate 재결속(verify.py:1586-1634). E2E가 HEAD≠candidate를 명시 구성(test_run_cli.py:618-627), fixture는 content-blind(79-108). 수정: 리뷰어 6개 구조 + 대안(VerifierAdapter.executor가 review_root에서 실제 외부 실행). 회귀 2방향(integration PASS/candidate FAIL 및 역방향)은 evaluate·promote 각각. fix/promote-authority-published-reload와 engine.py/verify.py 공유 — 병렬 금지, 순차."
     scope: ["waystone/runs/engine.py", "waystone/runs/verify.py", "waystone/runs/supervisor.py"]
     title: "promote/evaluate 외부 verifier·evaluator를 exact candidate materialization cwd에서 실행 — 판단 provenance를 evidence provenance에 결속, post-hoc pass replay adapter 제거 + launch record에 candidate OID/root fingerprint 결속 (WS-GPT-023)"
-    status: "done"
+    status: done
     severity: "major"
     origin: "review-2026-07-23-013-review-closure"
   - id: fix/promote-authority-published-reload
+    session_id: "cae0dbfa-210c-456c-b0f0-f4c687d5243e"
+    round: 2026-07-23-013-provenance-closure
     result: "머지 057708a(원 c54c72e): _reload_promotion_authority(verifier/decision/reviewer store·CAS reload, apply 직전 재reload), execute_stage→_execute_stage private화, unpublished-tuple negative 회귀. apply_integration_decision의 PC-17 불변조건 비약화(private ref 전용 유지). suite 271 green"
     notes: "verifier v024: 메커니즘 CONFIRMED(validator 순수 field 비교 engine.py:396-451, apply에 publication 전제 없음 1194-1213), 단 severity는 minor 이견 — canonical resume 경로는 내부 publisher로 닫혀 있고 현행 carrier/retry에 handler 주입 호출점 없음(도달은 비문서화 Python composition 전제). main ruling: round의 binding 목표(authority 분리)와 release gate 결속으로 major 유지. 최소 수정: 기존 reload_integration_decision 계열 primitive(verify.py:2881-2913·2978-3017) 활용 + execute_stage authority handler를 engine private로. RunAssembly 통주입은 과잉(verifier 의견 채택). fix/promote-verifier-candidate-context와 파일 공유 — 순차."
     scope: ["waystone/runs/engine.py", "waystone/runs/verify.py"]
     title: "promotion 검증·apply의 authority를 handler 반환 in-memory 객체에서 store/CAS reload된 published artifact로 교체 — execute_stage의 authority handler 주입 봉쇄(private composition) + unpublished-tuple negative 회귀 (WS-GPT-024)"
-    status: "done"
+    status: done
     severity: "major"
     origin: "review-2026-07-23-013-review-closure"
   - id: fix/disposition-current-objective-binding
+    session_id: "cae0dbfa-210c-456c-b0f0-f4c687d5243e"
+    round: 2026-07-23-013-provenance-closure
     result: "머지 1081d11(원 cac27f2): objective-superseded refusal + 회귀 6종, suite 264 green. base-RED 5/5 main 독립 재현. Q3 ruling: selector 확장 안 함(근거는 task notes·보고서 w0723c-disposition.md)"
     notes: "verifier v025 CONFIRMED(major 적정): resolver가 ref.commit만 조회(completion.py:430-440), current_commit/superseded 기능 실재하나 미사용(brief.py:432·452-472), 기존 test는 commit을 새 HEAD로 치환해 사각(test_review_findings.py:252). 구현 함정: superseded(과거라는 이유만)로 곧장 거부하면 'unrelated commit 허용' 규칙과 충돌 — (a)ancestry (b)HEAD frame의 동일 fact digest/binding 대조 (c)불일치만 objective-superseded로. materialize는 기존 재검사 경유(신규 호출부 불요). 회귀: unchanged old_ref append 거부 + B 이전 append분의 B 이후 materialize 거부 + 무관 commit 후 동일 fact 허용. 연계: 리뷰 open Q3(evaluate scaffold의 task_id-only candidate 선택) — objective continuity를 selector로 확장할지 이 task에서 함께 판단."
     scope: ["waystone/reviews/findings.py", "waystone/jobs/completion.py", "waystone/project/brief.py"]
     title: "disposition objective_ref에 current-objective 검증 추가 — referenced commit의 HEAD ancestry + current brief의 동일 fact digest/binding 대조, 불일치 시 objective-superseded typed refusal (WS-GPT-025)"
-    status: "done"
+    status: done
     severity: "major"
     origin: "review-2026-07-23-013-review-closure"
   - id: chore/promote-retry-failure-taxonomy
+    session_id: "cae0dbfa-210c-456c-b0f0-f4c687d5243e"
+    round: 2026-07-23-013-provenance-closure
     result: "머지 057708a(원 e3f7771): 발행된 semantic verifier evidence를 terminal 경계로 — 동일 candidate retry는 typed refusal(new candidate or owner ruling), process/malformed는 lineage retry 보존. 추측성 enum 없이 durable 경계 채택"
     title: "promotion reject retry 허용 조건의 실패 등급 구분 — process/backend 실패·malformed output만 동일 candidate retry 허용, verifier의 semantic fail은 새 candidate 또는 owner ruling 요구 (리뷰 open Q2)"
-    status: "done"
+    status: done
     severity: "minor"
     origin: "review-2026-07-23-013-review-closure"
   - id: chore/candidate-context-materialization-gc

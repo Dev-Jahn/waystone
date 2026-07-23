@@ -2,6 +2,22 @@
 
 round 단위 작업 이력이 이 파일에 축적된다. 활성 task와 의존성은 `tasks.yaml`(CLI: `waystone task`)과 생성 파일 `ROADMAP.md` 참조.
 
+## 2026-07-23-013-provenance-closure
+
+- **Goal**: 직전 리뷰 회신(CHANGES REQUESTED — Critical 0/Major 3, WS-GPT-023·024·025 전량 REAL 확정) 폐쇄 + 알려진 버그 잔여(fix/run-start-refusal-diagnosability) + open Q2 + README 재작성. w0723c wave: codex 4기(sol xhigh/high/medium) 병렬·worktree 격리, finding당 적대 verifier 3기 선행, 전 기 main 독립 재검증(base-RED 재현·스위트 재실행·diff 검독).
+- **Shipped**:
+  - fix/promote-verifier-candidate-context — evaluate/promote 외부 검증을 exact candidate materialization cwd에서 실행, launch에 OID·fingerprint·RunSpec digest 결속+전후 fail-closed 재검증, post-hoc pass replay adapter 제거, content-aware fixture·양방향 경계 회귀 (done; 057708a, 원 fa57c41)
+  - fix/promote-authority-published-reload — 승격 authority를 store/CAS reload된 발행 artifact로만(apply 직전 재reload 포함), execute_stage→_execute_stage private화(주입 표면 제거), unpublished-tuple negative (done; 057708a, 원 c54c72e)
+  - fix/disposition-current-objective-binding — objective의 HEAD ancestry+current fact digest/binding 대조, objective-superseded typed refusal, 과잉 거부 경계 보존 회귀 (done; 1081d11, 원 cac27f2; Q3 ruling: evaluate selector 확장 안 함)
+  - fix/run-start-refusal-diagnosability — failure envelope에 안전한 detail 채널+preflight_failed, authority/preflight/internal 3부류 기계 구별, 비밀 비노출 상한, exit code 불변 (done; 0610253, 원 2de2132)
+  - chore/promote-retry-failure-taxonomy — semantic reject는 동일 candidate terminal(발행 evidence가 경계), process/malformed만 lineage retry 보존 (done; 057708a, 원 e3f7771)
+  - chore/013-release-prep — README 0.13 정합 재작성(실 CLI 대조·보증 5종 절·Status 절) (touched; 2adb1b4)
+- **Gates**: full suite 258→271 green @ 057708a(wave 조합 gate) + README 후 271 재확인. 전 task base-RED main 독립 재현(disposition 5건·transport KeyError+cli 5건·promote_evidence 4건+구조 ImportError). 검증 방법 상세: 각 task result + scratchpad reports(w0723c-*).
+- **Incidents**: 발진 직후 네트워크 단절로 3기 동시 사망(stream disconnected) — B는 커밋·보고서 기완료로 손실 0, A는 재발진(211k 토큰 소실), C는 dirty 보존 후 이어받기 재발진으로 회수. test_run_cli.py import 충돌 1건(A∩C) union 해소.
+- **Decisions**: WS-GPT-024 severity ruling — verifier의 minor 이견(canonical 경로 도달 불가) 기각하고 major 유지(round의 binding 목표·release gate 결속); retry taxonomy는 추측성 enum 대신 durable 경계(발행 semantic evidence) 채택; 후속 chore/candidate-context-materialization-gc(minor) 등록.
+- **Review**: 리뷰어의 release 미승인 사유(major 3) 전량 폐쇄 — 재리뷰 요청 이 round에서 게시.
+- **Next**: 재리뷰 회신 대기 → 실 release(owner; 잔여 판단 2건은 chore/013-release-prep notes) → feat/lifecycle-maintenance-path(major) → M1-B minor 재평가.
+
 ## 2026-07-23-013-review-closure
 
 - **Goal**: 0.13 외부 아키텍처 리뷰 회신 ingest → 전 finding 코드 검증·triage → 파생 작업 전량 폐쇄. 하루 두 wave(w0723 blocker 2기 + w0723b 6기 병렬), 전부 codex exec(sol high/xhigh) + main 독립 재검증.
