@@ -326,3 +326,24 @@ tasks:
     title: "evaluate candidate materialization(.waystone/candidate-contexts) GC 정책 — durable resume 경로라 자동 삭제 불가, 완료 run 누적분 정리 시점·조건 설계 (w0723c promote-prov 머지 주의사항)"
     status: "pending"
     severity: "minor"
+  - id: fix/runner-environment-provenance
+    notes: "verifier v026 CONFIRMED(major): digest=argv/cwd/candidate_context뿐(engine.py:634-643), supervisor env=dict(os.environ)+실행 중 waystone 패키지 PYTHONPATH 선두 주입(supervisor.py:857-864 — dogfooding 자기참조 오염 벡터), promote verifier subprocess env 미전달. open Q2 ruling 필요 항목(proxy/git config/HOME 격리/venv vs engine toolchain/codex config digest)은 브리프에서 pre-register — 핵심은 선택이 아니라 동일 env가 invocation authority에 포함되는 것(리뷰어). 회귀: ambient GIT_DIR/UV_WORKING_DIRECTORY가 integration을 가리켜도 candidate 판정이 유지+digest가 관측"
+    scope: ["waystone/runs/supervisor.py", "waystone/runs/engine.py", "waystone/runs/verify.py"]
+    title: "evaluate/promote 외부 runner의 child environment를 frozen provenance에 결속 — 공용 env builder(wholesale os.environ 금지·Git/Python/uv redirect 변수 기본 제거·명시 allowlist), environment digest를 invocation digest·launch record·evidence에 포함 (WS-GPT-026)"
+    status: "pending"
+    severity: "major"
+    origin: "review-2026-07-23-013-provenance-closure"
+  - id: fix/promotion-private-integration-ref
+    notes: "verifier v027 CONFIRMED(major): target=checked-out branch(run_group.py:287-295 symbolic-ref), driver=update-ref만(effects.py:1542), E2E는 rev-parse만 단언(test_run_cli.py:806) → 승격 후 HEAD=C/파일=B/status dirty. ruling(자율확정): open Q1은 권고안 채택 — promotion=private integration ref 승격, delivery=별도 명시 operation(M2), 0.13에서 public branch 불이동. apply_integration_decision의 PC-17 경로와 정합(w0723c에서 보존한 그 불변조건이 이제 promotion의 기본 경로가 됨). silent repair(git reset --hard) 금지. 회귀: 승격 후 public branch OID·worktree bytes·index·status 전부 불변 + private ref만 이동"
+    scope: ["waystone/runs/engine.py", "waystone/runs/effects.py", "waystone/cli/run_group.py"]
+    title: "promotion apply를 private integration ref(refs/waystone/integration/<lineage>)로만 — checked-out branch/worktree는 explicit delivery(M2)까지 불변, update-ref 후 HEAD=candidate/파일=이전 불일치 제거 (WS-GPT-027; ruling: promotion≠delivery 분리 채택)"
+    status: "pending"
+    severity: "major"
+    origin: "review-2026-07-23-013-provenance-closure"
+  - id: fix/review-canonical-root-authority
+    notes: "verifier v028 CONFIRMED(major): review만 raw root(review_group.py:256 — attach만 예외적으로 context 사용 336행), run/status/brief는 resolve_project_context 사용. canonical 기계에 canonical_root_is_linked_worktree 오류 코드 기존재 — 배선만 하면 됨. .claude/worktrees 상시 사용 topology에서 도달 실증(v028). 요구: ingest/validate/disposition/materialize/attach 전부 context 우선, tasks_cli.cmd_add 직접 호출도 canonical proof 없이 금지, --root는 registered canonical로. 회귀: linked worktree cwd에서 old ref append/materialize → refusal + 양쪽 tasks.yaml/docs/reviews 불변"
+    scope: ["waystone/cli/review_group.py"]
+    title: "public review 전 subcommand가 canonical ProjectContext를 우선 해석 — linked worktree HEAD를 current authority로 쓰는 경로 봉쇄, noncanonical mutation은 typed refusal, --root도 registered canonical project로 해석 (WS-GPT-028)"
+    status: "pending"
+    severity: "major"
+    origin: "review-2026-07-23-013-provenance-closure"
