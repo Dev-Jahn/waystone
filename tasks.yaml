@@ -713,7 +713,7 @@ tasks:
     title: "기존 프로젝트용 일회성 migration script — SSOT.md→PROJECT_BRIEF.md(fact marker 부여)·ssot:→brief: config·legacy 상태 이관 (사용자 지시: 임시 script 1개, waystone repo 자신 포함)"
     status: "done"
   - id: chore/013-release-prep
-    notes: "staleness 조사(2026-07-22): ①README·docs/CONVENTIONS.md·references/·skills/·templates/·hooks는 이미 0.13 현행으로 확인 — 재작성 불요, docs gate 통과 여부만 확인 ②release-to-main.sh 정리 필요: SHIP_PATHS에 삭제된 스크립트 6종 잔존(dashboard/delegate/lanes/review/round/ssot.py)+waystone/ 패키지·신 CLI 모듈 미반영 여부 점검, DEV_ONLY_PATHS의 SSOT.md, L112 'SSOT §3' 주석 좌표 소멸 ③templates/project-policy-schema.json의 delegation-*-v1 rule 2종 소비자 grep 0건 — 생사 확정 후 처분 ④(0.11.x의) run_tests.py 버전 핀 규율이 0.13 suite에 없음 — 버전 결속 게이트 재도입 여부 판단"
+    notes: "핵심분 완료(dev 3ed33ae, w0723b): SHIP_PATHS legacy 6종 제거·waystone/ 포함·DEV_ONLY SSOT.md 제거·projected smoke 4종(brief check/status/typed run refusal/review --help). 독립 리허설: /tmp 클론에서 release-to-main.sh 전체 실행 성공 — 249 gate·projection·smoke PASS, main@20359b1 빌드(dev@3ed33ae), 실 repo 불변. 잔여: ①templates/project-policy-schema.json delegation-*-v1 rule 2종 생사 처분 ②run_tests.py 버전 핀 규율 재도입 여부 ③실 release 실행(./release-to-main.sh + push, marketplace sha 자동) — 착수는 owner 결정"
     title: "0.13 release 준비 — README·docs를 신 canonical surface로 재작성, release-to-main.sh SHIP_PATHS 갱신(삭제된 SSOT.md 참조 제거·PROJECT_BRIEF.md/waystone 패키지 반영), docs gate 충족 확인; 착수 시점은 owner 결정"
     status: "active"
   - id: fix/promote-actor-evidence-separation
@@ -729,32 +729,48 @@ tasks:
     severity: "blocker"
     origin: "review-2026-07-22-013-intent-control-plane"
   - id: fix/brief-role-model-realignment
+    result: "dev d6a8990+fc4c20a — fact 4-role 개정·ADR-0015·brief adopt 완료(record sha256:5b516b0a…, fc4c20a 결속 검증), suite 249 green"
     title: "PROJECT_BRIEF commitment/roles-over-model-names(6-role: main·orchestrator·implementer·clerk·verifier·reviewer)를 canonical 4-role(coordinator/worker/verifier/reviewer)로 realignment 후 재-adopt: binding commitment가 코드(jobs/domain.py:9-13)와 모순 — fact 개정 + owner adoption record 재결속, 코드를 6-role로 되돌리지 않음 (외부 리뷰 정합성 지적; ruling 자율확정: 0.13 mandate의 4-role이 canonical)"
-    status: "active"
+    status: "done"
     severity: "major"
     origin: "review-2026-07-22-013-intent-control-plane"
   - id: feat/workbrief-scaffold
+    result: "dev 027ec38 — --work-brief-draft/--outcome-draft semantic 입력 경로+run_scaffold.py(fail-closed), 수제작 경로 보존, /run skill draft 지침 갱신, suite 258 green"
     title: "coordinator burden 축소용 deterministic scaffold: run start --work-brief·close --outcome이 canonical sorted compact JSON 수제작 요구(run_group.py:53·79·84) — brief_id/revision·ProjectFactRef·binding digest·lineage·schema boilerplate·CAS ref는 harness script가 생성하고 모델은 why-now·desired delta·semantic context·fixed/free/escalation·expected evidence만 작성하게 skill 내부 scaffold 제공, 신규 사용자 명령 추가 없이 (외부 리뷰 UX 권고)"
-    status: "active"
+    status: "done"
     severity: "major"
     origin: "review-2026-07-22-013-intent-control-plane"
   - id: spike/013-lifecycle-dogfood
+    result: "S2 PASS(confirmed major+accept-risk → task 0·objective-first status 정상·tasks.yaml 해시 불변) / S3 FAIL(관료제 실확인 — 국소 owner-request bugfix가 가짜 hypothesis 또는 full promotion chain 요구, 과잉 기준 3종 전부 해당) / S1 차단(public start의 불투명 action_plan_invalid — 별도 결함 등록). 보고서: scratchpad/reports/spike-013-lifecycle-dogfood.md, 로그 /tmp/waystone-w0723b-dogfood.4WXlHV"
     title: "0.13 lifecycle 관료제화 검증 dogfood 3종: ① 불확실한 architecture exploration(semantic brief·context request가 판단 품질을 실제로 높이는가) ② confirmed major+accept-risk(task 미생성·objective-first status 정상 확인) ③ 평범한 국소 bugfix(가짜 hypothesis나 과잉 evaluation ceremony를 요구하는지 — explore learning criterion은 hypothesis/question만 허용, owner-request 불가: jobs/completion.py:594-600) — 불편이 실제 반복되기 전 구현 금지, 필요시 owner request의 nonbinding explore objective 허용·low-risk maintenance assurance profile·deterministic focused check의 최소 evidence 인정 검토 (외부 리뷰 전략 권고)"
-    status: "active"
+    status: "done"
     severity: "minor"
     origin: "review-2026-07-22-013-intent-control-plane"
   - id: docs/013-v1-execution-scope
+    result: "dev 3ed33ae — README·CONVENTIONS·shipped reference에 v1=external Codex 전용 명시, suite 249 green"
     title: "0.13 v1 실행 범위 문서 한정: staged execution이 non-external을 거부하고 직접 실행 가능한 Codex binding만 허용(runs/engine.py:429) — v1 지원 범위를 'external Codex worker/evaluator'로 명시하고 in-session/subagent carrier 지원 주장 금지, context-transfer-cost 기반 canonical routing은 미구현임을 문서화, README 재작성(chore/013-release-prep)과 정합 (외부 리뷰 §3 남은 한계)"
-    status: "active"
+    status: "done"
     severity: "minor"
     origin: "review-2026-07-22-013-intent-control-plane"
   - id: fix/promote-reject-terminal-closeout
+    result: "dev 1e94eb7 — reject 전용 exact-tuple 검증+apply 전 DAG 종료+failed terminal+no-objective-delta closeout+seal 전 retry_of 재시도, accept 무변경, suite 255 green"
     title: "정당한 verifier reject의 promotion terminal 상태 설계: reject IntegrationDecision 발행 → accept-only evidence 검증 거부 → published verifier evidence terminal → effect retry 거부 고착으로 run이 closeout-ready에 도달 불가 — 실패 위장이나 evidence 재사용은 없으나(정직) closeout 가능한 terminal reject 상태와 retry lineage 정책을 promotion DAG에 함께 설계 필요 (w0723 promote-sep 수리 회전 실측, 임시 reject fixture로 재현)"
-    status: "active"
+    status: "done"
     severity: "minor"
     origin: "review-2026-07-22-013-intent-control-plane"
   - id: chore/store-transient-read-ioerror
+    result: "dev 5a63f82 — root cause 특정(0-byte WAL/SHM 선제 생성의 SQLite 계약 위반→IOERR_SHORT_READ 522)·최소 수리·수리 전 3/3 재현·후 540회 무오류, stress 도구 동봉, suite 250 green"
     title: "resume polling 중 transient sqlite 'disk I/O error' 조사: detached supervisor 종료와 빠른 resume poll이 겹친 시점 RunStore.get_run()의 transition chain SELECT에서 sqlite3.OperationalError 2회 재현, 다음 poll에서 자연 회복 — APFS/WAL 상호작용 원인 규명 후 typed transient 분류 여부 판단(무리한 retry/fallback 추가 금지, w0723 promote-sep 수리 회전 관측)"
-    status: "active"
+    status: "done"
     severity: "minor"
+    origin: "review-2026-07-22-013-intent-control-plane"
+  - id: feat/lifecycle-maintenance-path
+    title: "국소 maintenance 작업의 저의식 lifecycle 경로: dogfood S3에서 리뷰 F5 우려 실확인(owner-request 국소 bugfix가 가짜 hypothesis 등록 또는 full promotion ceremony를 요구) — 리뷰 제시 최소 수정 3방향 설계·구현: ① owner request의 nonbinding explore objective 허용(completion.py:594-600의 hypothesis/question 제한 완화, binding 승격은 계속 차단) ② explore/evaluate/promote 안의 low-risk maintenance assurance profile ③ deterministic focused check의 최소 evaluation evidence 인정. 새 lifecycle stage 추가 금지(리뷰 명시), promote-reject·workbrief-scaffold 머지 후 착수 (spike/013-lifecycle-dogfood 판정 근거)"
+    status: "pending"
+    severity: "major"
+    origin: "review-2026-07-22-013-intent-control-plane"
+  - id: fix/run-start-refusal-diagnosability
+    title: "public run start refusal의 진단 가능성: 실패 envelope가 {code:action_plan_invalid|unclassified}만 반환해 expected authority refusal과 harness/preflight 실패를 구별 불가 — dogfood S1이 이것 때문에 차단됐고 main의 e2e6 root-cause도 envelope patch 계측이 필요했음. typed code의 세분화 또는 안전한 detail 채널(비밀 누출 없는 사유 문자열/하위 code) 설계, 실패 은닉 금지 계약 유지 (spike S1 + w0723 e2e6 디버깅 실측)"
+    status: "pending"
+    severity: "major"
     origin: "review-2026-07-22-013-intent-control-plane"
