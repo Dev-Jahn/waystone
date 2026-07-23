@@ -147,6 +147,24 @@ class RunStoreTests(_StoreFixture):
                 store._connection.execute("PRAGMA journal_mode").fetchone()[0].lower(), "wal")
         self.assertEqual((root / ".waystone" / ".gitignore").read_bytes(), b"*\n")
 
+    def test_missing_wal_sidecars_remain_sqlite_owned_until_connect(self):
+        root = self.project()
+        original_connect = store_module._connect  # noqa: SLF001 - open boundary probe
+        observed: dict[str, bool] = {}
+
+        def inspect_connect(database_path: Path) -> sqlite3.Connection:
+            observed["database"] = database_path.exists()
+            observed["wal"] = Path(f"{database_path}-wal").exists()
+            observed["shm"] = Path(f"{database_path}-shm").exists()
+            return original_connect(database_path)
+
+        with self.supported_filesystem(), mock.patch.object(
+                store_module, "_connect", side_effect=inspect_connect):
+            store = RunStore.open(root)
+        self.addCleanup(store.close)
+
+        self.assertEqual(observed, {"database": True, "wal": False, "shm": False})
+
     def test_same_store_concurrent_cas_is_serialized_to_one_typed_conflict(self):
         root = self.project()
         store = self.open_store(root)

@@ -1149,12 +1149,13 @@ class RunStore:
             Path(f"{database_path}-wal"),
             Path(f"{database_path}-shm"),
         )
-        missing_state_files: list[Path] = []
+        database_missing = False
         for path in (database_path, *sidecar_paths):
             try:
                 path.lstat()
             except FileNotFoundError:
-                missing_state_files.append(path)
+                if path == database_path:
+                    database_missing = True
             except OSError as error:
                 raise EngineOwnedPathUnverifiableError(
                     path, f"cannot inspect state file: {error}") from error
@@ -1166,8 +1167,8 @@ class RunStore:
             raise InvalidStatePathError(
                 state_directory / ".gitignore",
                 f"cannot establish project-state self-ignore: {error}") from error
-        for path in missing_state_files:
-            _ensure_mutable_state_file(path, state_directory)
+        if database_missing:
+            _ensure_mutable_state_file(database_path, state_directory)
 
         connection: sqlite3.Connection | None = None
         try:
