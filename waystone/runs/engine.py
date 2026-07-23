@@ -12,6 +12,7 @@ import os
 import shutil
 import sqlite3
 import stat
+import subprocess
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -19,14 +20,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, Sequence
 
-from waystone.adapters.git import GitReadError, git_full_sha, git_read_bytes
+from waystone.adapters.git import GitReadError, git_full_sha, git_rc, git_read_bytes
 from waystone.core import WorkflowError
 from waystone.jobs import completion, work_brief
 from waystone.jobs.domain import ExecutionCategory, Role
 from waystone.jobs.profile import RunAssembly as ProductionRunAssembly
 from waystone.project.brief import FrameStatusRef, ProjectFactRef
 from waystone.runs.artifacts import (
-    ArtifactReference, ArtifactReferenceKind, ArtifactStore, validate_sha256_digest,
+    ArtifactReference, ArtifactReferenceKind, ArtifactStore, StoredArtifact,
+    validate_sha256_digest,
 )
 from waystone.runs.assurance import (
     AssurancePlan,
@@ -99,7 +101,10 @@ from waystone.runs.store import (
     RunStore,
     TransitionReason,
 )
-from waystone.runs.supervisor import LivenessState, RunnerInvocation, Supervisor
+from waystone.runs.supervisor import (
+    LivenessState, RunnerCandidateContext, RunnerInvocation, Supervisor,
+    fingerprint_candidate_root,
+)
 from waystone.runs.transport import (
     ActionPlanRefusal,
     ActionTransport,
@@ -111,6 +116,7 @@ from waystone.runs.worker_result import (
     ContextRequestedWorkerResult,
     CompletedWorkerResult,
     ContextResponse,
+    RESULT_CONTROL_FILE,
     WorkerResultAdapter,
     parse_runner_completion_marker_v2_bytes,
     parse_context_response_bytes,
@@ -131,8 +137,10 @@ from waystone.runs.verify import (
     VerifierEvidence,
     VerifierOutput,
     execute_verifier,
+    fingerprint_materialized_root,
     record_integration_decision,
     reload_integration_decision,
+    reload_verifier_evidence,
 )
 from waystone.runs import store as store_module
 
@@ -163,6 +171,9 @@ class _PromotionRejected(Exception):
     def __init__(self, decision: IntegrationDecision):
         self.decision = decision
         super().__init__("promotion rejected")
+
+
+_PROMOTION_COMPOSITION = object()
 
 
 class ReadOnlyStoreUnavailable(EngineAssemblyError):
@@ -624,8 +635,59 @@ class StagedRunEngine:
         payload = assurance_json({
             "argv": list(invocation.argv),
             "cwd": str(invocation.cwd),
+            "candidate_context": (
+                None if invocation.candidate_context is None
+                else invocation.candidate_context.to_payload()
+            ),
         })
         return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+    def _candidate_stage_root(
+            self, spec: RunSpec, attempt_id: str) -> tuple[Path, RunnerCandidateContext]:
+        if spec.candidate is None:
+            raise EngineBindingRefusal(
+                "candidate stage invocation requires a frozen candidate")
+        candidate_oid = spec.candidate["target_oid"]
+        candidate_ref = spec.candidate["target_ref"]
+        if (not isinstance(candidate_oid, str) or not isinstance(candidate_ref, str)
+                or git_full_sha(self.input_root, candidate_ref) != candidate_oid):
+            raise EngineBindingRefusal(
+                "candidate stage invocation differs from the frozen candidate ref")
+        path_digest = hashlib.sha256(
+            f"{spec.run_id}\0{attempt_id}\0{spec.lifecycle_stage.value}".encode()
+        ).hexdigest()
+        root = self.root / ".waystone" / "candidate-contexts" / path_digest
+        if not root.exists():
+            try:
+                root.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                raise EngineBindingRefusal(
+                    f"candidate context parent is unavailable: {error}") from error
+            returncode, _output, error = git_rc(
+                self.input_root,
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                str(root),
+                candidate_oid,
+            )
+            if returncode != 0:
+                raise EngineBindingRefusal(
+                    error or f"candidate worktree creation exited {returncode}")
+        if not root.is_dir() or git_full_sha(root) != candidate_oid:
+            raise EngineBindingRefusal(
+                "engine-owned candidate context does not name the frozen candidate OID")
+        try:
+            fingerprint = fingerprint_candidate_root(root, candidate_oid)
+        except (OSError, ValueError, WorkflowError) as error:
+            raise EngineBindingRefusal(
+                f"candidate context fingerprint is unavailable: {error}") from error
+        return root, RunnerCandidateContext(
+            candidate_oid,
+            fingerprint,
+            spec.run_spec_digest,
+        )
 
     def _worker_result_schema(
             self, spec: RunSpec, attempt_id: str, *, evaluation: bool) -> StoredArtifact:
@@ -686,7 +748,11 @@ class StagedRunEngine:
         }))
 
     def _stage_invocation(
-            self, spec: RunSpec, attempt_id: str, role: Role) -> RunnerInvocation:
+            self, spec: RunSpec, attempt_id: str, role: Role, *,
+            candidate_root: Path | None = None,
+            candidate_context: RunnerCandidateContext | None = None,
+            output_schema: StoredArtifact | None = None,
+            output_path: Path | None = None) -> RunnerInvocation:
         adapter = self.assembly.role_adapters[role]
         if adapter.execution_category is not ExecutionCategory.EXTERNAL:
             raise EngineBindingRefusal(
@@ -709,7 +775,7 @@ class StagedRunEngine:
             artifact_store=self.assembly.artifact_store,
             completion_contract=contract,
         )
-        schema = self._worker_result_schema(
+        schema = output_schema or self._worker_result_schema(
             spec, attempt_id,
             evaluation=spec.lifecycle_stage.value in {"evaluate", "promote"})
         sandbox = (
@@ -717,6 +783,33 @@ class StagedRunEngine:
             if spec.lifecycle_stage.value in {"evaluate", "promote"}
             else "workspace-write"
         )
+        cwd = self.input_root
+        selected_context = None
+        if spec.lifecycle_stage.value in {"evaluate", "promote"}:
+            if (candidate_root is None) != (candidate_context is None):
+                raise EngineBindingRefusal(
+                    "candidate root and launch context must be supplied together")
+            if candidate_root is None:
+                cwd, selected_context = self._candidate_stage_root(spec, attempt_id)
+            else:
+                cwd = Path(candidate_root).resolve(strict=True)
+                selected_context = candidate_context
+                assert selected_context is not None and spec.candidate is not None
+                if (selected_context.run_spec_digest != spec.run_spec_digest
+                        or selected_context.candidate_oid
+                        != spec.candidate["target_oid"]):
+                    raise EngineBindingRefusal(
+                        "candidate launch context differs from the frozen RunSpec")
+                observed_fingerprint = (
+                    fingerprint_materialized_root(cwd)
+                    if spec.lifecycle_stage.value == "promote"
+                    else fingerprint_candidate_root(
+                        cwd, selected_context.candidate_oid)
+                )
+                if observed_fingerprint != selected_context.root_fingerprint:
+                    raise EngineBindingRefusal(
+                        "candidate launch root fingerprint differs from the frozen context")
+        result_path = output_path or (cwd / RESULT_CONTROL_FILE)
         return RunnerInvocation((
             executable,
             "exec",
@@ -728,9 +821,9 @@ class StagedRunEngine:
             "--output-schema",
             str(schema.path),
             "-o",
-            str(self.input_root / "WAYSTONE_RESULT.yaml"),
+            str(result_path),
             work_brief.render_semantic_prompt(brief, contract),
-        ), self.input_root)
+        ), cwd, selected_context)
 
     def _runner_action_id(self, attempt_id: str, stage: str) -> str:
         action = {
@@ -767,7 +860,7 @@ class StagedRunEngine:
         return action_id
 
     def _ensure_stage_started(self, spec: RunSpec, attempt_id: str) -> None:
-        if spec.lifecycle_stage.value in {"explore", "evaluate", "promote"}:
+        if spec.lifecycle_stage.value in {"explore", "evaluate"}:
             self._ensure_stage_runner(spec, attempt_id)
 
     def observe_worker_result(
@@ -821,16 +914,37 @@ class StagedRunEngine:
         if (marker.run_id != run_id or marker.job_id != spec.job_id
                 or marker.action_id != action_id):
             raise EngineBindingRefusal("runner marker v2 identity differs from the bound action")
+        result_root = self.input_root
+        expected_snapshot_digest = spec.base_snapshot.digest
+        if spec.lifecycle_stage.value == "evaluate":
+            invocation = self._stage_invocation(spec, attempt_id, Role.VERIFIER)
+            if self._invocation_digest(invocation) != plan.spec.get("invocation_digest"):
+                raise EngineBindingRefusal(
+                    "evaluator launch no longer binds the frozen candidate context")
+            assert invocation.candidate_context is not None
+            result_root = invocation.cwd
+            expected_snapshot_digest = capture_result_snapshot(result_root).digest
         adapted = WorkerResultAdapter(
-            self.input_root, self.assembly.artifact_store).adapt_published(
+            result_root, self.assembly.artifact_store).adapt_published(
                 marker.worker_result_digest,
                 run_id=run_id,
                 job_id=spec.job_id,
                 attempt_id=attempt_id,
                 run_spec_digest=spec.run_spec_digest,
                 work_brief_digest=spec.work_brief.digest,
-                base_snapshot_digest=spec.base_snapshot.digest,
+                base_snapshot_digest=expected_snapshot_digest,
             )
+        if spec.lifecycle_stage.value == "evaluate":
+            assert invocation.candidate_context is not None
+            try:
+                observed = fingerprint_candidate_root(
+                    result_root, invocation.candidate_context.candidate_oid)
+            except (OSError, ValueError, WorkflowError) as error:
+                raise EngineBindingRefusal(
+                    f"evaluator result root cannot be re-observed: {error}") from error
+            if observed != invocation.candidate_context.root_fingerprint:
+                raise EngineBindingRefusal(
+                    "evaluator result root fingerprint differs from its launch binding")
         if isinstance(adapted.result, ContextRequestedWorkerResult):
             assert adapted.context_request_artifact is not None
             store.record_context_request(
@@ -1118,7 +1232,7 @@ class StagedRunEngine:
         return None
 
     def retry_rejected_promotion(self, run_id: str) -> str:
-        """Start one explicit fresh attempt from the latest unclosed reject decision."""
+        """Refuse retry of one published semantic promotion rejection."""
         spec = load_run_spec(run_id, start=self.root)
         if spec.lifecycle_stage.value != "promote":
             raise EngineBindingRefusal("only a promotion rejection can be retried")
@@ -1142,56 +1256,49 @@ class StagedRunEngine:
                 or decision.outcome is not DecisionOutcome.REJECT):
             raise EngineBindingRefusal(
                 "latest promotion attempt is not an exact completed rejection")
-        target_ref = spec.result_policy.target_ref
-        expected_oid = spec.result_policy.expected_oid
-        if (target_ref is None or expected_oid is None
-                or git_full_sha(self.input_root, target_ref) != expected_oid):
-            raise EngineBindingRefusal(
-                "promotion target changed after rejection; retry requires the frozen old OID")
-        with store._connection_lock:  # noqa: SLF001 - bounded attempt count
-            used = int(store._connection.execute(  # noqa: SLF001
-                "SELECT count(*) FROM attempts WHERE run_id = ? AND job_id = ?",
-                (spec.run_id, spec.job_id),
-            ).fetchone()[0])
-        limit = min(spec.retry.max_attempts_per_job, spec.retry.max_total_attempts)
-        if used >= limit:
-            raise EngineBindingRefusal(
-                f"promotion retry budget exhausted at {used} of {limit} attempts")
-        next_attempt_id = f"{spec.run_id}:attempt:{used + 1}"
-        next_attempt = store.create_attempt(
-            spec.run_id,
-            spec.job_id,
-            next_attempt_id,
-            initial_state="dispatch-ready",
-        )
-        store.record_transition(
-            EntityKind.JOB,
-            spec.job_id,
-            expected_version=job.version,
-            next_state="running",
-            reason=TransitionReason.PROCESS_STARTED,
-            evidence_digest=decision.artifact_reference.digest,
-        )
-        store.record_transition(
-            EntityKind.RUN,
-            spec.run_id,
-            expected_version=run.version,
-            next_state="dispatch-ready",
-            reason=TransitionReason.PROCESS_STARTED,
-            evidence_digest=decision.artifact_reference.digest,
-        )
-        store.record_transition(
-            EntityKind.ATTEMPT,
-            next_attempt_id,
-            expected_version=next_attempt.version,
-            next_state="running",
-            reason=TransitionReason.PROCESS_STARTED,
-            evidence_digest=spec.run_spec_digest,
-        )
-        self._ensure_stage_started(spec, next_attempt_id)
-        return next_attempt_id
+        raise EngineBindingRefusal(
+            "semantic verifier rejection is terminal for this candidate; "
+            "retry requires a new candidate or owner ruling")
 
-    def _apply_candidate(self, spec: RunSpec, attempt_id: str) -> str:
+    def _reload_promotion_authority(
+            self, spec: RunSpec, attempt_id: str, plan: AssurancePlan,
+            ) -> tuple[
+                VerifierEvidence,
+                tuple[ReviewCycle, ReviewerEvidence] | None,
+                IntegrationDecision,
+            ]:
+        verifier_action_id = self._promotion_action_id(
+            spec, attempt_id, "typed-independent-verify")
+        decision_action_id = self._promotion_action_id(
+            spec, attempt_id, "integration-decision")
+        try:
+            verifier = reload_verifier_evidence(
+                spec.run_id, attempt_id, verifier_action_id, start=self.root)
+            decision = reload_integration_decision(
+                spec.run_id,
+                attempt_id,
+                decision_action_id,
+                verifier_action_id,
+                start=self.root,
+            )
+            review = self._promotion_review(spec, plan)
+        except WorkflowError as error:
+            raise EngineBindingRefusal(
+                f"published promotion authority cannot be reloaded: {error}") from error
+        return verifier, review, decision
+
+    def _apply_candidate(
+            self, spec: RunSpec, attempt_id: str, plan: AssurancePlan,
+            verifier: VerifierEvidence,
+            review: tuple[ReviewCycle, ReviewerEvidence] | None,
+            decision: IntegrationDecision) -> str:
+        reloaded = self._reload_promotion_authority(spec, attempt_id, plan)
+        if reloaded != (verifier, review, decision):
+            raise EngineBindingRefusal(
+                "promotion apply authority differs from the reloaded published tuple")
+        if decision.outcome is not DecisionOutcome.ACCEPT:
+            raise EngineBindingRefusal(
+                "promotion apply requires a published accept decision")
         assert spec.candidate is not None
         target_ref = spec.result_policy.target_ref
         expected_oid = spec.result_policy.expected_oid
@@ -1245,45 +1352,237 @@ class StagedRunEngine:
             required.append(digest)
         return required[0], required[1], required[2]
 
-    def _publish_promotion_verifier(
+    def _promotion_verifier_result_schema(
+            self, spec: RunSpec, attempt_id: str, candidate_oid: str,
+            root_fingerprint: str) -> StoredArtifact:
+        properties = {
+            "schema": {
+                "type": "string",
+                "const": "waystone-promotion-verifier-result-1",
+            },
+            "run_spec_digest": {"type": "string", "const": spec.run_spec_digest},
+            "attempt_id": {"type": "string", "const": attempt_id},
+            "candidate_oid": {"type": "string", "const": candidate_oid},
+            "root_fingerprint": {"type": "string", "const": root_fingerprint},
+            "criterion_results": {
+                "type": "array",
+                "minItems": len(spec.job_input.acceptance_criteria),
+                "maxItems": len(spec.job_input.acceptance_criteria),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "criterion": {
+                            "type": "string",
+                            "enum": list(spec.job_input.acceptance_criteria),
+                        },
+                        "passed": {"type": "boolean"},
+                        "evidence_digests": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "pattern": "^sha256:[0-9a-f]{64}$",
+                            },
+                        },
+                    },
+                    "required": ["criterion", "passed", "evidence_digests"],
+                },
+            },
+            "blockers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "blocker_id": {"type": "string", "minLength": 1},
+                        "detail": {"type": "string", "minLength": 1},
+                    },
+                    "required": ["blocker_id", "detail"],
+                },
+            },
+            "summary": {"type": "string", "minLength": 1},
+        }
+        return self.assembly.artifact_store.write(assurance_json({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "additionalProperties": False,
+            "properties": properties,
+            "required": list(properties),
+        }))
+
+    def _record_promotion_verifier_launch(
+            self, spec: RunSpec, attempt_id: str, action_id: str,
+            invocation: RunnerInvocation) -> None:
+        context = invocation.candidate_context
+        if context is None:
+            raise EngineBindingRefusal(
+                "promotion verifier launch lacks candidate context")
+        payload = assurance_json({
+            "schema": "waystone-promotion-verifier-launch-1",
+            "run_id": spec.run_id,
+            "job_id": spec.job_id,
+            "attempt_id": attempt_id,
+            "action_id": action_id,
+            "cwd": str(invocation.cwd),
+            "candidate_oid": context.candidate_oid,
+            "root_fingerprint": context.root_fingerprint,
+            "run_spec_digest": context.run_spec_digest,
+            "invocation_digest": self._invocation_digest(invocation),
+        })
+        artifact = self.assembly.artifact_store.write(payload)
+        reference = ArtifactReference(
+            f"verifier-launch:{action_id}",
+            ArtifactReferenceKind.EVIDENCE,
+            artifact.digest,
+            artifact.size,
+        )
+        try:
+            existing = self.assembly.store.get_artifact_reference(reference.reference_id)
+        except RecordNotFoundError:
+            attempt = self.assembly.store.get_entity(EntityKind.ATTEMPT, attempt_id)
+            self.assembly.store.record_transition(
+                EntityKind.ATTEMPT,
+                attempt_id,
+                expected_version=attempt.version,
+                next_state=attempt.state,
+                reason=TransitionReason.EFFECT_OBSERVED,
+                evidence_digest=artifact.digest,
+                artifact_references=(reference,),
+            )
+        else:
+            if existing != reference:
+                raise EngineBindingRefusal(
+                    "promotion verifier launch record is divergent")
+
+    def _parse_promotion_verifier_result(
+            self, content: bytes, *, spec: RunSpec, attempt_id: str,
+            request, actor: ActorIdentity, raw_digest: str) -> VerifierOutput:
+        try:
+            document = json.loads(content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise EngineBindingRefusal(
+                f"promotion verifier result is not JSON: {error}") from error
+        fields = {
+            "schema", "run_spec_digest", "attempt_id", "candidate_oid",
+            "root_fingerprint", "criterion_results", "blockers", "summary",
+        }
+        if not isinstance(document, dict) or set(document) != fields:
+            raise EngineBindingRefusal(
+                "promotion verifier result fields are not canonical")
+        if (document["schema"] != "waystone-promotion-verifier-result-1"
+                or document["run_spec_digest"] != spec.run_spec_digest
+                or document["attempt_id"] != attempt_id
+                or document["candidate_oid"] != request.result.result_oid
+                or document["root_fingerprint"] != request.review_root_fingerprint):
+            raise EngineBindingRefusal(
+                "promotion verifier result differs from its candidate launch binding")
+        criteria = document["criterion_results"]
+        blockers = document["blockers"]
+        if not isinstance(criteria, list) or not isinstance(blockers, list):
+            raise EngineBindingRefusal(
+                "promotion verifier result collections are malformed")
+        try:
+            parsed_criteria = tuple(CriterionResult(
+                item["criterion"],
+                item["passed"],
+                tuple((*item["evidence_digests"], raw_digest)),
+            ) for item in criteria)
+            parsed_blockers = tuple(VerifierBlocker(
+                item["blocker_id"], item["detail"]) for item in blockers)
+        except (KeyError, TypeError) as error:
+            raise EngineBindingRefusal(
+                "promotion verifier result entries are malformed") from error
+        return VerifierOutput(
+            actor=actor,
+            result_digest=request.result.result_digest,
+            criterion_results=parsed_criteria,
+            blockers=parsed_blockers,
+            summary=document["summary"],
+        )
+
+    def _execute_promotion_verifier(
         self,
         spec: RunSpec,
         attempt_id: str,
-        adapted: AdaptedWorkerResult,
         plan: AssurancePlan,
     ) -> VerifierEvidence:
-        if not isinstance(adapted.result, CompletedWorkerResult):
-            raise EngineBindingRefusal(
-                "promotion verifier did not publish a completed typed result")
         actor = ActorIdentity(
             self.assembly.profile.binding_for(Role.VERIFIER).binding_digest,
             Role.VERIFIER,
         )
-        evidence_digests = tuple(
-            item.digest for item in adapted.result.evidence_refs)
-        passed = adapted.result.result_summary == "pass"
+        action_id = self._promotion_action_id(
+            spec, attempt_id, "typed-independent-verify")
 
         def verifier_executor(request) -> FixtureVerifierResult:
-            criteria = tuple(CriterionResult(
-                criterion,
-                passed,
-                evidence_digests,
-            ) for criterion in request.owner_criteria)
-            blockers = () if passed else (VerifierBlocker(
-                "promotion-verifier-rejected",
-                "the verifier binding rejected the exact promotion candidate",
-            ),)
-            return FixtureVerifierResult(0, VerifierOutput(
-                actor=actor,
-                result_digest=request.result.result_digest,
-                criterion_results=criteria,
-                blockers=blockers,
-                summary=(
-                    "promotion verifier accepted the exact candidate"
-                    if passed else
-                    "promotion verifier rejected the exact candidate"
-                ),
-            ))
+            assert spec.candidate is not None
+            if request.result.result_oid != spec.candidate["target_oid"]:
+                raise EngineBindingRefusal(
+                    "promotion verifier request names a different candidate OID")
+            observed_fingerprint = fingerprint_materialized_root(request.review_root)
+            if observed_fingerprint != request.review_root_fingerprint:
+                raise EngineBindingRefusal(
+                    "promotion verifier review root fingerprint changed before launch")
+            context = RunnerCandidateContext(
+                request.result.result_oid,
+                request.review_root_fingerprint,
+                spec.run_spec_digest,
+            )
+            schema = self._promotion_verifier_result_schema(
+                spec,
+                attempt_id,
+                request.result.result_oid,
+                request.review_root_fingerprint,
+            )
+            with tempfile.TemporaryDirectory(
+                    prefix="waystone-promotion-result-") as temporary:
+                output_path = Path(temporary) / "result.json"
+                invocation = self._stage_invocation(
+                    spec,
+                    attempt_id,
+                    Role.VERIFIER,
+                    candidate_root=request.review_root,
+                    candidate_context=context,
+                    output_schema=schema,
+                    output_path=output_path,
+                )
+                if (invocation.cwd != request.review_root.resolve(strict=True)
+                        or invocation.candidate_context != context):
+                    raise EngineBindingRefusal(
+                        "promotion verifier invocation differs from its review root")
+                self._record_promotion_verifier_launch(
+                    spec, attempt_id, action_id, invocation)
+                try:
+                    completed = subprocess.run(
+                        invocation.argv,
+                        cwd=invocation.cwd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
+                    )
+                except OSError as error:
+                    return FixtureVerifierResult(
+                        1, None, str(error).encode("utf-8", errors="backslashreplace"))
+                if completed.returncode != 0:
+                    return FixtureVerifierResult(
+                        completed.returncode, None, completed.stderr)
+                try:
+                    content = output_path.read_bytes()
+                except OSError as error:
+                    return FixtureVerifierResult(
+                        0, b"", str(error).encode("utf-8", errors="backslashreplace"))
+                raw = self.assembly.artifact_store.write(content)
+                try:
+                    output = self._parse_promotion_verifier_result(
+                        content,
+                        spec=spec,
+                        attempt_id=attempt_id,
+                        request=request,
+                        actor=actor,
+                        raw_digest=raw.digest,
+                    )
+                except EngineBindingRefusal:
+                    return FixtureVerifierResult(0, content, completed.stderr)
+                return FixtureVerifierResult(0, output, completed.stderr)
 
         verification_plan = load_verification_plan(spec.run_id, start=self.root)
         adapter = VerifierAdapter(
@@ -1297,8 +1596,6 @@ class StagedRunEngine:
                 "check-free promotion verification cannot execute an engine check")
 
         assert spec.candidate is not None
-        action_id = self._promotion_action_id(
-            spec, attempt_id, "typed-independent-verify")
         retry_of = None
         if attempt_id != f"{spec.run_id}:attempt:1":
             previous = self._previous_promotion_decision(spec, attempt_id)
@@ -1388,7 +1685,7 @@ class StagedRunEngine:
     def _execute_public_stage(
             self, spec: RunSpec, attempt_id: str) -> tuple[tuple[str, object], ...] | None:
         stage = spec.lifecycle_stage.value
-        if stage in {"explore", "evaluate", "promote"}:
+        if stage in {"explore", "evaluate"}:
             action_id = self._runner_action_id(attempt_id, stage)
             adapted = self.observe_worker_result(spec.run_id, attempt_id, action_id)
             if isinstance(adapted.result, ContextRequestedWorkerResult):
@@ -1409,7 +1706,7 @@ class StagedRunEngine:
                     config_digest=self.assembly.profile.content_digest,
                 )
 
-            return self.execute_stage(spec.run_id, {
+            return self._execute_stage(spec.run_id, {
                 "worker": lambda: action_id,
                 "result-adapter": lambda: adapted,
                 "candidate-publish": publish,
@@ -1429,7 +1726,7 @@ class StagedRunEngine:
                 )
                 return evidence
 
-            return self.execute_stage(spec.run_id, {
+            return self._execute_stage(spec.run_id, {
                 "freeze": lambda: spec.candidate["digest"],  # type: ignore[index]
                 "read-only-evaluator": lambda: adapted,
                 "evaluation-evidence": publish_evidence,
@@ -1451,8 +1748,8 @@ class StagedRunEngine:
 
         def publish_verifier() -> VerifierEvidence:
             nonlocal verifier
-            verifier = self._publish_promotion_verifier(
-                spec, attempt_id, adapted, plan)
+            verifier = self._execute_promotion_verifier(
+                spec, attempt_id, plan)
             return verifier
 
         def consume_review() -> tuple[ReviewCycle, ReviewerEvidence]:
@@ -1476,19 +1773,18 @@ class StagedRunEngine:
             "evaluated-candidate-freeze": lambda: spec.candidate["digest"],  # type: ignore[index]
             "independent-verify": publish_verifier,
             "integration-decision": publish_decision,
-            "target-ref-apply": lambda: self._apply_candidate(spec, attempt_id),
-            "completion": lambda: (
-                decision.artifact_reference.digest
-                if decision is not None else None),
+            "target-ref-apply": lambda: None,
+            "completion": lambda: None,
         }
         if plan.requires("adversarial-review"):
             handlers["adversarial-review"] = consume_review
-        return self.execute_stage(
+        return self._execute_stage(
             spec.run_id,
             handlers,
             regression_contract_digest=regression,
             supported_scope_digest=supported,
             accepted_risks_digest=risks,
+            _promotion_composition=_PROMOTION_COMPOSITION,
         )
 
     def resume(self, run_id: str) -> Mapping[str, object]:
@@ -1518,7 +1814,7 @@ class StagedRunEngine:
             return self.assembly.transport.actions_next(run_id)
         spec = load_run_spec(run_id, start=self.root)
         attempt_id = self._latest_attempt_id(spec)
-        if spec.lifecycle_stage.value in {"explore", "evaluate", "promote"}:
+        if spec.lifecycle_stage.value in {"explore", "evaluate"}:
             action_id = self._ensure_stage_runner(spec, attempt_id)
             action = self.assembly.store.get_entity(EntityKind.ACTION, action_id)
             if action.state != "completed":
@@ -1597,7 +1893,7 @@ class StagedRunEngine:
             evidence_digest=decision.artifact_reference.digest,
         )
 
-    def execute_stage(
+    def _execute_stage(
         self,
         run_id: str,
         handlers: Mapping[str, Callable[[], object]],
@@ -1605,6 +1901,7 @@ class StagedRunEngine:
         regression_contract_digest: str | None = None,
         supported_scope_digest: str | None = None,
         accepted_risks_digest: str | None = None,
+        _promotion_composition: object | None = None,
     ) -> tuple[tuple[str, object], ...]:
         """Run exactly the frozen stage DAG and close only its declared completion path."""
         spec = load_run_spec(run_id, start=self.root)
@@ -1626,6 +1923,9 @@ class StagedRunEngine:
                 raise EngineBindingRefusal(
                     "explore candidate publication requires an absent run-owned ref")
         if spec.lifecycle_stage.value == "promote":
+            if _promotion_composition is not _PROMOTION_COMPOSITION:
+                raise EngineBindingRefusal(
+                    "promotion authority handlers are engine-owned")
             if spec.frame_status_ref.status != "committed":
                 raise EngineBindingRefusal("promotion requires a committed project frame")
             required_records = {
@@ -1664,39 +1964,31 @@ class StagedRunEngine:
                 raise exhausted
             original_handlers = dict(handlers)
             promotion_results: dict[str, object] = {}
+            attempt_id = self._latest_attempt_id(spec)
 
             def independent_verify() -> object:
-                result = original_handlers["independent-verify"]()
-                if not isinstance(result, VerifierEvidence):
-                    raise EngineBindingRefusal(
-                        "independent-verify must return typed VerifierEvidence")
-                promotion_results["independent-verify"] = result
-                return result
+                return original_handlers["independent-verify"]()
 
             handlers = dict(handlers)
             handlers["independent-verify"] = independent_verify
             if plan.requires("adversarial-review"):
                 def adversarial_review() -> object:
-                    result = original_handlers["adversarial-review"]()
-                    if (not isinstance(result, tuple) or len(result) != 2
-                            or not isinstance(result[0], ReviewCycle)
-                            or not isinstance(result[1], ReviewerEvidence)):
-                        raise EngineBindingRefusal(
-                            "adversarial-review must return ReviewCycle and reviewer evidence")
-                    promotion_results["adversarial-review"] = result
-                    return result
+                    return original_handlers["adversarial-review"]()
 
                 handlers["adversarial-review"] = adversarial_review
 
             def integration_decision() -> object:
-                result = original_handlers["integration-decision"]()
-                promotion_results["integration-decision"] = result
+                original_handlers["integration-decision"]()
+                verifier, published_review, decision = (
+                    self._reload_promotion_authority(spec, attempt_id, plan))
+                promotion_results["independent-verify"] = verifier
+                promotion_results["adversarial-review"] = published_review
+                promotion_results["integration-decision"] = decision
                 evidence_ref = spec.evaluation["evidence"]
                 assert isinstance(evidence_ref, Mapping)
                 validator = (
                     validate_promotion_rejection
-                    if (isinstance(result, IntegrationDecision)
-                        and result.outcome is DecisionOutcome.REJECT)
+                    if decision.outcome is DecisionOutcome.REJECT
                     else validate_promotion_evidence
                 )
                 validator(
@@ -1708,16 +2000,42 @@ class StagedRunEngine:
                     expected_evaluation_evidence_digest=evidence_ref["digest"],
                     expected_target_result_digest=(
                         spec.candidate["producer_result_digest"]),
-                    verifier=promotion_results.get("independent-verify"),
-                    review=promotion_results.get("adversarial-review"),  # type: ignore[arg-type]
-                    decision=result,
+                    verifier=verifier,
+                    review=published_review,
+                    decision=decision,
                 )
-                if (isinstance(result, IntegrationDecision)
-                        and result.outcome is DecisionOutcome.REJECT):
-                    raise _PromotionRejected(result)
-                return result
+                if decision.outcome is DecisionOutcome.REJECT:
+                    raise _PromotionRejected(decision)
+                return decision
 
             handlers["integration-decision"] = integration_decision
+
+            def target_ref_apply() -> object:
+                verifier = promotion_results.get("independent-verify")
+                published_review = promotion_results.get("adversarial-review")
+                decision = promotion_results.get("integration-decision")
+                if (not isinstance(verifier, VerifierEvidence)
+                        or not isinstance(decision, IntegrationDecision)
+                        or (published_review is not None and (
+                            not isinstance(published_review, tuple)
+                            or len(published_review) != 2
+                            or not isinstance(published_review[0], ReviewCycle)
+                            or not isinstance(published_review[1], ReviewerEvidence)))):
+                    raise EngineBindingRefusal(
+                        "target apply lacks reloaded published promotion authority")
+                return self._apply_candidate(
+                    spec,
+                    attempt_id,
+                    plan,
+                    verifier,
+                    published_review,  # type: ignore[arg-type]
+                    decision,
+                )
+
+            handlers["target-ref-apply"] = target_ref_apply
+            handlers["completion"] = lambda: (
+                promotion_results["integration-decision"].artifact_reference.digest  # type: ignore[union-attr]
+            )
         try:
             results = execute_assurance_dag(
                 plan,
@@ -2380,7 +2698,7 @@ class RunEngine:
             ArtifactStore(self.root).read(spec.assurance_plan.digest))
         raise EngineConfigurationUnavailable(
             f"RunSpec v2 {assurance.lifecycle_stage.value} completion must execute "
-            "through StagedRunEngine.execute_stage with its frozen exact action DAG")
+            "through StagedRunEngine.resume with its frozen exact action DAG")
 
     def resume(self, run_id: str) -> ResumeResult:
         spec = load_run_spec(run_id, start=self.root)

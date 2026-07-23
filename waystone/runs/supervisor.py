@@ -382,11 +382,35 @@ class LivenessObservation:
 
 
 @dataclass(frozen=True)
+class RunnerCandidateContext:
+    """Exact candidate facts required by one read-only stage invocation."""
+
+    candidate_oid: str
+    root_fingerprint: str
+    run_spec_digest: str
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.candidate_oid, str)
+                or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", self.candidate_oid) is None):
+            raise ValueError("candidate_oid must be one full lowercase Git OID")
+        validate_sha256_digest(self.root_fingerprint)
+        validate_sha256_digest(self.run_spec_digest)
+
+    def to_payload(self) -> dict[str, str]:
+        return {
+            "candidate_oid": self.candidate_oid,
+            "root_fingerprint": self.root_fingerprint,
+            "run_spec_digest": self.run_spec_digest,
+        }
+
+
+@dataclass(frozen=True)
 class RunnerInvocation:
     """One exact local command selected by an already-frozen invocation digest."""
 
     argv: tuple[str, ...]
     cwd: Path
+    candidate_context: RunnerCandidateContext | None = None
 
     def __post_init__(self) -> None:
         if (not isinstance(self.argv, tuple) or not self.argv
@@ -394,6 +418,10 @@ class RunnerInvocation:
             raise ValueError("argv must be a non-empty tuple of strings")
         _nonempty(self.argv[0], "argv[0]")
         object.__setattr__(self, "cwd", Path(self.cwd))
+        if (self.candidate_context is not None
+                and not isinstance(self.candidate_context, RunnerCandidateContext)):
+            raise TypeError(
+                "candidate_context must be a RunnerCandidateContext or None")
 
 
 @dataclass(frozen=True)
@@ -639,6 +667,44 @@ def _resolved_executable(argv0: str, cwd: Path) -> Path:
     return candidate
 
 
+def _candidate_context_mismatch(
+        cwd: Path, context: RunnerCandidateContext | Mapping[str, object] | None,
+) -> str | None:
+    if context is None:
+        return None
+    payload = context.to_payload() if isinstance(context, RunnerCandidateContext) else context
+    try:
+        candidate_oid = payload["candidate_oid"]
+        root_fingerprint = validate_sha256_digest(payload["root_fingerprint"])
+        validate_sha256_digest(payload["run_spec_digest"])
+        observed_fingerprint = fingerprint_candidate_root(cwd, candidate_oid)
+    except (KeyError, TypeError, ValueError, WorkflowError, OSError) as error:
+        return f"candidate root cannot be observed: {error}"
+    if observed_fingerprint != root_fingerprint:
+        return "candidate root fingerprint differs from the frozen materialization"
+    return None
+
+
+def fingerprint_candidate_root(cwd: Path, candidate_oid: str) -> str:
+    """Bind one detached candidate checkout while ignoring its reserved result file."""
+    from waystone.adapters.git import git_full_sha, git_read_bytes
+
+    root = Path(cwd).resolve(strict=True)
+    if git_full_sha(root) != candidate_oid:
+        raise ValueError("candidate root HEAD differs from the frozen candidate OID")
+    status = git_read_bytes(
+        root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    records = tuple(item for item in status.split(b"\0") if item)
+    if any(item != b"?? WAYSTONE_RESULT.yaml" for item in records):
+        raise ValueError("candidate root contains non-control-file changes")
+    tree_oid = git_read_bytes(
+        root, "rev-parse", "--verify", f"{candidate_oid}^{{tree}}").strip()
+    return "sha256:" + hashlib.sha256(_canonical_bytes({
+        "candidate_oid": candidate_oid,
+        "tree_oid": tree_oid.decode("ascii"),
+    })).hexdigest()
+
+
 def _settle_worker_after_failure(
         process: subprocess.Popen, identity: ProcessIdentity | None) -> None:
     """Never abandon a spawned child; signal only a still-matching identity."""
@@ -825,9 +891,19 @@ class Supervisor:
                 intent.action_id, f"runner cwd is unavailable: {error}") from error
         if not cwd.is_dir():
             raise SupervisorLaunchRefused(intent.action_id, "runner cwd is not a directory")
+        mismatch = _candidate_context_mismatch(cwd, invocation.candidate_context)
+        if mismatch is not None:
+            raise SupervisorLaunchRefused(intent.action_id, mismatch)
         executable = _resolved_executable(invocation.argv[0], cwd)
         principal = self._principal_for_intent(intent)
         worker_result_binding = self._worker_result_binding(intent.action_id, intent.run_id)
+        if worker_result_binding is not None and invocation.candidate_context is not None:
+            from waystone.runs.worker_result import capture_result_snapshot
+
+            worker_result_binding = {
+                **worker_result_binding,
+                "base_snapshot_digest": capture_result_snapshot(cwd).digest,
+            }
         launch_path = self._launch_path(intent.action_id)
         payload: dict[str, object] = {
             "schema": _LAUNCH_SCHEMA,
@@ -846,6 +922,10 @@ class Supervisor:
             "heartbeat_interval": self._heartbeat_interval,
             "lease_ttl": self._lease_ttl,
             "worker_result_binding": worker_result_binding,
+            "candidate_context": (
+                None if invocation.candidate_context is None
+                else invocation.candidate_context.to_payload()
+            ),
         }
 
         def guarded_spawn() -> DetachedSupervisorHandle:
@@ -1049,7 +1129,7 @@ _LAUNCH_FIELDS = {
     "schema", "project_root", "run_id", "job_id", "action_id", "owner_token",
     "fencing_epoch", "entity_version", "invocation_digest", "launch_token",
     "completion_marker_path", "argv", "cwd", "heartbeat_interval", "lease_ttl",
-    "worker_result_binding",
+    "worker_result_binding", "candidate_context",
 }
 _RUNTIME_FIELDS = {
     "schema", "run_id", "job_id", "action_id", "owner_token", "fencing_epoch",
@@ -1078,11 +1158,12 @@ def _read_launch(path: Path) -> dict[str, object]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise SupervisorStateError(path, f"launch evidence is unreadable: {error}") from error
-    fields = (_LAUNCH_FIELDS if isinstance(raw, dict)
-              and "worker_result_binding" in raw
-              else _LAUNCH_FIELDS - {"worker_result_binding"})
+    optional = {"worker_result_binding", "candidate_context"}
+    present_optional = optional & set(raw) if isinstance(raw, dict) else set()
+    fields = _LAUNCH_FIELDS - (optional - present_optional)
     payload = _read_object(path, schema=_LAUNCH_SCHEMA, fields=fields)
     payload.setdefault("worker_result_binding", None)
+    payload.setdefault("candidate_context", None)
     try:
         for field in (
                 "project_root", "run_id", "job_id", "action_id", "owner_token",
@@ -1104,6 +1185,16 @@ def _read_launch(path: Path) -> dict[str, object]:
             _nonempty(binding["attempt_id"], "launch.worker_result_binding.attempt_id")
             for field in ("run_spec_digest", "work_brief_digest", "base_snapshot_digest"):
                 validate_sha256_digest(binding[field])
+        candidate = payload["candidate_context"]
+        if candidate is not None:
+            if not isinstance(candidate, dict) or set(candidate) != {
+                    "candidate_oid", "root_fingerprint", "run_spec_digest"}:
+                raise ValueError("launch candidate_context fields are invalid")
+            RunnerCandidateContext(
+                candidate["candidate_oid"],
+                candidate["root_fingerprint"],
+                candidate["run_spec_digest"],
+            )
         argv = payload["argv"]
         if (not isinstance(argv, list) or not argv
                 or any(not isinstance(value, str) for value in argv)):
@@ -1256,6 +1347,10 @@ def _run_detached_supervisor(launch_path: Path) -> int:
     )
     if marker_path != expected_marker:
         raise SupervisorStateError(marker_path, "marker path is not engine-owned")
+    candidate_mismatch = _candidate_context_mismatch(
+        Path(launch["cwd"]), launch["candidate_context"])
+    if candidate_mismatch is not None:
+        raise SupervisorStateError(Path(launch_path), candidate_mismatch)
 
     store = RunStore.open(project_root)
     try:
@@ -1353,14 +1448,24 @@ def _run_detached_supervisor(launch_path: Path) -> int:
             raise
 
         finished_at = _utc_now()
+        candidate_mismatch = _candidate_context_mismatch(
+            Path(launch["cwd"]), launch["candidate_context"])
+        effective_returncode = process.returncode
+        if effective_returncode == 0 and candidate_mismatch is not None:
+            effective_returncode = 1
+            stderr = (
+                stderr
+                + (b"\n" if stderr else b"")
+                + candidate_mismatch.encode("utf-8", errors="backslashreplace")
+            )
         artifacts = ArtifactStore(project_root)
         stdout_artifact = artifacts.write(stdout)
         stderr_artifact = artifacts.write(stderr)
-        if process.returncode is None:
+        if effective_returncode is None:
             raise SupervisorStateError(
                 marker_path, "wait completed without a process return code")
-        returncode = process.returncode if process.returncode >= 0 else None
-        signal = -process.returncode if process.returncode < 0 else None
+        returncode = effective_returncode if effective_returncode >= 0 else None
+        signal = -effective_returncode if effective_returncode < 0 else None
         worker_result_digest = None
         binding = launch["worker_result_binding"]
         if binding is not None and returncode == 0:

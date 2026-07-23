@@ -387,7 +387,8 @@ class CandidateEvaluationTests(unittest.TestCase):
                         store.read(promote.assurance_plan.digest)).actions
                 }
                 with self.assertRaises(EngineBindingRefusal):
-                    StagedRunEngine(assembly).execute_stage(promote.run_id, handlers)
+                    StagedRunEngine(assembly)._execute_stage(  # noqa: SLF001
+                        promote.run_id, handlers)
                 self.assertEqual(called, [])
 
 

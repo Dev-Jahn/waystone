@@ -14,9 +14,11 @@ import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from unittest import mock
 
 import yaml
@@ -25,16 +27,19 @@ from test_work_brief import init_project, item, payload
 from waystone.cli import review_group, run_group
 from waystone.features.review_layout import new_run_id
 from waystone.jobs import completion, work_brief
+from waystone.jobs.completion import LifecycleStage
 from waystone.jobs.domain import Role
 from waystone.jobs.profile import assemble_run, read_profile
 from waystone.jobs.run_scaffold import RunScaffoldRefusal, scaffold_work_brief
 from waystone.project.brief import read_project_frame_at_commit
 from waystone.project.context import resolve_project_context
 from waystone.runs.artifacts import ArtifactStore
+from waystone.runs.engine import EngineBindingRefusal, StagedRunEngine
 from waystone.runs.preflight import EnvironmentPreparationUnavailableError
 from waystone.runs.spec import load_run_spec
 from waystone.runs.store import (
     EngineOwnedPathUnverifiableError, EntityKind, FilesystemInfo, RunStore)
+from waystone.runs.supervisor import RunnerCandidateContext
 from waystone.runs.transport import ActionPlanRefusal
 
 
@@ -92,21 +97,50 @@ class RunCliTests(unittest.TestCase):
             "schema = json.loads(Path(args[args.index('--output-schema') + 1]).read_text())\n"
             "properties = schema['properties']\n"
             "assert properties['attempt_id']['type'] == 'string'\n"
-            "summary = properties['result_summary']['anyOf'][0]\n"
-            "evaluation = 'enum' in summary\n"
+            "promotion = 'criterion_results' in properties\n"
+            "summary = None if promotion else properties['result_summary']['anyOf'][0]\n"
+            "evaluation = promotion or 'enum' in summary\n"
             "if not evaluation:\n"
             "  Path('candidate.txt').write_text('fixture candidate\\n', encoding='utf-8')\n"
-            "  subprocess.run(['git', 'add', 'candidate.txt'], check=True)\n"
+            "  paths = ['candidate.txt']\n"
+            "  for verdict_path in ('evaluate-verdict.txt', 'promote-verdict.txt'):\n"
+            "    if Path(verdict_path).exists():\n"
+            "      paths.append(verdict_path)\n"
+            "  subprocess.run(['git', 'add', *paths], check=True)\n"
             "  subprocess.run(['git', 'commit', '-qm', 'fixture candidate'], check=True)\n"
-            "result = {\n"
-            "  'schema': properties['schema']['const'],\n"
-            "  'status': 'completed',\n"
-            "  'run_spec_digest': properties['run_spec_digest']['const'],\n"
-            "  'attempt_id': properties['attempt_id']['const'],\n"
-            "  'result_summary': 'pass' if evaluation else 'Candidate explored.',\n"
-            "  'evidence_refs': [],\n"
-            "  'context_request': None,\n"
-            "}\n"
+            "else:\n"
+            "  verdict_path = 'promote-verdict.txt' if promotion else 'evaluate-verdict.txt'\n"
+            "  verdict = Path(verdict_path).read_text(encoding='utf-8').strip()\n"
+            "  assert verdict in {'pass', 'fail'}\n"
+            "if promotion:\n"
+            "  result = {\n"
+            "    'schema': properties['schema']['const'],\n"
+            "    'run_spec_digest': properties['run_spec_digest']['const'],\n"
+            "    'attempt_id': properties['attempt_id']['const'],\n"
+            "    'candidate_oid': properties['candidate_oid']['const'],\n"
+            "    'root_fingerprint': properties['root_fingerprint']['const'],\n"
+            "    'criterion_results': [{\n"
+            "      'criterion': criterion,\n"
+            "      'passed': verdict == 'pass',\n"
+            "      'evidence_digests': [],\n"
+            "    } for criterion in properties['criterion_results']['items']['properties']"
+            "['criterion']['enum']],\n"
+            "    'blockers': [] if verdict == 'pass' else [{\n"
+            "      'blocker_id': 'promotion-verifier-rejected',\n"
+            "      'detail': 'candidate verdict is fail',\n"
+            "    }],\n"
+            "    'summary': f'candidate verdict: {verdict}',\n"
+            "  }\n"
+            "else:\n"
+            "  result = {\n"
+            "    'schema': properties['schema']['const'],\n"
+            "    'status': 'completed',\n"
+            "    'run_spec_digest': properties['run_spec_digest']['const'],\n"
+            "    'attempt_id': properties['attempt_id']['const'],\n"
+            "    'result_summary': verdict if evaluation else 'Candidate explored.',\n"
+            "    'evidence_refs': [],\n"
+            "    'context_request': None,\n"
+            "  }\n"
             "Path(args[args.index('-o') + 1]).write_text(json.dumps(result), encoding='utf-8')\n",
             encoding="utf-8",
         )
@@ -414,6 +448,8 @@ class RunCliTests(unittest.TestCase):
     def test_scaffold_derives_candidate_evaluation_and_promotion_lineage(self):
         binary = self.install_fixture_codex()
         path = f"{binary.parent}{os.pathsep}{os.environ['PATH']}"
+        for name in ("evaluate-verdict.txt", "promote-verdict.txt"):
+            (self.root / name).write_text("pass\n", encoding="utf-8")
         explore_draft = self.base / "explore-draft.yaml"
         explore_draft.write_text(yaml.safe_dump(
             self.semantic_draft("explore", "hypothesis/solver"), sort_keys=False,
@@ -581,10 +617,17 @@ class RunCliTests(unittest.TestCase):
             "digest": "sha256:" + hashlib.sha256(evaluation_bytes).hexdigest(),
             "generation": 1,
         }
+        for name in ("evaluate-verdict.txt", "promote-verdict.txt"):
+            (self.root / name).write_text("fail\n", encoding="utf-8")
+        git(self.root, "add", "evaluate-verdict.txt", "promote-verdict.txt")
+        self.assertEqual(git(
+            self.root, "commit", "-qm", "integration verdict fails").returncode, 0)
         candidate_worktree = self.base / "candidate-worktree"
         self.assertEqual(git(
             self.root, "worktree", "add", "-q", "-b", "fixture-candidate",
             str(candidate_worktree)).returncode, 0)
+        for name in ("evaluate-verdict.txt", "promote-verdict.txt"):
+            (candidate_worktree / name).write_text("pass\n", encoding="utf-8")
         binary = self.install_fixture_codex()
         path = f"{binary.parent}{os.pathsep}{os.environ['PATH']}"
 
@@ -639,6 +682,51 @@ class RunCliTests(unittest.TestCase):
                 RunStore.open(self.root) as store:
             evidence_ref = store.get_artifact_reference(
                 f"evaluation-evidence:{evaluate_id}")
+        evaluation = json.loads(
+            ArtifactStore(self.root).read_reference(evidence_ref).decode("utf-8"))
+        self.assertEqual(evaluation["result"], "pass")
+        self.assertEqual(
+            (self.root / "evaluate-verdict.txt").read_text(encoding="utf-8"),
+            "fail\n",
+        )
+        evaluate_spec = load_run_spec(evaluate_id, start=self.root)
+        evaluate_action = f"{evaluate_id}:attempt:1:read-only-evaluator"
+        launch_path = (
+            self.root / ".waystone" / "supervisors"
+            / f"{hashlib.sha256(evaluate_action.encode()).hexdigest()}.launch.json"
+        )
+        launch = json.loads(launch_path.read_text(encoding="utf-8"))
+        frozen_candidate_oid = git(
+            self.root, "rev-parse", f"refs/waystone/candidates/{explore_id}").stdout.strip()
+        self.assertEqual(launch["candidate_context"], {
+            "candidate_oid": frozen_candidate_oid,
+            "root_fingerprint": launch["candidate_context"]["root_fingerprint"],
+            "run_spec_digest": evaluate_spec.run_spec_digest,
+        })
+        self.assertRegex(
+            launch["candidate_context"]["root_fingerprint"],
+            r"^sha256:[0-9a-f]{64}$",
+        )
+        self.assertEqual(
+            (Path(launch["cwd"]) / "evaluate-verdict.txt").read_text(encoding="utf-8"),
+            "pass\n",
+        )
+        wrong_context = RunnerCandidateContext(
+            frozen_candidate_oid,
+            launch["candidate_context"]["root_fingerprint"],
+            "sha256:" + "f" * 64,
+        )
+        with self.runtime():
+            context = resolve_project_context(Path.cwd())
+            with assemble_run(context) as assembly, self.assertRaisesRegex(
+                    EngineBindingRefusal, "RunSpec"):
+                StagedRunEngine(assembly)._stage_invocation(  # noqa: SLF001
+                    evaluate_spec,
+                    f"{evaluate_id}:attempt:1",
+                    Role.VERIFIER,
+                    candidate_root=Path(launch["cwd"]),
+                    candidate_context=wrong_context,
+                )
         evidence_source = {
             "kind": "evaluation-evidence",
             "reference_id": f"evaluation-evidence:{evaluate_id}",
@@ -716,6 +804,88 @@ class RunCliTests(unittest.TestCase):
             self._resume_until_closeout(output, promote_id)
 
         self.assertEqual(git(self.root, "rev-parse", "HEAD").stdout.strip(), candidate_oid)
+        for name in ("evaluate-verdict.txt", "promote-verdict.txt"):
+            (self.root / name).write_text("pass\n", encoding="utf-8")
+        fail_worktree = self.base / "fail-candidate-worktree"
+        self.assertEqual(git(
+            self.root, "worktree", "add", "-q", "-b", "fixture-fail-candidate",
+            str(fail_worktree)).returncode, 0)
+        for name in ("evaluate-verdict.txt", "promote-verdict.txt"):
+            (fail_worktree / name).write_text("fail\n", encoding="utf-8")
+        git(fail_worktree, "add", "evaluate-verdict.txt", "promote-verdict.txt")
+        self.assertEqual(git(
+            fail_worktree, "commit", "-qm", "candidate verdict fails").returncode, 0)
+        fail_oid = git(fail_worktree, "rev-parse", "HEAD").stdout.strip()
+        fail_candidate = {
+            **promote_spec.candidate,
+            "target_ref": "refs/heads/fixture-fail-candidate",
+            "target_oid": fail_oid,
+            "code_sha": fail_oid,
+        }
+        self.assertEqual(
+            (self.root / "evaluate-verdict.txt").read_text(encoding="utf-8"),
+            "pass\n",
+        )
+        self.assertEqual(
+            (self.root / "promote-verdict.txt").read_text(encoding="utf-8"),
+            "pass\n",
+        )
+        with self.runtime(), mock.patch.dict(
+                os.environ, {"PATH": path}), assemble_run(
+                    resolve_project_context(Path.cwd())) as assembly:
+            engine = StagedRunEngine(assembly)
+            fail_evaluate = replace(evaluate_spec, candidate=fail_candidate)
+            evaluate_attempt = f"{evaluate_id}:attempt:candidate-fail"
+            evaluate_invocation = engine._stage_invocation(  # noqa: SLF001
+                fail_evaluate, evaluate_attempt, Role.VERIFIER)
+            evaluated = subprocess.run(
+                evaluate_invocation.argv,
+                cwd=evaluate_invocation.cwd,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(evaluated.returncode, 0, evaluated.stderr)
+            evaluate_result = json.loads(
+                (evaluate_invocation.cwd / "WAYSTONE_RESULT.yaml").read_text(
+                    encoding="utf-8"))
+            self.assertEqual(evaluate_result["run_spec_digest"], fail_evaluate.run_spec_digest)
+            self.assertEqual(evaluate_result["attempt_id"], evaluate_attempt)
+            self.assertEqual(evaluate_result["result_summary"], "fail")
+
+            fail_promote = replace(promote_spec, candidate=fail_candidate)
+            promote_invocation_spec = replace(
+                fail_promote, lifecycle_stage=LifecycleStage.EVALUATE)
+            promote_attempt = f"{promote_id}:attempt:candidate-fail"
+            promote_root, promote_context = engine._candidate_stage_root(  # noqa: SLF001
+                promote_invocation_spec, promote_attempt)
+            promote_schema = engine._promotion_verifier_result_schema(  # noqa: SLF001
+                fail_promote,
+                promote_attempt,
+                fail_oid,
+                promote_context.root_fingerprint,
+            )
+            promote_invocation = engine._stage_invocation(  # noqa: SLF001
+                promote_invocation_spec,
+                promote_attempt,
+                Role.VERIFIER,
+                candidate_root=promote_root,
+                candidate_context=promote_context,
+                output_schema=promote_schema,
+            )
+            promoted = subprocess.run(
+                promote_invocation.argv,
+                cwd=promote_invocation.cwd,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(promoted.returncode, 0, promoted.stderr)
+            promote_result = json.loads(
+                (promote_invocation.cwd / "WAYSTONE_RESULT.yaml").read_text(
+                    encoding="utf-8"))
+            self.assertTrue(promote_result["criterion_results"])
+            self.assertTrue(all(
+                not item["passed"] for item in promote_result["criterion_results"]))
+
         with mock.patch(
                 "waystone.runs.store._probe_state_filesystem",
                 return_value=FilesystemInfo(
@@ -724,6 +894,8 @@ class RunCliTests(unittest.TestCase):
             self.assertEqual(store.get_run(promote_id).state, "closeout-ready")
             verifier_ref = store.get_artifact_reference(
                 f"verifier-evidence:{promote_id}:typed-independent-verify")
+            launch_ref = store.get_artifact_reference(
+                f"verifier-launch:{promote_id}:typed-independent-verify")
             decision_ref = store.get_artifact_reference(
                 f"integration-decision:{promote_id}:integration-decision")
             review_ref = store.get_artifact_reference(
@@ -731,6 +903,14 @@ class RunCliTests(unittest.TestCase):
             self.assertEqual(len({
                 verifier_ref.digest, decision_ref.digest, review_ref.digest,
             }), 3)
+            verifier_launch = json.loads(ArtifactStore(self.root).read_reference(
+                launch_ref).decode("utf-8"))
+            self.assertEqual(verifier_launch["candidate_oid"], candidate_oid)
+            self.assertEqual(
+                verifier_launch["run_spec_digest"], promote_spec.run_spec_digest)
+            self.assertRegex(
+                verifier_launch["root_fingerprint"], r"^sha256:[0-9a-f]{64}$")
+            self.assertNotEqual(Path(verifier_launch["cwd"]), self.root)
             decision = json.loads(ArtifactStore(self.root).read_reference(
                 decision_ref).decode("utf-8"))
             self.assertEqual(
@@ -746,6 +926,12 @@ class RunCliTests(unittest.TestCase):
             self.assertEqual([(row["attempt_id"], row["state"]) for row in attempts], [
                 (f"{promote_id}:attempt:1", "completed"),
             ])
+
+    def test_promote_has_no_post_hoc_worker_result_replay_publisher(self):
+        self.assertFalse(hasattr(
+            StagedRunEngine,
+            "_publish_promotion_verifier",
+        ))
 
     def test_g01304_http_400_child_failure_terminalizes_marker_and_run_state(self):
         binary = self.install_fixture_codex()

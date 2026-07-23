@@ -309,6 +309,7 @@ class VerifierRequest:
     base_snapshot: BaseSnapshot
     base_snapshot_digest: str
     review_root: Path
+    review_root_fingerprint: str
     engine_check_results: tuple[EngineCheckResult, ...]
     verifier_binding: RoleBinding
     verifier_sandbox: SandboxContract
@@ -731,7 +732,8 @@ def _materialized_result_root(
             _restore_materialized_permissions(root)
 
 
-def _fingerprint_materialized_root(root: Path) -> str:
+def fingerprint_materialized_root(root: Path) -> str:
+    """Digest one isolated verifier root without trusting its pathname."""
     entries: list[dict[str, object]] = []
     try:
         root_info = root.lstat()
@@ -1200,16 +1202,11 @@ def _refuse_successful_verifier_retry(
         )
     if not published:
         return
-    if retry_of is None:
-        raise EffectRetryRefused(
-            published[-1][0],
-            "rejected verifier evidence requires explicit retry lineage",
-        )
-    if retry_of != published[-1][0]:
-        raise EffectRetryRefused(
-            retry_of,
-            "retry lineage does not name the latest rejected verifier evidence",
-        )
+    raise EffectRetryRefused(
+        published[-1][0],
+        "semantic verifier rejection is terminal for this candidate; "
+        "retry requires a new candidate or owner ruling",
+    )
 
 
 def _verifier_stdout(result: FixtureVerifierResult) -> bytes:
@@ -1367,7 +1364,7 @@ def _execute_verifier_locked(
                     root, result_ref, result, read_only=True,
                     require_registered_worktree=(
                         require_registered_result_worktree)) as review_root:
-                review_before = _fingerprint_materialized_root(review_root)
+                review_before = fingerprint_materialized_root(review_root)
                 try:
                     request = VerifierRequest(
                         run_id=run_id,
@@ -1377,6 +1374,7 @@ def _execute_verifier_locked(
                         base_snapshot=snapshot,
                         base_snapshot_digest=spec.base_snapshot.digest,
                         review_root=review_root,
+                        review_root_fingerprint=review_before,
                         engine_check_results=results,
                         verifier_binding=verifier_capability.binding,
                         verifier_sandbox=verifier_capability.sandbox,
@@ -1386,7 +1384,7 @@ def _execute_verifier_locked(
                     )
                     response = verifier_adapter.executor(request)
                 finally:
-                    if _fingerprint_materialized_root(review_root) != review_before:
+                    if fingerprint_materialized_root(review_root) != review_before:
                         mutation_attempts.append(VerifierMutationRefusal(
                             "fixture verifier changed its isolated review root"))
         except (FrozenInstanceError, PermissionError, VerifierMutationRefusal) as error:
@@ -3100,6 +3098,7 @@ __all__ = [
     "derive_git_result",
     "execute_verifier",
     "fingerprint_worktree",
+    "fingerprint_materialized_root",
     "record_integration_decision",
     "reload_integration_decision",
     "reload_verifier_evidence",

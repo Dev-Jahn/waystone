@@ -38,7 +38,9 @@ from waystone.runs.verify import (
     ActorIdentity,
     DecisionOutcome,
     IntegrationDecision,
+    InvalidVerifierOutput,
     VerifierEvidence,
+    VerifierExecutionFailed,
     execute_verifier,
 )
 from waystone.cli.run_group import _parse_declared_risks_bytes
@@ -311,7 +313,7 @@ class PromoteEvidenceContractTests(unittest.TestCase):
         with self.assertRaises(EngineBindingRefusal):
             validate_promotion_rejection(plan, **arguments)
 
-    def test_rejected_terminal_verifier_evidence_allows_only_explicit_retry_lineage(self):
+    def test_semantic_reject_refuses_same_candidate_retry_even_with_lineage(self):
         verify_case = test_run_verify.RunVerifyTests("runTest")
         verify_case.setUp()
         self.addCleanup(verify_case.doCleanups)
@@ -340,8 +342,9 @@ class PromoteEvidenceContractTests(unittest.TestCase):
                 verify_case.verifier_adapter(fixture),
                 start=fixture.root,
             )
-        with verify_case.supported_filesystem():
-            accepted = execute_verifier(
+        with verify_case.supported_filesystem(), self.assertRaisesRegex(
+                EffectRetryRefused, "new candidate|owner ruling"):
+            execute_verifier(
                 fixture.spec.run_id,
                 retry_attempt,
                 "action-promotion-retry",
@@ -355,15 +358,51 @@ class PromoteEvidenceContractTests(unittest.TestCase):
                 start=fixture.root,
             )
 
-        self.assertTrue(all(item.passed for item in accepted.criterion_results))
-        self.assertNotEqual(
-            rejected.artifact_reference.reference_id,
-            accepted.artifact_reference.reference_id,
+        self.assertEqual(
+            verify_case.semantic_reference_count(
+                fixture.root, "verifier-evidence:"),
+            1,
         )
-        self.assertNotEqual(
-            rejected.artifact_reference.digest,
-            accepted.artifact_reference.digest,
+
+    def test_process_and_malformed_failures_remain_retryable(self):
+        cases = (
+            ("process", {"raw_output": b"ignored", "returncode": 7},
+             VerifierExecutionFailed),
+            ("malformed", {"raw_output": {}}, InvalidVerifierOutput),
         )
+        for label, executor_args, expected_error in cases:
+            with self.subTest(label=label):
+                verify_case = test_run_verify.RunVerifyTests("runTest")
+                verify_case.setUp()
+                self.addCleanup(verify_case.doCleanups)
+                fixture = verify_case.prepare()
+                failed_attempt = f"attempt-{label}-failed"
+                failed_action = f"action-{label}-failed"
+                with self.assertRaises(expected_error):
+                    verify_case.verify(
+                        fixture,
+                        attempt_id=failed_attempt,
+                        action_id=failed_action,
+                        executor=verify_case.verifier_executor(**executor_args),
+                    )
+                retry_attempt = f"attempt-{label}-retry"
+                verify_case.create_attempt(fixture, retry_attempt)
+                with verify_case.supported_filesystem():
+                    accepted = execute_verifier(
+                        fixture.spec.run_id,
+                        retry_attempt,
+                        f"action-{label}-retry",
+                        fixture.root,
+                        fixture.result_ref,
+                        verify_case.worker.actor_id,
+                        verify_case.verifier,
+                        verify_case.check_executor(),
+                        verify_case.verifier_adapter(fixture),
+                        retry_of=failed_action,
+                        start=fixture.root,
+                    )
+                self.assertTrue(all(
+                    item.passed for item in accepted.criterion_results))
 
     def promotion_engine_fixture(self):
         temporary = tempfile.TemporaryDirectory()
@@ -418,8 +457,8 @@ class PromoteEvidenceContractTests(unittest.TestCase):
             context, None, {}, store, artifacts, None, None, None, None)
         return root, store, spec, plan, records, StagedRunEngine(assembly)
 
-    def test_reject_terminalizes_failed_without_running_target_apply(self):
-        root, store, spec, _plan, records, engine = self.promotion_engine_fixture()
+    def test_unpublished_accept_tuple_is_refused_before_target_apply(self):
+        root, store, spec, plan, records, engine = self.promotion_engine_fixture()
         verifier = self.verifier(spec.run_id)
         decision = self.decision(
             spec.run_id,
@@ -427,43 +466,17 @@ class PromoteEvidenceContractTests(unittest.TestCase):
             spec.candidate["digest"],
             spec.evaluation["evidence"]["digest"],
             None,
-            outcome=DecisionOutcome.REJECT,
+            outcome=DecisionOutcome.ACCEPT,
         )
         target = {"oid": spec.result_policy.expected_oid, "applied": False}
-
-        def independent_verify():
-            attempt = store.get_entity(EntityKind.ATTEMPT, verifier.attempt_id)
-            store.record_transition(
-                EntityKind.ATTEMPT,
-                verifier.attempt_id,
-                expected_version=attempt.version,
-                next_state="verification-recorded",
-                reason=TransitionReason.EFFECT_OBSERVED,
-                evidence_digest=verifier.artifact_reference.digest,
-                artifact_references=(verifier.artifact_reference,),
-            )
-            return verifier
-
-        def integration_decision():
-            attempt = store.get_entity(EntityKind.ATTEMPT, decision.attempt_id)
-            store.record_transition(
-                EntityKind.ATTEMPT,
-                decision.attempt_id,
-                expected_version=attempt.version,
-                next_state="decision-recorded",
-                reason=TransitionReason.COMPLETED,
-                evidence_digest=decision.artifact_reference.digest,
-                artifact_references=(decision.artifact_reference,),
-            )
-            return decision
 
         def target_apply():
             target.update(oid=spec.candidate["target_oid"], applied=True)
 
         handlers = {
             "evaluated-candidate-freeze": lambda: spec.candidate["digest"],
-            "independent-verify": independent_verify,
-            "integration-decision": integration_decision,
+            "independent-verify": lambda: verifier,
+            "integration-decision": lambda: decision,
             "target-ref-apply": target_apply,
             "completion": lambda: decision.artifact_reference.digest,
         }
@@ -480,35 +493,31 @@ class PromoteEvidenceContractTests(unittest.TestCase):
                         spec.candidate["target_oid"]
                         if ref == spec.candidate["target_ref"] else target["oid"]
                     )):
-            results = engine.execute_stage(
-                spec.run_id,
-                handlers,
-                regression_contract_digest=records[0].digest,
-                supported_scope_digest=records[1].digest,
-                accepted_risks_digest=records[2].digest,
-            )
+            with self.assertRaisesRegex(
+                    EngineBindingRefusal, "published|reload|authority"):
+                engine._execute_stage(  # noqa: SLF001 - injection refusal contract
+                    spec.run_id,
+                    handlers,
+                    regression_contract_digest=records[0].digest,
+                    supported_scope_digest=records[1].digest,
+                    accepted_risks_digest=records[2].digest,
+                )
+            with self.assertRaisesRegex(
+                    EngineBindingRefusal, "published promotion authority"):
+                engine._reload_promotion_authority(  # noqa: SLF001
+                    spec, decision.attempt_id, plan)
 
-        self.assertEqual(results, (("integration-decision", decision),))
         self.assertFalse(target["applied"])
         self.assertEqual(target["oid"], spec.result_policy.expected_oid)
-        self.assertEqual(store.get_run(spec.run_id).state, "failed")
-        self.assertEqual(store.get_entity(EntityKind.JOB, spec.job_id).state, "failed")
         self.assertEqual(
-            store.get_entity(EntityKind.ATTEMPT, decision.attempt_id).state,
-            "completed",
-        )
-        self.assertEqual(
-            store.get_artifact_reference(
-                verifier.artifact_reference.reference_id).digest,
-            verifier.artifact_reference.digest,
-        )
-        self.assertEqual(
-            store.get_artifact_reference(
-                decision.artifact_reference.reference_id).digest,
-            decision.artifact_reference.digest,
+            git(root, "rev-parse", "refs/heads/main").stdout.strip(),
+            git(root, "rev-parse", "HEAD").stdout.strip(),
         )
 
-    def test_explicit_rejection_retry_creates_attempt_two_then_can_complete(self):
+    def test_promotion_authority_handlers_have_no_public_injection_surface(self):
+        self.assertFalse(hasattr(StagedRunEngine, "execute_stage"))
+
+    def test_semantic_rejection_retry_refuses_new_attempt(self):
         _root, store, spec, _plan, _records, engine = self.promotion_engine_fixture()
         verifier = self.verifier(spec.run_id)
         decision = self.decision(
@@ -550,27 +559,23 @@ class PromoteEvidenceContractTests(unittest.TestCase):
                     return_value=decision), \
                 mock.patch("waystone.runs.engine.git_full_sha",
                            return_value=spec.result_policy.expected_oid), \
-                mock.patch.object(engine, "_ensure_stage_started") as started:
-            retry_attempt = engine.retry_rejected_promotion(spec.run_id)
+                mock.patch.object(engine, "_ensure_stage_started") as started, \
+                self.assertRaisesRegex(
+                    EngineBindingRefusal, "new candidate|owner ruling"):
+            engine.retry_rejected_promotion(spec.run_id)
 
-        self.assertEqual(retry_attempt, f"{spec.run_id}:attempt:2")
-        started.assert_called_once_with(spec, retry_attempt)
-        self.assertEqual(store.get_run(spec.run_id).state, "dispatch-ready")
-        self.assertEqual(store.get_entity(EntityKind.JOB, spec.job_id).state, "running")
+        started.assert_not_called()
+        with store._connection_lock:  # noqa: SLF001
+            attempts = store._connection.execute(  # noqa: SLF001
+                "SELECT attempt_id FROM attempts WHERE run_id = ?",
+                (spec.run_id,),
+            ).fetchall()
         self.assertEqual(
-            store.get_entity(EntityKind.ATTEMPT, retry_attempt).state, "running")
-        self.assertEqual(
-            engine._promotion_action_id(  # noqa: SLF001 - retry identity contract
-                spec, retry_attempt, "typed-independent-verify"),
-            f"{retry_attempt}:typed-independent-verify",
+            [row["attempt_id"] for row in attempts],
+            [decision.attempt_id],
         )
-
-        engine._record_stage_completion(spec, self.d(80))  # noqa: SLF001
-        self.assertEqual(store.get_run(spec.run_id).state, "closeout-ready")
-        self.assertEqual(
-            store.get_entity(EntityKind.ATTEMPT, retry_attempt).state,
-            "completed",
-        )
+        self.assertEqual(store.get_run(spec.run_id).state, "failed")
+        self.assertEqual(store.get_entity(EntityKind.JOB, spec.job_id).state, "failed")
 
     def test_rejected_promotion_closes_no_delta_and_preserves_failed_state(self):
         fixture = test_run_outcome.OutcomeFixture(self)
