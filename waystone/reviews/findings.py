@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 import yaml
 
+from waystone.adapters.git import git_full_sha
 from waystone.core import WorkflowError
 from waystone.features import review_layout
 from waystone.jobs.completion import (
@@ -23,7 +24,7 @@ from waystone.jobs.completion import (
     parse_authority_ref,
     parse_objective_ref,
 )
-from waystone.project.brief import ProjectBriefError
+from waystone.project.brief import ProjectBriefError, read_project_frame_at_commit
 from waystone.runs.artifacts import ArtifactError
 
 
@@ -79,6 +80,13 @@ class StaleDisposition(FindingError):
 
 class AuthorityValidationRefusal(FindingError):
     code = "finding-authority-validation-refusal"
+
+    def __init__(self, message: str):
+        super().__init__(f"{self.code}: {message}")
+
+
+class ObjectiveSuperseded(FindingError):
+    code = "objective-superseded"
 
     def __init__(self, message: str):
         super().__init__(f"{self.code}: {message}")
@@ -491,13 +499,31 @@ def validate_validation_authority(root: Path, payload: Mapping[str, Any]) -> Non
 def validate_disposition_authority(root: Path, payload: Mapping[str, Any]) -> None:
     """Require the disposition objective to match exact committed project authority."""
     row = validate_disposition(payload)
+    root = Path(root)
     try:
         objective = parse_objective_ref(row["objective_ref"], "objective_ref")
-        AuthorityResolver(Path(root)).validate(objective)
+        AuthorityResolver(root).validate(objective)
     except (CompletionError, ProjectBriefError, KeyError, TypeError, ValueError) as error:
         raise AuthorityValidationRefusal(
             f"objective_ref does not resolve to authoritative bytes: {error}"
         ) from error
+    current_head = git_full_sha(root)
+    if current_head is None:
+        raise AuthorityValidationRefusal("current HEAD cannot be resolved")
+    try:
+        read_project_frame_at_commit(
+            root, objective.commit, current_commit=current_head)
+        current_frame = read_project_frame_at_commit(root, current_head)
+        current_fact = current_frame.fact(objective.fact_id)
+    except ProjectBriefError as error:
+        raise ObjectiveSuperseded(
+            f"objective_ref is not current project authority: {error}"
+        ) from error
+    if (current_frame.path != objective.path
+            or current_fact.digest != objective.fact_digest
+            or current_fact.binding != objective.binding):
+        raise ObjectiveSuperseded(
+            f"objective_ref {objective.fact_id} digest/binding differs from current HEAD")
 
 
 def append_validation(

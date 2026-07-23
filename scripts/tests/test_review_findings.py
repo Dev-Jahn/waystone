@@ -74,6 +74,10 @@ class FindingChainTests(unittest.TestCase):
         row.update(changes)
         return row
 
+    def commit(self, message: str, *paths: str) -> None:
+        subprocess.run(["git", "add", *paths], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", message], cwd=self.root, check=True)
+
     def test_immutable_claim_and_digest_bound_validation(self):
         claim = findings.write_claim(self.reviews, self.claim_payload())
         with self.assertRaises(findings.ImmutableArtifactConflict):
@@ -256,6 +260,122 @@ class FindingChainTests(unittest.TestCase):
                 self.reviews, self.run_id, self.finding_id, payload, root=self.root)
         self.assertIsNone(findings.disposition_head(
             self.reviews, self.run_id, self.finding_id))
+
+    def test_disposition_refuses_superseded_objective_before_append(self):
+        claim = findings.write_claim(self.reviews, self.claim_payload())
+        validation = findings.append_validation(
+            self.reviews, self.run_id, self.finding_id,
+            self.validation_payload(claim.digest), root=self.root)
+        old_ref = self.frame.fact_ref("commitment/outcome")
+        brief_path = self.root / "PROJECT_BRIEF.md"
+        brief_path.write_bytes(brief_path.read_bytes().replace(
+            b"Produce the intended result.", b"Produce the realigned intended result."))
+        self.commit("realign brief", "PROJECT_BRIEF.md")
+        payload = self.disposition_payload(claim.digest, validation.digest)
+        payload["objective_ref"] = old_ref.to_dict()
+
+        with self.assertRaises(findings.FindingError) as raised:
+            findings.append_disposition(
+                self.reviews, self.run_id, self.finding_id, payload, root=self.root)
+
+        self.assertEqual(raised.exception.code, "objective-superseded")
+        self.assertIsNone(findings.disposition_head(
+            self.reviews, self.run_id, self.finding_id))
+
+    def test_materialize_refuses_disposition_after_objective_is_superseded(self):
+        (self.root / ".waystone.yml").write_text("version: 1\nproject: test\n")
+        (self.root / "tasks.yaml").write_text("version: 1\nproject: test\ntasks: []\n")
+        claim = findings.write_claim(self.reviews, self.claim_payload())
+        validation = findings.append_validation(
+            self.reviews, self.run_id, self.finding_id,
+            self.validation_payload(claim.digest), root=self.root)
+        findings.append_disposition(
+            self.reviews, self.run_id, self.finding_id,
+            self.disposition_payload(claim.digest, validation.digest), root=self.root)
+        brief_path = self.root / "PROJECT_BRIEF.md"
+        brief_path.write_bytes(brief_path.read_bytes().replace(
+            b"Produce the intended result.", b"Produce the realigned intended result."))
+        self.commit("realign brief", "PROJECT_BRIEF.md")
+
+        with self.assertRaises(findings.FindingError) as raised:
+            review_group.materialize(self.root, self.run_id, self.finding_id)
+
+        self.assertEqual(raised.exception.code, "objective-superseded")
+        self.assertEqual(yaml.safe_load((self.root / "tasks.yaml").read_text())["tasks"], [])
+
+    def test_disposition_accepts_unchanged_objective_after_unrelated_commit(self):
+        claim = findings.write_claim(self.reviews, self.claim_payload())
+        validation = findings.append_validation(
+            self.reviews, self.run_id, self.finding_id,
+            self.validation_payload(claim.digest), root=self.root)
+        old_ref = self.frame.fact_ref("commitment/outcome")
+        (self.root / "unrelated.txt").write_text("unrelated\n")
+        self.commit("unrelated change", "unrelated.txt")
+        payload = self.disposition_payload(claim.digest, validation.digest)
+        payload["objective_ref"] = old_ref.to_dict()
+
+        disposition = findings.append_disposition(
+            self.reviews, self.run_id, self.finding_id, payload, root=self.root)
+
+        self.assertEqual(disposition.payload["objective_ref"], old_ref.to_dict())
+
+    def test_disposition_refuses_objective_deleted_from_current_brief(self):
+        claim = findings.write_claim(self.reviews, self.claim_payload())
+        validation = findings.append_validation(
+            self.reviews, self.run_id, self.finding_id,
+            self.validation_payload(claim.digest), root=self.root)
+        old_ref = self.frame.fact_ref("commitment/outcome")
+        brief_path = self.root / "PROJECT_BRIEF.md"
+        brief_path.write_bytes(brief_path.read_bytes().replace(
+            b"- [commitment/outcome] Produce the intended result.\n",
+            b"- [commitment/replacement] Produce the replacement result.\n"))
+        self.commit("replace objective", "PROJECT_BRIEF.md")
+        payload = self.disposition_payload(claim.digest, validation.digest)
+        payload["objective_ref"] = old_ref.to_dict()
+
+        with self.assertRaises(findings.FindingError) as raised:
+            findings.append_disposition(
+                self.reviews, self.run_id, self.finding_id, payload, root=self.root)
+
+        self.assertEqual(raised.exception.code, "objective-superseded")
+
+    def test_disposition_refuses_objective_binding_changed_in_current_brief(self):
+        claim = findings.write_claim(self.reviews, self.claim_payload())
+        validation = findings.append_validation(
+            self.reviews, self.run_id, self.finding_id,
+            self.validation_payload(claim.digest), root=self.root)
+        old_ref = self.frame.fact_ref("commitment/outcome")
+        brief_path = self.root / "PROJECT_BRIEF.md"
+        brief_path.write_bytes(brief_path.read_bytes().replace(
+            b"status: committed", b"status: provisional"))
+        self.commit("make brief provisional", "PROJECT_BRIEF.md")
+        payload = self.disposition_payload(claim.digest, validation.digest)
+        payload["objective_ref"] = old_ref.to_dict()
+
+        with self.assertRaises(findings.FindingError) as raised:
+            findings.append_disposition(
+                self.reviews, self.run_id, self.finding_id, payload, root=self.root)
+
+        self.assertEqual(raised.exception.code, "objective-superseded")
+
+    def test_disposition_refuses_objective_from_non_ancestor_commit(self):
+        claim = findings.write_claim(self.reviews, self.claim_payload())
+        validation = findings.append_validation(
+            self.reviews, self.run_id, self.finding_id,
+            self.validation_payload(claim.digest), root=self.root)
+        non_ancestor = subprocess.run(
+            ["git", "commit-tree", f"{self.head}^{{tree}}", "-m", "abandoned root"],
+            cwd=self.root, check=True, stdout=subprocess.PIPE, text=True,
+        ).stdout.strip()
+        payload = self.disposition_payload(claim.digest, validation.digest)
+        payload["objective_ref"] = dict(
+            self.frame.fact_ref("commitment/outcome").to_dict(), commit=non_ancestor)
+
+        with self.assertRaises(findings.FindingError) as raised:
+            findings.append_disposition(
+                self.reviews, self.run_id, self.finding_id, payload, root=self.root)
+
+        self.assertEqual(raised.exception.code, "objective-superseded")
 
     def test_disposition_refuses_fact_binding_mismatch_before_append(self):
         claim = findings.write_claim(self.reviews, self.claim_payload())
