@@ -350,3 +350,9 @@ tasks:
     status: "done"
     severity: "major"
     origin: "review-2026-07-23-013-provenance-closure"
+  - id: fix/runtime-publication-race
+    scope: ["waystone/runs/supervisor.py"]
+    title: "supervisor runtime.json publication race — _publish_exclusive가 O_CREAT|O_EXCL로 최종 경로를 내용 기록 전에 노출, 관측자가 0-byte 파일을 읽을 수 있음(test_run_cancel 간헐 실패 2건 실측, w0724 revroot 보고)"
+    status: "pending"
+    severity: "minor"
+    origin: "review-2026-07-23-013-provenance-closure"
