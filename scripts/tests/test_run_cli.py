@@ -31,9 +31,11 @@ from waystone.jobs.run_scaffold import RunScaffoldRefusal, scaffold_work_brief
 from waystone.project.brief import read_project_frame_at_commit
 from waystone.project.context import resolve_project_context
 from waystone.runs.artifacts import ArtifactStore
+from waystone.runs.preflight import EnvironmentPreparationUnavailableError
 from waystone.runs.spec import load_run_spec
 from waystone.runs.store import (
     EngineOwnedPathUnverifiableError, EntityKind, FilesystemInfo, RunStore)
+from waystone.runs.transport import ActionPlanRefusal
 
 
 class RunCliTests(unittest.TestCase):
@@ -339,6 +341,10 @@ class RunCliTests(unittest.TestCase):
         self.assertEqual(result, 2, output.getvalue())
         failure = json.loads(output.getvalue())
         self.assertEqual(failure["code"], "action_plan_invalid")
+        self.assertIn(
+            "WorkBrief semantic draft fields are not exact: missing",
+            failure["detail"],
+        )
         with mock.patch(
                 "waystone.runs.store._probe_state_filesystem",
                 return_value=FilesystemInfo(
@@ -347,6 +353,63 @@ class RunCliTests(unittest.TestCase):
             count = store._connection.execute(  # noqa: SLF001
                 "SELECT count(*) FROM runs").fetchone()[0]
         self.assertEqual(count, 0)
+
+    def test_start_refusal_exposes_actionable_work_brief_reason(self):
+        invalid = self.base / "invalid-work-brief.json"
+        body = json.loads(self.brief_path.read_bytes())
+        body["lifecycle_stage"] = "deploy"
+        invalid.write_bytes(completion.canonical_json(body))
+
+        with self.runtime() as output:
+            result = run_group.main([
+                "start", "feat/semantic-brief", "--work-brief", str(invalid),
+            ])
+
+        self.assertEqual(result, 2, output.getvalue())
+        failure = json.loads(output.getvalue())
+        self.assertEqual(failure["code"], "action_plan_invalid")
+        self.assertIn("work_brief_schema_refusal", failure["detail"])
+        self.assertIn(
+            "lifecycle_stage must be explore, evaluate, or promote",
+            failure["detail"],
+        )
+
+    def test_failure_codes_distinguish_authority_preflight_and_internal(self):
+        cases = (
+            (
+                ActionPlanRefusal("WorkBrief lifecycle_stage must be corrected"),
+                2,
+                "action_plan_invalid",
+                "WorkBrief lifecycle_stage must be corrected",
+            ),
+            (
+                EnvironmentPreparationUnavailableError(
+                    "frozen toolchain is unavailable"),
+                2,
+                "preflight_failed",
+                "frozen toolchain is unavailable",
+            ),
+            (
+                RuntimeError(
+                    "token=secret-value /private/runtime/path\n"
+                    "Traceback (most recent call last): ..."),
+                1,
+                "unclassified",
+                "RuntimeError",
+            ),
+        )
+        for error, expected_exit, expected_code, expected_detail in cases:
+            with self.subTest(code=expected_code), contextlib.redirect_stdout(
+                    io.StringIO()) as output:
+                result = run_group._failure(error)  # noqa: SLF001
+                failure = json.loads(output.getvalue())
+                self.assertEqual(result, expected_exit)
+                self.assertEqual(failure["code"], expected_code)
+                self.assertEqual(failure["detail"], expected_detail)
+                if expected_code == "unclassified":
+                    self.assertNotIn("secret-value", failure["detail"])
+                    self.assertNotIn("/private/runtime/path", failure["detail"])
+                    self.assertNotIn("Traceback", failure["detail"])
 
     def test_scaffold_derives_candidate_evaluation_and_promotion_lineage(self):
         binary = self.install_fixture_codex()

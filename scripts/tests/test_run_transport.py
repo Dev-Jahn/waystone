@@ -55,6 +55,7 @@ from waystone.runs.transport import (
     RunNotActionable,
     TransportFailureCode,
     TransportExitCode,
+    UnclassifiedTransportFailure,
     decode_envelope,
     encode_envelope,
     failure_envelope,
@@ -637,22 +638,46 @@ class RunTransportTests(unittest.TestCase):
                     TransportFailureCode.TRANSIENT_TRANSPORT_FAILURE.value)
                 self.assertIs(transient["recoverable"], True)
                 self.assertEqual(transient["next_actions"], [])
+        exit_code, transient = failure_envelope(ConnectionError(
+            "token=secret-value /private/runtime/path"))
+        self.assertEqual(exit_code, TransportExitCode.TEMPORARY_FAILURE)
+        self.assertEqual(transient["detail"], "ConnectionError")
+        self.assertNotIn("secret-value", transient["detail"])
+        self.assertNotIn("/private/runtime/path", transient["detail"])
         exit_code, terminal = failure_envelope(ResultSchemaMismatch("bad result"))
         self.assertEqual(exit_code, TransportExitCode.REFUSED)
         self.assertEqual(
             terminal["code"], TransportFailureCode.RESULT_SCHEMA_MISMATCH.value)
         self.assertIs(terminal["recoverable"], False)
+        self.assertEqual(terminal["detail"], "bad result")
         exit_code, stale = failure_envelope(
             LeasePrincipalMismatch("action-stale", "submit"))
         self.assertEqual(exit_code, TransportExitCode.REFUSED)
         self.assertEqual(stale["code"], TransportFailureCode.ACTION_NOT_CURRENT.value)
         self.assertIs(stale["recoverable"], False)
-        for error in (RuntimeError("unknown"), HttpFailure(404)):
+        for error in (
+                RuntimeError(
+                    "token=secret-value /private/runtime/path\n"
+                    "Traceback (most recent call last): ..."),
+                HttpFailure(404),
+                UnclassifiedTransportFailure(
+                    "token=secret-value /private/runtime/path\n"
+                    "Traceback (most recent call last): ..."),
+        ):
             with self.subTest(error=str(error)):
                 exit_code, unknown = failure_envelope(error)
                 self.assertEqual(exit_code, TransportExitCode.UNCLASSIFIED)
                 self.assertEqual(unknown["code"], "unclassified")
                 self.assertIs(unknown["recoverable"], False)
+                expected_detail = (
+                    type(error).__name__
+                    if not isinstance(error, UnclassifiedTransportFailure)
+                    else "UnclassifiedTransportFailure"
+                )
+                self.assertEqual(unknown["detail"], expected_detail)
+                self.assertNotIn("secret-value", unknown["detail"])
+                self.assertNotIn("/private/runtime/path", unknown["detail"])
+                self.assertNotIn("Traceback", unknown["detail"])
                 self.assertEqual(decode_envelope(encode_envelope(unknown)), unknown)
 
     def test_envelope_codec_accepts_registered_shapes_and_rejects_unknown_code(self):
@@ -666,7 +691,8 @@ class RunTransportTests(unittest.TestCase):
         for envelope in (outward, busy, submit):
             self.assertEqual(decode_envelope(encode_envelope(envelope)), envelope)
         unknown = {
-            "ok": False, "code": "future-code", "recoverable": False,
+            "ok": False, "code": "future-code", "detail": "future failure",
+            "recoverable": False,
             "next_actions": [],
         }
         raw = json.dumps(
@@ -675,6 +701,23 @@ class RunTransportTests(unittest.TestCase):
             decode_envelope(raw)
         with self.assertRaises(ValueError):
             encode_envelope(unknown)
+
+    def test_decoder_accepts_legacy_failure_envelope_without_detail(self):
+        legacy = {
+            "ok": False,
+            "code": TransportFailureCode.ACTION_PLAN_INVALID.value,
+            "recoverable": False,
+            "next_actions": [],
+        }
+        raw = json.dumps(
+            legacy, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        self.assertEqual(decode_envelope(raw), legacy)
+
+    def test_transport_exit_code_values_remain_stable(self):
+        self.assertEqual(int(TransportExitCode.OK), 0)
+        self.assertEqual(int(TransportExitCode.UNCLASSIFIED), 1)
+        self.assertEqual(int(TransportExitCode.REFUSED), 2)
+        self.assertEqual(int(TransportExitCode.TEMPORARY_FAILURE), 75)
 
 
 if __name__ == "__main__":

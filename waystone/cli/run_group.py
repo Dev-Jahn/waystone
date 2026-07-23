@@ -29,9 +29,11 @@ from waystone.runs.engine import (
     StagedRunEngine,
     load_review_cycle_chain,
 )
+from waystone.runs.preflight import PreflightError
 from waystone.runs.spec import PromotionLineage, ResultPolicy, load_run_spec
 from waystone.runs.transport import (
     ActionPlanRefusal,
+    PreflightFailure,
     TransportError,
     encode_envelope,
     failure_envelope,
@@ -467,9 +469,14 @@ def _json(value: Mapping[str, object]) -> str:
 def _failure(error: BaseException) -> int:
     if isinstance(error, TransportError):
         failure = error
+    elif isinstance(error, PreflightError):
+        detail = getattr(error, "detail", None)
+        failure = PreflightFailure(
+            detail if isinstance(detail, str) and detail else str(error))
     elif isinstance(error, WorkflowError):
-        code = getattr(error, "code", type(error).__name__)
-        failure = ActionPlanRefusal(f"{code}: {error}")
+        detail = getattr(error, "detail", None)
+        failure = ActionPlanRefusal(
+            detail if isinstance(detail, str) and detail else str(error))
     else:
         failure = error
     exit_code, envelope = failure_envelope(failure)

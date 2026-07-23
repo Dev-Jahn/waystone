@@ -103,13 +103,13 @@ supervisor schema 4종을 추가하고, artifact reference가 아닌 `fixture-ve
 ## 7. Transport wire
 
 - 인코딩: §2의 **ASCII-escaped** canonical JSON. `encode_envelope` / `decode_envelope`.
-- **Failure envelope**: exact key set `{"ok": false, "code": <TransportFailureCode>, "recoverable": <bool>, "next_actions": ...}`.
+- **Failure envelope**: exact key set `{"ok": false, "code": <TransportFailureCode>, "detail": <safe non-empty str>, "recoverable": <bool>, "next_actions": ...}`. 새 encoder는 `detail`을 필수로 내보내며 decoder는 0.12의 detail 없는 canonical failure envelope도 읽는다.
 - **Submit success envelope**: `{"action_id", "ok": true, "result_digest", "state"}`.
 - **`actions_next` 3분기 반환 형태**:
   - outward action: `{"action": {"action_id","action_kind","entity_version","executor_kind","fencing_epoch","input","input_digest","ownership","result_schema"}}` — `executor_kind ∈ {carrier, user}`, `ownership = {"expires_at", "kind":"engine-claim"}`.
   - busy: `{"action": null, "engine": "busy", "poll_after_s": <양수 int>, "run_state": <str>}`.
   - idle: `{"action": null, "engine": "idle", "reason": <IdleReason>, "run_state": <매핑값>}`.
-- **TransportFailureCode** (str enum): `transport_error`, `action_not_current`, `input_digest_mismatch`, `fencing_epoch_mismatch`, `result_schema_mismatch`, `artifact_digest_mismatch`, `git_facts_mismatch`, `action_plan_invalid`, `run_not_actionable`, `engine_executor_unavailable`, `engine_test_evidence_invalid`, `transient_transport_failure`, `unclassified`.
+- **TransportFailureCode** (str enum): `transport_error`, `action_not_current`, `input_digest_mismatch`, `fencing_epoch_mismatch`, `result_schema_mismatch`, `artifact_digest_mismatch`, `git_facts_mismatch`, `action_plan_invalid`, `run_not_actionable`, `engine_executor_unavailable`, `engine_test_evidence_invalid`, `preflight_failed`, `transient_transport_failure`, `unclassified`.
 - **IdleReason** (str enum): `run_completed`→run_state `completed`, `run_waiting_user`→`waiting_user`, `run_blocked`/`effect_unknown`/`effect_conflict`→`blocked`.
 - **TransportExitCode** (IntEnum): `OK=0`, `UNCLASSIFIED=1`, `REFUSED=2`, `TEMPORARY_FAILURE=75`. 매핑: transient/recoverable→75, terminal 계약 거부→2, 분류 불능→1, 성공→0.
 

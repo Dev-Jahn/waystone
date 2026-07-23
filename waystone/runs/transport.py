@@ -196,6 +196,7 @@ class TransportFailureCode(str, Enum):
     RUN_NOT_ACTIONABLE = "run_not_actionable"
     ENGINE_EXECUTOR_UNAVAILABLE = "engine_executor_unavailable"
     ENGINE_TEST_EVIDENCE_INVALID = "engine_test_evidence_invalid"
+    PREFLIGHT_FAILED = "preflight_failed"
     TRANSIENT_TRANSPORT_FAILURE = "transient_transport_failure"
     UNCLASSIFIED = "unclassified"
 
@@ -265,6 +266,10 @@ class EngineTestEvidenceRefusal(TransportError):
     code = TransportFailureCode.ENGINE_TEST_EVIDENCE_INVALID.value
 
 
+class PreflightFailure(TransportError):
+    code = TransportFailureCode.PREFLIGHT_FAILED.value
+
+
 class TransientTransportFailure(TransportError):
     code = TransportFailureCode.TRANSIENT_TRANSPORT_FAILURE.value
     recoverable = True
@@ -274,6 +279,20 @@ class UnclassifiedTransportFailure(TransportError):
     code = TransportFailureCode.UNCLASSIFIED.value
     # False authorizes no retry policy; the separate code preserves unknown classification.
     recoverable = False
+
+    def __init__(self, detail: str):
+        self._public_detail = type(self).__name__
+        super().__init__(detail)
+
+    @classmethod
+    def from_exception(cls, error: BaseException) -> "UnclassifiedTransportFailure":
+        failure = cls(str(error) or type(error).__name__)
+        failure._public_detail = type(error).__name__
+        return failure
+
+    @property
+    def public_detail(self) -> str:
+        return self._public_detail
 
     @property
     def exit_code(self) -> TransportExitCode:
@@ -303,35 +322,47 @@ def classify_transport_failure(error: BaseException) -> TransportError:
         if isinstance(candidate, (LeasePrincipalMismatch, LeasePrincipalUnknown)):
             return ActionNotCurrent(str(candidate))
         if isinstance(candidate, (ConnectionError, TimeoutError)):
-            return TransientTransportFailure(str(candidate) or type(candidate).__name__)
+            return TransientTransportFailure(type(candidate).__name__)
         try:
             status = getattr(candidate, "status_code", getattr(candidate, "status", None))
         except Exception:
             status = None
         if isinstance(status, int) and not isinstance(status, bool) and 500 <= status <= 599:
             return TransientTransportFailure(f"backend returned HTTP {status}")
-    return UnclassifiedTransportFailure(str(error) or type(error).__name__)
+    return UnclassifiedTransportFailure.from_exception(error)
 
 
 def failure_envelope(error: BaseException) -> tuple[TransportExitCode, dict[str, object]]:
     failure = classify_transport_failure(error)
+    detail = (
+        failure.public_detail
+        if isinstance(failure, UnclassifiedTransportFailure)
+        else failure.detail
+    )
     return failure.exit_code, {
         "ok": False,
         "code": failure.code,
+        "detail": detail,
         "recoverable": failure.recoverable,
         "next_actions": list(failure.next_actions),
     }
 
 
-def _validate_envelope(value: dict[str, object]) -> None:
+def _validate_envelope(
+        value: dict[str, object], *, allow_legacy_failure: bool = False) -> None:
     if value.get("ok") is False:
-        if set(value) != {"ok", "code", "recoverable", "next_actions"}:
+        fields = {"ok", "code", "detail", "recoverable", "next_actions"}
+        legacy_fields = fields - {"detail"}
+        if set(value) != fields and not (
+                allow_legacy_failure and set(value) == legacy_fields):
             raise ValueError("failure envelope fields are not canonical")
         try:
             code = TransportFailureCode(value["code"])
         except (TypeError, ValueError) as error:
             raise ValueError("failure envelope code is not registered") from error
-        if (not isinstance(value["recoverable"], bool)
+        if (("detail" in value
+             and (not isinstance(value["detail"], str) or not value["detail"]))
+                or not isinstance(value["recoverable"], bool)
                 or value["next_actions"] != []):
             raise ValueError("failure envelope values are malformed")
         expected_recoverable = code is TransportFailureCode.TRANSIENT_TRANSPORT_FAILURE
@@ -422,7 +453,7 @@ def decode_envelope(payload: bytes) -> dict[str, object]:
         raise ValueError("transport envelope is not valid UTF-8 JSON") from error
     if not isinstance(value, dict) or _canonical_bytes(value) != payload:
         raise ValueError("transport envelope is not a canonical object")
-    _validate_envelope(value)
+    _validate_envelope(value, allow_legacy_failure=True)
     return value
 
 
@@ -1055,7 +1086,8 @@ __all__ = [
     "ActionNotCurrent", "ActionPlanRefusal", "ActionResultSchema", "ActionTransport",
     "ArtifactDigestMismatch", "EngineExecutorUnavailable", "EngineTestEvidenceRefusal",
     "FencingEpochMismatch", "GitFactsMismatch", "IdleReason", "InputDigestMismatch",
-    "ResultField", "ResultSchemaMismatch", "ResultValueKind", "RunNotActionable",
+    "PreflightFailure", "ResultField", "ResultSchemaMismatch", "ResultValueKind",
+    "RunNotActionable",
     "TestResultAuthority", "TransientTransportFailure", "TransportError",
     "TransportExitCode", "TransportFailureCode",
     "UnclassifiedTransportFailure", "classify_transport_failure", "decode_envelope",
