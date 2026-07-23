@@ -2,6 +2,19 @@
 
 round 단위 작업 이력이 이 파일에 축적된다. 활성 task와 의존성은 `tasks.yaml`(CLI: `waystone task`)과 생성 파일 `ROADMAP.md` 참조.
 
+## 2026-07-24-013-authority-closure
+
+- **Goal**: 재리뷰 회신(CHANGES REQUESTED — Critical 0/Major 3, WS-GPT-026·027·028 전량 REAL 확정) 폐쇄. w0724 wave: codex 3기(sol xhigh/high/high) 병렬·worktree 격리(base 1ded7e7), 전 기 main 독립 재검증(전체 게이트 재실행·base-RED 재현·diff 정독).
+- **Shipped**:
+  - fix/runner-environment-provenance — waystone/runs/environment.py 명시 allowlist builder+결정적 env digest, invocation digest·supervisor launch v2·promotion verifier evidence에 결속, 전 subprocess 명시 env= 전달, 실행 파일 탐색도 frozen PATH, detached 자식이 digest fail-loud 재검증, PYTHONPATH 하네스 주입 폐지(R5 — runner는 codex exec라 waystone import 불요; supervisor bootstrap만 package-root cwd 명시) (done; 7465ae7, 원 e3f38a1+3bb8d30)
+  - fix/promotion-private-integration-ref — promotion target을 checked-out branch에서 refs/waystone/integration/<brief_id>로(최초 zero-OID CAS 생성·기존 ref 보존·expected-old CAS 의미론 유지), PC-17 _checked_out_target_ref를 staged promotion apply 직전에 강제, CLI 완료 보고에 private ref+live-tree delivery 미수행 명시, e2e6 blindspot 역단언 교정(public OID·bytes·index·status 불변+private ref 이동) (done; e179adb, 원 3646a65; ruling: promotion≠delivery — open Q1 권고안 채택, 0.13 public branch 불이동)
+  - fix/review-canonical-root-authority — review 전 subcommand가 _review_context front door(resolve_project_context) 경유, linked worktree mutation·명시 --root <linked> 모두 canonical_root_is_linked_worktree typed refusal, materialize는 canonical ProjectContext proof 없이 tasks_cli.cmd_add 진입 불가 (done; 3075205, 원 c59f539)
+- **Gates**: full suite 271→**284** green(wave 조합 gate + registry 커밋 전 재확인). 전 task base-RED main 독립 재현 — 026 구조 RED(environment 모듈 부재)·027 신규 3건 구조 RED+e2e6 FAIL on base·028 4/4 FAIL(base에서 stale disposition 기록·linked materialize가 실제 성공하는 장면 실연). 각 worktree 전체 게이트도 main이 재실행(274·275·277).
+- **Incidents**: 없음 — 3기 전부 1회 발진 DONE(재발진 0). 범위 밖 발견 1건: supervisor runtime.json 0-byte publication race(간헐 test_run_cancel 실패, 기존 결함) → fix/runtime-publication-race(minor) 등록.
+- **Decisions**: open Q2 allowlist ruling 5건(R1–R5)을 브리프에 pre-register 후 구현 — GIT_* 전면 제거·PYTHONPATH/uv-redirect 제거(UV_CACHE_DIR은 통과하되 digest 관측)·기본 allowlist(PATH/HOME/locale/TERM/TMPDIR/USER/SHELL/proxy)·HOME 격리 0.13 비대상·하네스 주입은 제거 선택(필요성 실측 결과 불요). 외부 도구 설정 파일 내용 digest는 known boundary(비-범위 유지).
+- **Review**: 리뷰어의 release 보류 사유(major 3) 전량 폐쇄 — 재리뷰 요청 이 round에서 게시(이번 회신이 release 판정 질문).
+- **Next**: 재리뷰 회신 대기 → 실 release(owner; 잔여 판단 2건은 chore/013-release-prep notes) → feat/lifecycle-maintenance-path(major) → M1-B minor 재평가 → GC 계열(candidate-contexts + private integration ref durable 누적).
+
 ## 2026-07-23-013-provenance-closure
 
 - **Goal**: 직전 리뷰 회신(CHANGES REQUESTED — Critical 0/Major 3, WS-GPT-023·024·025 전량 REAL 확정) 폐쇄 + 알려진 버그 잔여(fix/run-start-refusal-diagnosability) + open Q2 + README 재작성. w0723c wave: codex 4기(sol xhigh/high/medium) 병렬·worktree 격리, finding당 적대 verifier 3기 선행, 전 기 main 독립 재검증(base-RED 재현·스위트 재실행·diff 검독).
