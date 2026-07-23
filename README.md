@@ -18,6 +18,13 @@ accepted objective progress.
 `ideate` is one skill with two modes: framing when no brief exists and realignment when one exists.
 Its output is always provisional. Adoption requires the typed `waystone brief adopt` gate.
 
+## v1 execution scope
+
+Waystone v1 staged execution supports external Codex workers and evaluators only. The profile schema
+declares `in-session`, `subagent`, and `external` execution categories, but the staged engine does
+not yet implement in-session or subagent carriers. Canonical routing based on context-transfer cost
+is also not implemented, so the declared categories must not be read as three supported runtimes.
+
 ## Authority boundaries
 
 The worker receives semantic context and provenance, not harness bookkeeping. A worker result is a

@@ -8,6 +8,11 @@ Use `waystone brief`, `waystone run`, `waystone review`, and `waystone status` f
 freezes one stage and one semantic WorkBrief. A worker proposes; independent verification and owner
 gates decide. Review claim, validation, and disposition remain separate.
 
+In v1, staged execution supports external Codex workers and evaluators only. Profiles may declare
+`in-session`, `subagent`, and `external`, but in-session and subagent carriers and
+context-transfer-cost-based routing are not implemented. These declarations are not a claim that
+all three execution paths are supported.
+
 Task registry entries represent selected work only. Findings, probes, and summaries do not become
 tasks or permanent tests automatically. Status counts are audit context; objective progress comes
 only from evidence-bound OutcomeDelta records.

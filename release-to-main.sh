@@ -24,23 +24,18 @@ SHIP_PATHS=(
   scripts/cclog.py
   scripts/codexlog.py
   scripts/common.py
-  scripts/dashboard.py
-  scripts/delegate.py
   scripts/improve.py
-  scripts/lanes.py
   scripts/merge.py
   scripts/overlay.py
   scripts/remote.py
   scripts/resume.py
-  scripts/review.py
   scripts/roadmap.py
-  scripts/round.py
-  scripts/ssot.py
   scripts/tasks.py
   scripts/validate.py
   scripts/waystone.py
   skills
   templates
+  waystone
 )
 
 # Deliberate dev-only surface. Both manifests are expanded to tracked file paths below, so a new
@@ -53,7 +48,6 @@ DEV_ONLY_PATHS=(
   dev_docs
   PROGRESS.md
   ROADMAP.md
-  SSOT.md
   docs
   release-to-main.sh
   scripts/tests
@@ -124,6 +118,7 @@ main_oid=$(git rev-parse --verify 'refs/heads/main^{commit}')
 tmpdir=$(mktemp -d "$tmp_base/waystone-release.XXXXXX")
 test_worktree="$tmpdir/dev"
 projected_worktree="$tmpdir/projected"
+smoke_project="$tmpdir/project"
 smoke_home="$tmpdir/home"
 release_index="$tmpdir/index"
 release_result_succeeded=0
@@ -205,6 +200,8 @@ main_tree=$(git rev-parse "$main_oid^{tree}")
 git worktree add --detach -q "$projected_worktree" "$main_oid"
 git -C "$projected_worktree" read-tree --reset -u "$release_tree"
 git -C "$projected_worktree" update-index -q --refresh
+git clone --no-hardlinks --no-checkout -q "$repo_root" "$smoke_project"
+git -C "$smoke_project" checkout --detach -q "$dev_oid"
 mkdir -p "$smoke_home"
 smoke_env=(
   PATH="$PATH"
@@ -223,7 +220,19 @@ fi
 echo "release: running the projected release smoke…"
 if ! (
   cd "$projected_worktree"
-  env -i "${smoke_env[@]}" ./bin/waystone status >/dev/null
+  env -i "${smoke_env[@]}" ./bin/waystone project register "$smoke_project" >/dev/null
+  env -i "${smoke_env[@]}" ./bin/waystone brief check "$smoke_project" >/dev/null
+  env -i "${smoke_env[@]}" ./bin/waystone status --project "$smoke_project" >/dev/null
+  refusal="$tmpdir/run-start-refusal.json"
+  if env -i "${smoke_env[@]}" ./bin/waystone run start >"$refusal"; then
+    echo "release: projected run start unexpectedly succeeded without required inputs" >&2
+    exit 1
+  fi
+  if ! grep -Fq '"code":"action_plan_invalid"' "$refusal"; then
+    echo "release: projected run start did not return the typed input refusal" >&2
+    exit 1
+  fi
+  env -i "${smoke_env[@]}" ./bin/waystone review --help >/dev/null
 ); then
   echo "release: projected release smoke failed — aborting." >&2
   exit 1

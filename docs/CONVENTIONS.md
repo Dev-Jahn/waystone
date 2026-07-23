@@ -20,6 +20,11 @@ context and item-level provenance; it does not carry harness bookkeeping. A cont
 no-change waiting state and resumes through a new response/brief/spec/attempt. Stage cannot be
 changed after failure to reclassify a result.
 
+In v1, staged execution supports external Codex workers and evaluators only. Although profiles can
+declare `in-session`, `subagent`, and `external` execution categories, in-session and subagent
+carriers are not implemented. Context-transfer-cost-based routing is also not implemented; the
+category declarations are not a claim that all three execution paths are supported.
+
 ## 4. Review and progress
 
 Review feedback is immutable claim evidence. Validation establishes validity/failure mechanism;
